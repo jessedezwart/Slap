@@ -19,6 +19,7 @@ Some supported sources:
 - YouTube
 - SoundCloud
 - Bandcamp
+- Spotify playlists (metadata imported from Spotify, audio matched on YouTube; setup below)
 
 Full list is here: https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md
 
@@ -92,6 +93,41 @@ and does not require **Deafen Members**. The existing `GUILD_VOICE_STATES` inten
 supplies channel occupancy updates.
 
 Restart the bot after updating to register the new slash commands.
+
+## Spotify playlists
+
+Configure `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, and
+`SPOTIFY_REFRESH_TOKEN` in `.env`, then restart the bot. Spotify is optional;
+other sources work without these settings.
+
+1. Create an app in the [Spotify developer dashboard](https://developer.spotify.com/dashboard).
+2. Use Spotify's [Authorization Code flow](https://developer.spotify.com/documentation/web-api/tutorials/code-flow)
+   to authorize the account whose playlists the bot will import. Register the
+   redirect URI in the dashboard and request `playlist-read-private` and
+   `playlist-read-collaborative`. Exchange the authorization code for tokens,
+   and put the returned **refresh token** in `SPOTIFY_REFRESH_TOKEN`.
+   A client-credentials token does not represent a user and is insufficient.
+3. Run `/play url:https://open.spotify.com/playlist/PLAYLIST_ID`.
+   Add `shuffle:true` to shuffle before enqueueing.
+
+The bot reads playlist pages in order, up to 500 entries, and searches YouTube
+for each track's **artist(s) + song name** when playback approaches. It uses the
+first search result, so a live version, cover, or other mismatch is possible.
+Local files, episodes, removed tracks and entries without artist/title metadata
+are skipped. Failed YouTube playback advances to the next queued track.
+Full playlist URLs (including localized `intl-...` URLs and share parameters)
+are supported; shortened `spotify.link` URLs, albums, and individual Spotify
+track links are not.
+
+Spotify [restricts playlist contents](https://developer.spotify.com/documentation/web-api/reference/get-playlists-items)
+to playlists the authorized account owns or collaborates on. Arbitrary public
+playlists therefore cannot be imported through this integration. Development
+apps also require an app owner with Premium and have user allowlist limits; see
+[Spotify's development-mode rules](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide).
+All Discord users of this bot use the same configured Spotify account.
+Access tokens refresh automatically for imports. If Spotify returns a rotated
+refresh token it is retained in memory; reauthorize/update `.env` if authorization
+fails after a restart.
 
 ## Notes on behaviour
 

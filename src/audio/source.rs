@@ -15,12 +15,11 @@ use songbird::input::{
 use symphonia_core::io::MediaSource;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
-use url::Url;
 
 use crate::{
     audio::{
         stream::{PrefetchStream, SourceSpec},
-        ytdlp::{Resolved, YtDlp},
+        ytdlp::{PlaybackTarget, Resolved, YtDlp},
     },
     config::BufferConfig,
     error::AudioError,
@@ -34,7 +33,7 @@ const ADAPTER_BUFFER_BYTES: usize = 64 * 1024;
 const RESOLVE_TTL: Duration = Duration::from_secs(60);
 
 pub struct OpusYtSource {
-    url: Url,
+    target: PlaybackTarget,
     client: Client,
     ytdlp: YtDlp,
     buffer: BufferConfig,
@@ -46,14 +45,14 @@ pub struct OpusYtSource {
 
 impl OpusYtSource {
     pub fn new(
-        url: Url,
+        target: impl Into<PlaybackTarget>,
         client: Client,
         ytdlp: YtDlp,
         buffer: BufferConfig,
         cancel: CancellationToken,
     ) -> Self {
         Self {
-            url,
+            target: target.into(),
             client,
             ytdlp,
             buffer,
@@ -76,7 +75,7 @@ impl OpusYtSource {
 
         let resolved = tokio::select! {
             () = self.cancel.cancelled() => return Err(AudioError::Cancelled),
-            result = self.ytdlp.resolve(&self.url) => result?,
+            result = self.ytdlp.resolve(&self.target) => result?,
         };
 
         self.cached = Some((resolved.clone(), Instant::now()));

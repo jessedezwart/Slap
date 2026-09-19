@@ -142,6 +142,7 @@ async fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sy
         songbird,
         sessions: Arc::clone(&sessions),
         ytdlp: YtDlp::new(config.ytdlp.clone()),
+        spotify: crate::audio::spotify::Spotify::new(config.spotify.clone())?,
         client: reqwest::Client::builder()
             .user_agent("rust-music-bot")
             .build()?,

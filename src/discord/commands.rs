@@ -171,9 +171,16 @@ async fn play(
 
     // Also covers a caller leaving during the join handshake.
     crate::discord::events::reconcile_voice(Arc::clone(state), guild_id);
+    let list = async {
+        if crate::audio::spotify::is_spotify_url(&url) {
+            state.spotify.list(&url).await
+        } else {
+            state.ytdlp.list(&url).await
+        }
+    };
     let mut listing = tokio::select! {
         () = cancel.cancelled() => return Err(AudioError::Cancelled.into()),
-        result = state.ytdlp.list(&url) => result?,
+        result = list => result?,
     };
     if listing.tracks.is_empty() {
         return Ok("That playlist contains no accessible tracks.".into());
@@ -193,7 +200,7 @@ async fn play(
         .into_iter()
         .map(|entry| {
             let mut source = OpusYtSource::new(
-                entry.url,
+                entry.target,
                 state.client.clone(),
                 state.ytdlp.clone(),
                 state.config.buffer,

@@ -15,7 +15,46 @@ pub struct Config {
     /// Tokio worker threads, or `None` for one per available core.
     pub worker_threads: Option<usize>,
     pub ytdlp: YtDlpConfig,
+    pub spotify: Option<SpotifyConfig>,
     pub buffer: BufferConfig,
+}
+
+#[derive(Clone)]
+pub struct SpotifyConfig {
+    pub client_id: String,
+    pub client_secret: String,
+    pub refresh_token: String,
+}
+
+impl std::fmt::Debug for SpotifyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SpotifyConfig { credentials: [redacted] }")
+    }
+}
+
+impl SpotifyConfig {
+    fn from_env() -> Result<Option<Self>, ConfigError> {
+        let names = [
+            "SPOTIFY_CLIENT_ID",
+            "SPOTIFY_CLIENT_SECRET",
+            "SPOTIFY_REFRESH_TOKEN",
+        ];
+        let values = names.map(|name| env::var(name).unwrap_or_default().trim().to_owned());
+        if values.iter().all(String::is_empty) {
+            return Ok(None);
+        }
+        for (name, value) in names.iter().zip(&values) {
+            if value.is_empty() {
+                return Err(ConfigError::Missing(name));
+            }
+        }
+        let [client_id, client_secret, refresh_token] = values;
+        Ok(Some(Self {
+            client_id,
+            client_secret,
+            refresh_token,
+        }))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +124,7 @@ impl Config {
         Ok(Self {
             token,
             worker_threads: parse_worker_threads()?,
+            spotify: SpotifyConfig::from_env()?,
             ytdlp: YtDlpConfig {
                 program: env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),
                 timeout: Duration::from_millis(parse_env("YTDLP_TIMEOUT_MS", 15_000u64)?),

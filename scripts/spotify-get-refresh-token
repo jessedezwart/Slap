@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Authorize Spotify once and print a SPOTIFY_REFRESH_TOKEN assignment."""
+
+import argparse
+import base64
+import hashlib
+import hmac
+import http.server
+import json
+import secrets
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+REDIRECT_URI = "http://127.0.0.1:8888/callback"
+SCOPES = "playlist-read-private playlist-read-collaborative"
+
+
+def authorization_url(client_id, state, verifier):
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
+    return "https://accounts.spotify.com/authorize?" + urllib.parse.urlencode({
+        "client_id": client_id,
+        "response_type": "code",
+        "redirect_uri": REDIRECT_URI,
+        "scope": SCOPES,
+        "state": state,
+        "code_challenge_method": "S256",
+        "code_challenge": challenge,
+    })
+
+
+def callback_result(path, expected_state):
+    """Return (status, browser message, code, terminal error)."""
+    url = urllib.parse.urlsplit(path)
+    if url.path != "/callback":
+        return 404, "Not found.", None, None
+    query = urllib.parse.parse_qs(url.query, keep_blank_values=True)
+    states = query.get("state", [])
+    if len(states) != 1 or not hmac.compare_digest(
+        states[0].encode("utf-8"), expected_state.encode("utf-8")
+    ):
+        return 400, "Invalid OAuth state. Open the link printed by the script.", None, None
+    if "error" in query:
+        message = "Spotify authorization was denied or failed. Run the script again to retry."
+        return 400, message, None, message
+    codes = query.get("code", [])
+    if len(codes) != 1 or not codes[0]:
+        return 400, "Missing authorization code. Open the original link again.", None, None
+    return 200, "Callback received. Check the terminal for the token exchange result. You can close this tab.", codes[0], None
+
+
+class CallbackServer(http.server.HTTPServer):
+    def get_request(self):
+        connection, address = super().get_request()
+        connection.settimeout(5)
+        return connection, address
+
+
+def callback_handler(state, result):
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            # The request URL contains a sensitive authorization code.
+            pass
+
+        def do_GET(self):
+            status, message, code, error = callback_result(self.path, state)
+            body = message.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.end_headers()
+            if code or error:
+                result.update(code=code, error=error)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    return Handler
+
+
+def exchange_code(client_id, client_secret, code, verifier):
+    credentials = base64.b64encode(
+        f"{client_id}:{client_secret}".encode("utf-8")
+    ).decode("ascii")
+    request = urllib.request.Request(
+        "https://accounts.spotify.com/api/token",
+        data=urllib.parse.urlencode({
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": REDIRECT_URI,
+            "code_verifier": verifier,
+        }).encode("ascii"),
+        headers={
+            "Authorization": f"Basic {credentials}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.load(response)
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(
+            f"Spotify token exchange failed (HTTP {error.code}). Check the client ID, "
+            "secret and registered redirect URI, then run the script again."
+        ) from None
+    except (urllib.error.URLError, TimeoutError, OSError):
+        raise RuntimeError("Could not reach Spotify's token endpoint. Run the script again.") from None
+    except (ValueError, UnicodeError):
+        raise RuntimeError("Spotify returned an invalid token response.") from None
+    token = payload.get("refresh_token") if isinstance(payload, dict) else None
+    if not isinstance(token, str) or not token or any(c.isspace() for c in token):
+        raise RuntimeError("Spotify did not return a valid refresh token. Run the script again.")
+    return token
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, epilog=(
+        f"Register {REDIRECT_URI} in your Spotify app's Redirect URIs first. "
+        "The browser must reach port 8888 on the machine running this script."
+    ))
+    parser.add_argument("client_id", help="Spotify application client ID")
+    parser.add_argument("client_secret", help="Spotify application client secret")
+    args = parser.parse_args()
+    if not args.client_id.strip() or not args.client_secret.strip():
+        parser.error("client ID and secret must not be empty")
+    state = secrets.token_urlsafe(32)
+    verifier = secrets.token_urlsafe(64)
+    result = {}
+    try:
+        with CallbackServer(("127.0.0.1", 8888), callback_handler(state, result)) as server:
+            server.timeout = 1
+            print(f"Register this redirect URI: {REDIRECT_URI}\n", file=sys.stderr)
+            print("Open this URL in your browser and approve access:", file=sys.stderr)
+            print(authorization_url(args.client_id, state, verifier), file=sys.stderr, flush=True)
+            print("\nWaiting up to 5 minutes for Spotify's callback...", file=sys.stderr)
+            deadline = time.monotonic() + 300
+            while not result and time.monotonic() < deadline:
+                server.handle_request()
+            if not result:
+                raise RuntimeError("Timed out waiting for authorization. Run the script again.")
+            if result.get("error"):
+                raise RuntimeError(result["error"])
+        token = exchange_code(args.client_id, args.client_secret, result["code"], verifier)
+        print("Copy the following assignment into the bot's .env file:", file=sys.stderr)
+        print(f"SPOTIFY_REFRESH_TOKEN={token}")
+        return 0
+    except KeyboardInterrupt:
+        print("\nAuthorization cancelled.", file=sys.stderr)
+        return 130
+    except OSError:
+        print("Could not use callback listener 127.0.0.1:8888. Check whether the port is already in use.", file=sys.stderr)
+        return 1
+    except RuntimeError as error:
+        print(str(error), file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

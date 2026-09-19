@@ -53,9 +53,22 @@ pub struct YtDlp {
 /// Limit imports so accidental channel/radio links cannot create an unbounded queue.
 pub const PLAYLIST_LIMIT: usize = 500;
 
+/// Searches are kept lazy, just like direct video URLs.
+#[derive(Debug, Clone)]
+pub enum PlaybackTarget {
+    Url(Url),
+    YoutubeSearch(String),
+}
+
+impl From<Url> for PlaybackTarget {
+    fn from(url: Url) -> Self {
+        Self::Url(url)
+    }
+}
+
 #[derive(Debug)]
 pub struct ListedTrack {
-    pub url: Url,
+    pub target: PlaybackTarget,
     pub metadata: TrackMetadata,
 }
 
@@ -85,7 +98,7 @@ impl YtDlp {
     }
 
     /// Run `yt-dlp -j` and turn its JSON into a [`Resolved`].
-    pub async fn resolve(&self, url: &Url) -> Result<Resolved, AudioError> {
+    pub async fn resolve(&self, target: &PlaybackTarget) -> Result<Resolved, AudioError> {
         let mut cmd = Command::new(&self.config.program);
 
         cmd.arg("-j")
@@ -99,7 +112,11 @@ impl YtDlp {
             cmd.arg(arg);
         }
 
-        let output = self.run(cmd, url).await?;
+        let input = match target {
+            PlaybackTarget::Url(url) => url.to_string(),
+            PlaybackTarget::YoutubeSearch(query) => format!("ytsearch1:{query}"),
+        };
+        let output = self.run(cmd, &input).await?;
         parse_output(&output)
     }
 
@@ -119,13 +136,13 @@ impl YtDlp {
             ])
             .arg((PLAYLIST_LIMIT + 1).to_string())
             .args(["-f", OPUS_FORMAT]);
-        let output = self.run(cmd, url).await?;
+        let output = self.run(cmd, url.as_str()).await?;
         parse_list(&output, url)
     }
 
-    async fn run(&self, mut cmd: Command, url: &Url) -> Result<Vec<u8>, AudioError> {
+    async fn run(&self, mut cmd: Command, input: &str) -> Result<Vec<u8>, AudioError> {
         // `--` so a URL starting with `-` can never be read as an option.
-        cmd.arg("--").arg(url.as_str());
+        cmd.arg("--").arg(input);
 
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -178,7 +195,7 @@ fn parse_list(stdout: &[u8], original: &Url) -> Result<MediaList, AudioError> {
         let resolved = parse_output(stdout)?;
         return Ok(MediaList {
             tracks: vec![ListedTrack {
-                url: original.clone(),
+                target: original.clone().into(),
                 metadata: resolved.metadata.clone(),
             }],
             skipped: 0,
@@ -215,7 +232,7 @@ fn parse_list(stdout: &[u8], original: &Url) -> Result<MediaList, AudioError> {
                 webpage_url: Some(url.to_string()),
                 ..TrackMetadata::default()
             },
-            url,
+            target: url.into(),
         });
     }
     Ok(MediaList {
@@ -358,6 +375,48 @@ struct Format {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn youtube_search_is_one_literal_argument_and_resolves_audio() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "rust-music-bot-ytdlp-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        // Fake yt-dlp rejects anything except the exact argv contract, including
+        // shell metacharacters that must reach it as literal song-name text.
+        std::fs::write(
+            &path,
+            r#"#!/bin/sh
+[ "$#" -eq 8 ] || exit 1
+[ "$1" = '-j' ] || exit 2
+[ "$2" = '--no-playlist' ] || exit 3
+[ "$6" = 'bestaudio[acodec=opus]' ] || exit 4
+[ "$7" = '--' ] || exit 5
+[ "$8" = 'ytsearch1:Artist Song $(literal); & more' ] || exit 6
+printf '%s\n' '{"title":"Matched song","url":"https://example.com/audio","acodec":"opus"}'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let ytdlp = YtDlp::new(YtDlpConfig {
+            program: path.to_string_lossy().into_owned(),
+            timeout: Duration::from_secs(5),
+            extra_args: Vec::new(),
+        });
+        let result = ytdlp
+            .resolve(&PlaybackTarget::YoutubeSearch(
+                "Artist Song $(literal); & more".into(),
+            ))
+            .await;
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(
+            result.unwrap().metadata.title.as_deref(),
+            Some("Matched song")
+        );
+    }
+
     #[test]
     fn playlist_preserves_order_and_skips_invalid_or_unavailable_entries() {
         let json = br#"{"entries":[
@@ -375,7 +434,13 @@ mod tests {
             list.tracks[0].metadata.duration,
             Some(Duration::from_millis(123500))
         );
-        assert_eq!(list.tracks[1].url.as_str(), "https://example.com/last");
+        assert_eq!(
+            match &list.tracks[1].target {
+                PlaybackTarget::Url(url) => url.as_str(),
+                _ => panic!("expected URL"),
+            },
+            "https://example.com/last"
+        );
         assert_eq!(list.tracks[1].metadata.duration, None);
         assert!(list.single.is_none());
         assert!(!list.truncated);
@@ -403,7 +468,7 @@ mod tests {
             &url,
         )
         .unwrap();
-        assert_eq!(list.tracks[0].url, url);
+        assert!(matches!(&list.tracks[0].target, PlaybackTarget::Url(actual) if actual == &url));
         assert_eq!(
             list.single.unwrap().media_url,
             "https://cdn.example.com/audio"

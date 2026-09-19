@@ -10,6 +10,9 @@ pub enum AudioError {
     #[error("`{0}` is not a valid HTTP(S) link")]
     UnsupportedUrl(String),
 
+    #[error("Spotify: {0}")]
+    Spotify(String),
+
     #[error("could not run `{program}`: {source}")]
     Spawn {
         program: String,

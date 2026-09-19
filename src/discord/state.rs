@@ -21,6 +21,7 @@ pub struct State {
     pub songbird: Arc<Songbird>,
     pub sessions: Arc<SessionManager>,
     pub ytdlp: YtDlp,
+    pub spotify: crate::audio::spotify::Spotify,
     /// Shared connection pool for every audio fetch.
     pub client: reqwest::Client,
     pub application_id: Id<ApplicationMarker>,
