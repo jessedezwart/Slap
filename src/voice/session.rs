@@ -18,18 +18,20 @@ use songbird::{
     tracks::{Track, TrackHandle},
 };
 use tokio::sync::{
-    Mutex, OwnedMutexGuard,
+    Mutex, Notify, OwnedMutexGuard,
     mpsc::{self, UnboundedReceiver, UnboundedSender},
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use twilight_model::id::{
     Id,
-    marker::{ChannelMarker, GuildMarker},
+    marker::{ChannelMarker, GuildMarker, MessageMarker},
 };
 
 use crate::audio::ytdlp::TrackMetadata;
-use crate::voice::events::{DriverDisconnectNotifier, TrackErrorNotifier, VoiceCommand};
+use crate::voice::events::{
+    DriverDisconnectNotifier, PlayerNotifier, TrackErrorNotifier, VoiceCommand,
+};
 
 /// How far into a track the next one starts loading, matching the lead
 /// songbird's own `enqueue` would have picked.
@@ -39,6 +41,8 @@ const PRELOAD_LEAD: Duration = Duration::from_secs(5);
 pub struct GuildSession {
     pub channel_id: Id<ChannelMarker>,
     pub cancel: CancellationToken,
+    pub updates: Arc<Notify>,
+    pub panel_message: Option<Id<MessageMarker>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +61,9 @@ pub enum SessionError {
 
     #[error("the track finished before the command could be applied")]
     TrackFinished,
+
+    #[error("this player has expired; use the current player or a slash command")]
+    StalePanel,
 }
 
 pub struct SessionManager {
@@ -116,6 +123,7 @@ impl SessionManager {
         self.teardown_locked(guild_id, "reconnecting").await;
 
         let cancel = CancellationToken::new();
+        let updates = Arc::new(Notify::new());
         let call = self.songbird.get_or_insert(guild_id);
 
         {
@@ -132,6 +140,15 @@ impl SessionManager {
                 },
             );
             call.add_global_event(TrackEvent::Error.into(), TrackErrorNotifier);
+            for event in [
+                TrackEvent::Play,
+                TrackEvent::Pause,
+                TrackEvent::End,
+                TrackEvent::Error,
+                TrackEvent::Playable,
+            ] {
+                call.add_global_event(event.into(), PlayerNotifier(Arc::clone(&updates)));
+            }
         }
 
         self.sessions.insert(
@@ -139,6 +156,8 @@ impl SessionManager {
             GuildSession {
                 channel_id,
                 cancel: cancel.clone(),
+                updates,
+                panel_message: None,
             },
         );
 
@@ -176,6 +195,7 @@ impl SessionManager {
             let track = Track::new_with_data(input, Arc::new(metadata));
             call.enqueue_with_preload(track, preload);
         }
+        self.notify_player(guild_id);
         Ok(position)
     }
 
@@ -185,8 +205,19 @@ impl SessionManager {
         guild_id: Id<GuildMarker>,
         channel_id: Id<ChannelMarker>,
         command: &str,
+        page: usize,
+        panel_message: Option<Id<MessageMarker>>,
     ) -> Result<ControlResult, SessionError> {
         let _guard = self.lock(guild_id).await;
+        // Check the message identity inside the same lock as the action. An old
+        // button must never stop a replacement session, even after a reconnect.
+        if let Some(message_id) = panel_message
+            && !self.sessions.get(&guild_id).is_some_and(|session| {
+                session.panel_message == Some(message_id) && !session.cancel.is_cancelled()
+            })
+        {
+            return Err(SessionError::StalePanel);
+        }
         let current = self
             .channel_of(guild_id)
             .ok_or(SessionError::NotConnected)?;
@@ -206,7 +237,27 @@ impl SessionManager {
         let call = call.lock().await;
         let queue = call.queue();
         if command == "queue" {
-            return Ok(ControlResult::Queue(queue.current_queue()));
+            return Ok(queue.modify_queue(|queue| {
+                let total = queue.len();
+                let pages = total.saturating_sub(1).div_ceil(5).max(1);
+                if page == 0 || page > pages {
+                    return ControlResult::Message(format!(
+                        "That page does not exist. Choose a page from 1 to {pages}."
+                    ));
+                }
+                // Clone only the visible page, regardless of playlist size.
+                let tracks = queue
+                    .front()
+                    .into_iter()
+                    .chain(queue.range((1 + (page - 1) * 5).min(total)..).take(5))
+                    .map(|track| track.handle())
+                    .collect();
+                ControlResult::Queue {
+                    tracks,
+                    total,
+                    page,
+                }
+            }));
         }
         if queue.is_empty() {
             return Err(SessionError::EmptyQueue);
@@ -234,7 +285,64 @@ impl SessionManager {
             }
             _ => unreachable!("only registered controls reach this method"),
         };
+        self.notify_player(guild_id);
         Ok(ControlResult::Message(message))
+    }
+
+    fn notify_player(&self, guild_id: Id<GuildMarker>) {
+        if let Some(session) = self.sessions.get(&guild_id) {
+            session.updates.notify_one();
+        }
+    }
+
+    /// First successful /play response owns the panel for this session.
+    pub async fn attach_panel(
+        &self,
+        guild_id: Id<GuildMarker>,
+        cancel: &CancellationToken,
+        message_id: Id<MessageMarker>,
+    ) -> Option<GuildSession> {
+        let _guard = self.lock(guild_id).await;
+        if cancel.is_cancelled() {
+            return None;
+        }
+        let mut session = self.sessions.get_mut(&guild_id)?;
+        if session.panel_message.is_some() || session.cancel.is_cancelled() {
+            return None;
+        }
+        session.panel_message = Some(message_id);
+        Some(session.clone())
+    }
+
+    pub fn release_panel(&self, guild_id: Id<GuildMarker>, message_id: Id<MessageMarker>) {
+        if let Some(mut session) = self.sessions.get_mut(&guild_id)
+            && session.panel_message == Some(message_id)
+        {
+            session.panel_message = None;
+        }
+    }
+
+    /// Constant-size snapshot; all locks are released before querying the driver
+    /// or making a Discord request.
+    pub async fn player_snapshot(
+        &self,
+        guild_id: Id<GuildMarker>,
+        message_id: Id<MessageMarker>,
+    ) -> Option<(Option<TrackHandle>, usize)> {
+        let _guard = self.lock(guild_id).await;
+        if !self.sessions.get(&guild_id).is_some_and(|session| {
+            session.panel_message == Some(message_id) && !session.cancel.is_cancelled()
+        }) {
+            return None;
+        }
+        let call = self.songbird.get(guild_id)?;
+        let call = call.lock().await;
+        Some(call.queue().modify_queue(|queue| {
+            (
+                queue.front().map(|track| track.handle()),
+                queue.len().saturating_sub(1),
+            )
+        }))
     }
 
     /// Evaluate against current state after acquiring the lifecycle lock.
@@ -297,7 +405,11 @@ impl SessionManager {
 
 pub enum ControlResult {
     Message(String),
-    Queue(Vec<TrackHandle>),
+    Queue {
+        tracks: Vec<TrackHandle>,
+        total: usize,
+        page: usize,
+    },
 }
 
 fn shuffle_upcoming<T>(queue: &mut VecDeque<T>) -> usize {
@@ -352,14 +464,21 @@ mod tests {
             GuildSession {
                 channel_id: channel,
                 cancel: cancel.clone(),
+                updates: Arc::new(Notify::new()),
+                panel_message: None,
             },
         );
         assert!(matches!(
-            manager.control(guild, Id::new(20), "stop").await,
+            manager.control(guild, Id::new(20), "stop", 1, None).await,
             Err(SessionError::WrongChannel)
         ));
         assert!(!child.is_cancelled());
-        assert!(manager.control(guild, channel, "stop").await.is_ok());
+        assert!(
+            manager
+                .control(guild, channel, "stop", 1, None)
+                .await
+                .is_ok()
+        );
         assert!(child.is_cancelled());
         assert_eq!(manager.channel_of(guild), None);
 
@@ -370,6 +489,8 @@ mod tests {
             GuildSession {
                 channel_id: channel,
                 cancel: replacement.clone(),
+                updates: Arc::new(Notify::new()),
+                panel_message: None,
             },
         );
         assert!(matches!(
@@ -397,5 +518,90 @@ mod tests {
         let mut two = VecDeque::from([1, 2]);
         assert_eq!(shuffle_upcoming(&mut two), 1);
         assert_eq!(two, VecDeque::from([1, 2]));
+    }
+
+    #[tokio::test]
+    async fn panel_ownership_is_unique_and_old_buttons_cannot_stop_replacements() {
+        let manager = test_manager();
+        let guild = Id::new(1);
+        let channel = Id::new(10);
+        let cancel = CancellationToken::new();
+        manager.sessions.insert(
+            guild,
+            GuildSession {
+                channel_id: channel,
+                cancel: cancel.clone(),
+                updates: Arc::new(Notify::new()),
+                panel_message: None,
+            },
+        );
+        let (first, second) = tokio::join!(
+            manager.attach_panel(guild, &cancel, Id::new(100)),
+            manager.attach_panel(guild, &cancel, Id::new(200)),
+        );
+        assert_ne!(
+            first.is_some(),
+            second.is_some(),
+            "exactly one updater wins"
+        );
+        let message = first.or(second).unwrap().panel_message.unwrap();
+        assert!(matches!(
+            manager
+                .control(guild, Id::new(20), "stop", 1, Some(message))
+                .await,
+            Err(SessionError::WrongChannel)
+        ));
+        assert!(!cancel.is_cancelled());
+        manager
+            .control(guild, channel, "stop", 1, Some(message))
+            .await
+            .unwrap();
+        assert!(cancel.is_cancelled());
+
+        let replacement = CancellationToken::new();
+        manager.sessions.insert(
+            guild,
+            GuildSession {
+                channel_id: channel,
+                cancel: replacement.clone(),
+                updates: Arc::new(Notify::new()),
+                panel_message: None,
+            },
+        );
+        assert!(
+            manager
+                .attach_panel(guild, &cancel, Id::new(300))
+                .await
+                .is_none()
+        );
+        assert!(
+            manager
+                .attach_panel(guild, &replacement, Id::new(400))
+                .await
+                .is_some()
+        );
+        // Cleanup by the previous worker must not release the new panel.
+        manager.release_panel(guild, message);
+        assert_eq!(
+            manager.sessions.get(&guild).unwrap().panel_message,
+            Some(Id::new(400))
+        );
+        assert!(matches!(
+            manager
+                .control(guild, channel, "stop", 1, Some(message))
+                .await,
+            Err(SessionError::StalePanel)
+        ));
+        assert!(!replacement.is_cancelled());
+
+        // Deleting a panel permits a fresh /play response to take ownership.
+        manager.release_panel(guild, Id::new(400));
+        assert!(
+            manager
+                .attach_panel(guild, &replacement, Id::new(500))
+                .await
+                .is_some()
+        );
+        manager.teardown(guild, "test cleanup").await;
     }
 }

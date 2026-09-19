@@ -4,13 +4,17 @@ use std::{fmt::Write as _, sync::Arc, time::Duration};
 
 use rand::seq::SliceRandom;
 use songbird::tracks::TrackHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use twilight_model::{
     application::{
         command::{Command, CommandType},
         interaction::{Interaction, InteractionData, application_command::CommandOptionValue},
     },
-    channel::message::MessageFlags,
+    channel::{
+        Message,
+        message::{AllowedMentions, MessageFlags},
+    },
     http::interaction::{InteractionResponse, InteractionResponseType},
 };
 use twilight_util::builder::{
@@ -23,7 +27,7 @@ use crate::{
         source::OpusYtSource,
         ytdlp::{PLAYLIST_LIMIT, TrackMetadata, YtDlp},
     },
-    discord::state::State,
+    discord::{player, state::State},
     error::AudioError,
     voice::session::{ControlResult, SessionError},
 };
@@ -81,6 +85,21 @@ pub fn all_commands() -> Vec<Command> {
 
 /// Handle one registered playback interaction from start to finish.
 pub async fn handle_interaction(state: Arc<State>, interaction: Interaction) {
+    if let Some(InteractionData::MessageComponent(data)) = &interaction.data {
+        if let Some(command) = player::button_command(&data.custom_id) {
+            if let Err(error) = defer(&state, &interaction, true).await {
+                warn!(%error, "failed to acknowledge player button");
+                return;
+            }
+            let message = control(&state, &interaction, command, 1)
+                .await
+                .unwrap_or_else(|error| user_message(&error));
+            if let Err(error) = follow_up(&state, &interaction, &message).await {
+                warn!(%error, "failed to answer player button");
+            }
+        }
+        return;
+    }
     let Some(InteractionData::ApplicationCommand(data)) = &interaction.data else {
         return;
     };
@@ -94,7 +113,7 @@ pub async fn handle_interaction(state: Arc<State>, interaction: Interaction) {
 
     // Resolving metadata takes a second or two, well past Discord's 3s limit
     // for a first response, so acknowledge before doing any work.
-    if let Err(error) = defer(&state, &interaction).await {
+    if let Err(error) = defer(&state, &interaction, false).await {
         warn!(%error, "failed to acknowledge interaction");
 
         return;
@@ -125,15 +144,46 @@ pub async fn handle_interaction(state: Arc<State>, interaction: Interaction) {
     let result = if data.name == "play" {
         match url {
             Some(url) => play(&state, &interaction, url, shuffle).await,
-            None => Ok("You need to give me an HTTP(S) media link.".to_owned()),
+            None => Ok(PlayReply::message(
+                "You need to give me an HTTP(S) media link.",
+            )),
         }
     } else {
-        control(&state, &interaction, &data.name, page).await
+        control(&state, &interaction, &data.name, page)
+            .await
+            .map(PlayReply::message)
     };
-    let message = result.unwrap_or_else(|error| user_message(&error));
+    let reply = result.unwrap_or_else(|error| PlayReply::message(user_message(&error)));
 
-    if let Err(error) = follow_up(&state, &interaction, &message).await {
-        warn!(%error, "failed to send interaction follow-up");
+    match follow_up(&state, &interaction, &reply.message).await {
+        Ok(response) => {
+            if let Some((cancel, notice)) = reply.player {
+                match response.model().await {
+                    Ok(message) => {
+                        if let Some(guild_id) = interaction.guild_id {
+                            player::start(Arc::clone(&state), guild_id, &cancel, message, notice)
+                                .await;
+                        }
+                    }
+                    Err(error) => warn!(%error, "failed to read player message"),
+                }
+            }
+        }
+        Err(error) => warn!(%error, "failed to send interaction follow-up"),
+    }
+}
+
+struct PlayReply {
+    message: String,
+    player: Option<(CancellationToken, String)>,
+}
+
+impl PlayReply {
+    fn message(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            player: None,
+        }
     }
 }
 
@@ -158,7 +208,7 @@ async fn play(
     interaction: &Interaction,
     raw_url: &str,
     shuffle: bool,
-) -> Result<String, PlayError> {
+) -> Result<PlayReply, PlayError> {
     let guild_id = interaction.guild_id.ok_or(PlayError::NotInGuild)?;
     let user_id = interaction.author_id().ok_or(PlayError::NotInGuild)?;
 
@@ -187,7 +237,9 @@ async fn play(
         result = list => result?,
     };
     if listing.tracks.is_empty() {
-        return Ok("That playlist contains no accessible tracks.".into());
+        return Ok(PlayReply::message(
+            "That playlist contains no accessible tracks.",
+        ));
     }
     if shuffle {
         listing.tracks.shuffle(&mut rand::rng());
@@ -239,16 +291,21 @@ async fn play(
             }
         )
     };
+    let mut notice = String::new();
     if listing.skipped > 0 {
-        let _ = write!(message, " Skipped {} unavailable entries.", listing.skipped);
+        let _ = write!(notice, " Skipped {} unavailable entries.", listing.skipped);
     }
     if listing.truncated {
         let _ = write!(
-            message,
+            notice,
             " Import limited to the first {PLAYLIST_LIMIT} playlist entries."
         );
     }
-    Ok(message)
+    message.push_str(&notice);
+    Ok(PlayReply {
+        message,
+        player: Some((cancel, notice)),
+    })
 }
 
 async fn control(
@@ -264,27 +321,42 @@ async fn control(
         .voice_state(user_id, guild_id)
         .map(|voice| voice.channel_id())
         .ok_or(PlayError::NotInVoice)?;
+    let panel_message = if matches!(interaction.data, Some(InteractionData::MessageComponent(_))) {
+        Some(
+            interaction
+                .message
+                .as_ref()
+                .ok_or(SessionError::StalePanel)?
+                .id,
+        )
+    } else {
+        None
+    };
     match state
         .sessions
-        .control(guild_id, channel_id, command)
+        .control(guild_id, channel_id, command, page, panel_message)
         .await?
     {
         ControlResult::Message(message) => Ok(message),
-        ControlResult::Queue(tracks) => {
+        ControlResult::Queue {
+            tracks,
+            total,
+            page,
+        } => {
             let metadata: Vec<_> = tracks
                 .iter()
                 .map(TrackHandle::data::<TrackMetadata>)
                 .collect();
-            Ok(format_queue(&metadata, page))
+            Ok(format_queue(&metadata, total, page))
         }
     }
 }
 
-fn format_queue(tracks: &[Arc<TrackMetadata>], page: usize) -> String {
+fn format_queue(tracks: &[Arc<TrackMetadata>], total: usize, page: usize) -> String {
     let Some(current) = tracks.first() else {
         return "The queue is empty.".into();
     };
-    let pages = tracks.len().saturating_sub(1).div_ceil(5).max(1);
+    let pages = total.saturating_sub(1).div_ceil(5).max(1);
     if page == 0 || page > pages {
         return format!("That page does not exist. Choose a page from 1 to {pages}.");
     }
@@ -306,9 +378,10 @@ fn format_queue(tracks: &[Arc<TrackMetadata>], page: usize) -> String {
     let mut message = format!(
         "**Current track:** {}\n**Queue:** {} upcoming • page {page}/{pages}",
         label(current),
-        tracks.len() - 1
+        total.saturating_sub(1)
     );
-    for (index, track) in tracks.iter().enumerate().skip(1 + (page - 1) * 5).take(5) {
+    for (offset, track) in tracks.iter().skip(1).take(5).enumerate() {
+        let index = 1 + (page - 1) * 5 + offset;
         let _ = write!(message, "\n{index}. {}", label(track));
     }
     if pages > 1 {
@@ -345,7 +418,11 @@ fn user_message(error: &PlayError) -> String {
     }
 }
 
-async fn defer(state: &Arc<State>, interaction: &Interaction) -> Result<(), twilight_http::Error> {
+async fn defer(
+    state: &Arc<State>,
+    interaction: &Interaction,
+    private: bool,
+) -> Result<(), twilight_http::Error> {
     state
         .http
         .interaction(state.application_id)
@@ -354,7 +431,11 @@ async fn defer(state: &Arc<State>, interaction: &Interaction) -> Result<(), twil
             &interaction.token,
             &InteractionResponse {
                 kind: InteractionResponseType::DeferredChannelMessageWithSource,
-                data: None,
+                data: private.then(|| {
+                    InteractionResponseDataBuilder::new()
+                        .flags(MessageFlags::EPHEMERAL)
+                        .build()
+                }),
             },
         )
         .await
@@ -365,18 +446,18 @@ async fn follow_up(
     state: &Arc<State>,
     interaction: &Interaction,
     message: &str,
-) -> Result<(), twilight_http::Error> {
+) -> Result<twilight_http::Response<Message>, twilight_http::Error> {
     state
         .http
         .interaction(state.application_id)
         .update_response(&interaction.token)
         .content(Some(message))
+        .allowed_mentions(Some(&AllowedMentions::default()))
         .await
-        .map(|_| ())
 }
 
 /// Stop a track title from breaking out of its bold markers or pinging anyone.
-fn escape(text: &str) -> String {
+pub(super) fn escape(text: &str) -> String {
     let trimmed: String = text.chars().take(200).collect();
 
     trimmed
@@ -390,7 +471,7 @@ fn escape(text: &str) -> String {
         .replace('@', "@\u{200b}")
 }
 
-fn format_duration(duration: Duration) -> String {
+pub(super) fn format_duration(duration: Duration) -> String {
     let total = duration.as_secs();
     let (hours, minutes, seconds) = (total / 3600, (total % 3600) / 60, total % 60);
 
@@ -429,20 +510,23 @@ mod tests {
                 })
             })
             .collect();
-        let page = format_queue(&tracks, 2);
+        let visible = std::iter::once(tracks[0].clone())
+            .chain(tracks[6..11].iter().cloned())
+            .collect::<Vec<_>>();
+        let page = format_queue(&visible, tracks.len(), 2);
         assert!(page.contains("Current track:** Song 0"));
         assert!(page.contains("page 2/3"));
         assert!(page.contains("6. Song 6"));
         assert!(page.contains("10. Song 10"));
         assert!(!page.contains("11. Song 11"));
-        assert!(format_queue(&tracks, usize::MAX).contains("does not exist"));
-        assert_eq!(format_queue(&[], 1), "The queue is empty.");
+        assert!(format_queue(&tracks, tracks.len(), usize::MAX).contains("does not exist"));
+        assert_eq!(format_queue(&[], 0, 1), "The queue is empty.");
         let metadata = Arc::new(TrackMetadata {
             title: Some("*@\n".repeat(100)),
             ..TrackMetadata::default()
         });
         let long = vec![metadata; 10];
-        let message = format_queue(&long, 1);
+        let message = format_queue(&long, long.len(), 1);
         assert!(message.chars().count() < 2000);
         assert_eq!(message.lines().count(), 8);
     }

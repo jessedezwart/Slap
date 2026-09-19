@@ -13,6 +13,7 @@ use twilight_model::id::{
 use crate::{audio::ytdlp::YtDlp, config::Config, voice::session::SessionManager};
 
 pub struct State {
+    pub player_tasks: tokio_util::task::TaskTracker,
     pub config: Arc<Config>,
     pub http: Arc<HttpClient>,
     /// Only voice states are cached; that is all we need to find the caller's

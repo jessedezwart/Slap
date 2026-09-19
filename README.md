@@ -77,6 +77,30 @@ Join a voice channel, then use:
 - `/stop` — stop playback, clear the queue, cancel pending imports, and disconnect.
 - `/queue` or `/queue page:2` — show the current track and five upcoming tracks per page.
 
+The first successful `/play` response becomes a live player message with the
+current title, elapsed time, a text progress bar, and **Skip**, **Stop**,
+**Shuffle**, and **Show queue** buttons. Later imports reuse that player.
+Show queue replies privately with five upcoming tracks; use `/queue page:2`
+for further pages. Button acknowledgements are private too. `/pause` and
+`/resume` also update the player. Unknown track durations show elapsed time
+without a percentage bar.
+
+The player edits one message per voice session. Progress refreshes every
+15 seconds (four scheduled edits per minute while playing), with earlier
+updates on playback changes. Event bursts are coalesced and edits are spaced
+at least two seconds apart. Unchanged paused/empty views cause no HTTP edits.
+Progress-only updates send text without resending the buttons. The updater
+uses existing metadata and Songbird's playback position: no extra yt-dlp,
+Spotify, artwork or audio requests. Queue reads clone only the current track
+and the requested five-track page.
+
+All updates run in an asynchronous task, with no playback locks held during
+HTTP or driver queries. Requests have timeouts and transient failures back off.
+Stop/disconnect cancels the updater and disables its controls; old buttons
+cannot affect a new session. Deleting the player stops its updater; another
+`/play` creates a replacement. Edits use the bot token so long sessions are
+not limited by the interaction token's lifetime.
+
 Controls require you to be in the bot's voice channel. A `/play` request from
 another channel will not move the bot or interrupt that channel's queue.
 Playlist imports inspect at most 500 entries and report skipped unavailable

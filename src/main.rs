@@ -136,6 +136,7 @@ async fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sy
     );
 
     let state = Arc::new(State {
+        player_tasks: tokio_util::task::TaskTracker::new(),
         config: Arc::clone(&config),
         http: Arc::clone(&http),
         cache,
@@ -171,6 +172,15 @@ async fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sy
     for dispatcher in dispatchers {
         let _ = dispatcher.await;
     }
+
+    state.player_tasks.close();
+    // Let cancelled players disable their controls; a slow Discord request
+    // must not hold shutdown indefinitely.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(12),
+        state.player_tasks.wait(),
+    )
+    .await;
 
     command_loop.abort();
 

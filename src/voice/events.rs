@@ -8,6 +8,8 @@ use songbird::{
     events::{Event, EventContext, EventHandler},
     tracks::PlayMode,
 };
+use std::sync::Arc;
+use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -52,6 +54,17 @@ impl EventHandler for DriverDisconnectNotifier {
 
 /// Logs track failures. The builtin queue advances past them on its own.
 pub struct TrackErrorNotifier;
+
+/// Coalesced wakeup only: no HTTP, queue scans or locks on the driver task.
+pub struct PlayerNotifier(pub Arc<Notify>);
+
+#[async_trait::async_trait]
+impl EventHandler for PlayerNotifier {
+    async fn act(&self, _: &EventContext<'_>) -> Option<Event> {
+        self.0.notify_one();
+        None
+    }
+}
 
 #[async_trait::async_trait]
 impl EventHandler for TrackErrorNotifier {
