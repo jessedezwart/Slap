@@ -37,6 +37,9 @@ pub enum AudioError {
     #[error("this video has no Opus audio track, so it cannot be streamed without transcoding")]
     NoOpusFormat,
 
+    #[error("no search result matched `{0}`")]
+    NoMatch(String),
+
     #[error("yt-dlp did not return a media URL")]
     NoMediaUrl,
 

@@ -36,7 +36,16 @@ fn main() -> ExitCode {
     // `DISCORD_TOKEN=... cargo run` working with a stale `.env` on disk.
     let dotenv = dotenvy::dotenv();
 
+    // A slow terminal/container log sink must not block the audio driver or
+    // Tokio workers. Bound memory and drop excess logs under sustained pressure.
+    // Keep the guard alive through runtime shutdown to flush remaining lines.
+    let (log_writer, _log_guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+        .buffered_lines_limit(1024)
+        .lossy(true)
+        .thread_name("log-writer")
+        .finish(std::io::stdout());
     tracing_subscriber::fmt()
+        .with_writer(log_writer)
         .with_env_filter(
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new("rust_music_bot=info,warn")),

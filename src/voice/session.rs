@@ -29,9 +29,7 @@ use twilight_model::id::{
 };
 
 use crate::audio::ytdlp::TrackMetadata;
-use crate::voice::events::{
-    DriverDisconnectNotifier, PlayerNotifier, TrackErrorNotifier, VoiceCommand,
-};
+use crate::voice::events::{DriverDisconnectNotifier, PlayerNotifier, VoiceCommand};
 
 /// How far into a track the next one starts loading, matching the lead
 /// songbird's own `enqueue` would have picked.
@@ -139,7 +137,6 @@ impl SessionManager {
                     cancel: cancel.clone(),
                 },
             );
-            call.add_global_event(TrackEvent::Error.into(), TrackErrorNotifier);
             for event in [
                 TrackEvent::Play,
                 TrackEvent::Pause,
@@ -147,7 +144,14 @@ impl SessionManager {
                 TrackEvent::Error,
                 TrackEvent::Playable,
             ] {
-                call.add_global_event(event.into(), PlayerNotifier(Arc::clone(&updates)));
+                call.add_global_event(
+                    event.into(),
+                    PlayerNotifier {
+                        guild_id,
+                        event,
+                        updates: Arc::clone(&updates),
+                    },
+                );
             }
         }
 
@@ -285,6 +289,7 @@ impl SessionManager {
             }
             _ => unreachable!("only registered controls reach this method"),
         };
+        info!(%guild_id, %channel_id, command, remaining = queue.len(), result = %message, "playback control applied");
         self.notify_player(guild_id);
         Ok(ControlResult::Message(message))
     }

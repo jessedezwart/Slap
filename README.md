@@ -81,7 +81,7 @@ The first successful `/play` response becomes a live player message with the
 current title, elapsed time, a text progress bar, and **Skip**, **Stop**,
 **Shuffle**, and **Show queue** buttons. Later imports reuse that player.
 Show queue replies privately with five upcoming tracks; use `/queue page:2`
-for further pages. Button acknowledgements are private too. `/pause` and
+for further pages. Skip and Stop succeed silently; errors and other button replies are private. `/pause` and
 `/resume` also update the player. Unknown track durations show elapsed time
 without a percentage bar.
 
@@ -135,9 +135,12 @@ other sources work without these settings.
 3. Run `/play url:https://open.spotify.com/playlist/PLAYLIST_ID`.
    Add `shuffle:true` to shuffle before enqueueing.
 
-The bot reads playlist pages in order, up to 500 entries, and searches YouTube
-for each track's **artist(s) + song name** when playback approaches. It uses the
-first search result, so a live version, cover, or other mismatch is possible.
+The bot reads playlist pages in order, up to 500 entries, and searches for each
+track's **artist(s) + song name** when playback approaches. It takes the top
+YouTube Music song result, and if that does not run within 10 s or 7% of the
+Spotify duration, the top regular YouTube result. If neither matches, the track
+is skipped. Only the duration is checked, so a cover or live version of the
+same length can still be picked.
 Local files, episodes, removed tracks and entries without artist/title metadata
 are skipped. Failed YouTube playback advances to the next queued track.
 Full playlist URLs (including localized `intl-...` URLs and share parameters)
@@ -162,6 +165,19 @@ disconnect — dropped connection, kick, channel move, shutdown — cancels that
 token and the entire pipeline for that guild goes away.
 
 ## Diagnostics
+
+The default `RUST_LOG=rust_music_bot=info,warn` shows player interactions
+(command, button/slash source, user, guild, outcome and elapsed time), playlist
+imports, YouTube searches, audio resolution/buffering, actual playback starts,
+pauses, track endings, failures and disconnects. Searching/preloading is logged
+separately from **now playing**, which is emitted when a track is playable and
+playing. Skip and Stop remain silent in Discord but appear in these logs.
+
+Console output uses a dedicated writer with a 1,024-line bounded queue. If the
+log destination cannot keep up, excess lines are dropped instead of blocking
+playback or growing memory indefinitely. Progress-bar refreshes do not emit
+routine logs. Media logs use titles, search terms and source hosts rather than
+signed stream URLs, request headers or credentials.
 
 Run with `RUST_LOG=rust_music_bot=debug` to see buffer depth and stream lifecycle.
 The line to watch for is:

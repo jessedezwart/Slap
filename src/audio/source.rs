@@ -14,7 +14,8 @@ use songbird::input::{
 };
 use symphonia_core::io::MediaSource;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, info};
+use twilight_model::id::{Id, marker::GuildMarker};
 
 use crate::{
     audio::{
@@ -33,6 +34,7 @@ const ADAPTER_BUFFER_BYTES: usize = 64 * 1024;
 const RESOLVE_TTL: Duration = Duration::from_secs(60);
 
 pub struct OpusYtSource {
+    guild_id: Option<Id<GuildMarker>>,
     target: PlaybackTarget,
     client: Client,
     ytdlp: YtDlp,
@@ -52,6 +54,7 @@ impl OpusYtSource {
         cancel: CancellationToken,
     ) -> Self {
         Self {
+            guild_id: None,
             target: target.into(),
             client,
             ytdlp,
@@ -61,11 +64,17 @@ impl OpusYtSource {
         }
     }
 
+    pub fn in_guild(mut self, guild_id: Id<GuildMarker>) -> Self {
+        self.guild_id = Some(guild_id);
+        self
+    }
+
     /// Resolve the video, reusing a recent result if there is one.
     async fn resolve(&mut self) -> Result<Resolved, AudioError> {
         if let Some((resolved, at)) = &self.cached
             && at.elapsed() < RESOLVE_TTL
         {
+            debug!(title = ?resolved.metadata.title, "reusing resolved audio metadata");
             return Ok(resolved.clone());
         }
 
@@ -77,6 +86,18 @@ impl OpusYtSource {
             () = self.cancel.cancelled() => return Err(AudioError::Cancelled),
             result = self.ytdlp.resolve(&self.target) => result?,
         };
+
+        // Later re-resolves (expired URL, seek) must reach the same upload
+        // rather than search again and maybe land on a different one.
+        if let PlaybackTarget::Search(_) = self.target
+            && let Some(url) = resolved
+                .metadata
+                .webpage_url
+                .as_deref()
+                .and_then(|url| YtDlp::validate_url(url).ok())
+        {
+            self.target = url.into();
+        }
 
         self.cached = Some((resolved.clone(), Instant::now()));
 
@@ -102,13 +123,15 @@ impl Compose for OpusYtSource {
         Err(AudioStreamError::Unsupported)
     }
 
+    #[tracing::instrument(skip_all, fields(guild_id = self.guild_id.map(|id| id.get())))]
     async fn create_async(
         &mut self,
     ) -> Result<AudioStream<Box<dyn MediaSource>>, AudioStreamError> {
         let resolved = self.resolve().await.map_err(fail)?;
 
-        debug!(
-            title = resolved.metadata.title.as_deref().unwrap_or("?"),
+        let started = Instant::now();
+        info!(
+            title = ?resolved.metadata.title,
             bitrate_bps = resolved.bitrate_bps,
             "opening audio stream"
         );
@@ -127,6 +150,7 @@ impl Compose for OpusYtSource {
 
         // Never hand songbird a track whose buffer is still empty.
         stream.prefill().await.map_err(fail)?;
+        info!(title = ?resolved.metadata.title, elapsed_ms = started.elapsed().as_millis(), "audio buffer ready");
 
         Ok(AudioStream {
             input: Box::new(AsyncAdapterStream::new(

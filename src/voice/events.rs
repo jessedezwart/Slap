@@ -2,17 +2,18 @@
 //!
 //! These run on songbird's driver task, so they must never reach back into the
 //! `Call` they are attached to — that would re-enter a lock songbird is already
-//! holding. They only post a message and return.
+//! holding. They post notifications and write bounded, non-blocking logs.
 
+use crate::audio::ytdlp::TrackMetadata;
 use songbird::{
-    events::{Event, EventContext, EventHandler},
-    tracks::PlayMode,
+    events::{Event, EventContext, EventHandler, TrackEvent},
+    tracks::{PlayMode, ReadyState},
 };
 use std::sync::Arc;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{debug, info, warn};
 use twilight_model::id::{Id, marker::GuildMarker};
 
 /// Work that must happen off the driver task.
@@ -52,31 +53,48 @@ impl EventHandler for DriverDisconnectNotifier {
     }
 }
 
-/// Logs track failures. The builtin queue advances past them on its own.
-pub struct TrackErrorNotifier;
-
-/// Coalesced wakeup only: no HTTP, queue scans or locks on the driver task.
-pub struct PlayerNotifier(pub Arc<Notify>);
-
-#[async_trait::async_trait]
-impl EventHandler for PlayerNotifier {
-    async fn act(&self, _: &EventContext<'_>) -> Option<Event> {
-        self.0.notify_one();
-        None
-    }
+/// Wake the panel and log transitions. The bounded tracing writer keeps console
+/// I/O off the driver; no queue locks, HTTP requests, or per-frame logs here.
+pub struct PlayerNotifier {
+    pub guild_id: Id<GuildMarker>,
+    pub event: TrackEvent,
+    pub updates: Arc<Notify>,
 }
 
 #[async_trait::async_trait]
-impl EventHandler for TrackErrorNotifier {
+impl EventHandler for PlayerNotifier {
     async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
+        self.updates.notify_one();
         if let EventContext::Track(states) = ctx {
             for (state, handle) in *states {
-                if let PlayMode::Errored(error) = &state.playing {
-                    warn!(track = ?handle.uuid(), %error, "track failed");
+                let metadata = handle.data::<TrackMetadata>();
+                let span = tracing::info_span!("track", guild_id = %self.guild_id,
+                    track_id = %handle.uuid(), title = ?metadata.title.as_deref().unwrap_or("Unknown track"));
+                // No awaits inside the span guard on this driver callback.
+                let _entered = span.enter();
+                match self.event {
+                    TrackEvent::Play | TrackEvent::Playable
+                        if state.playing == PlayMode::Play
+                            && state.ready == ReadyState::Playable =>
+                    {
+                        info!(position_secs = state.position.as_secs(), "now playing");
+                    }
+                    TrackEvent::Pause if state.ready == ReadyState::Playable => {
+                        info!(position_secs = state.position.as_secs(), "playback paused");
+                    }
+                    TrackEvent::End => {
+                        info!(reason = ?state.playing, position_secs = state.position.as_secs(), "track ended");
+                    }
+                    TrackEvent::Error => {
+                        if let PlayMode::Errored(error) = &state.playing {
+                            warn!(%error, "track failed; queue will advance");
+                        }
+                    }
+                    TrackEvent::Playable => debug!("upcoming track preloaded"),
+                    _ => {}
                 }
             }
         }
-
         None
     }
 }

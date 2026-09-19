@@ -1,4 +1,5 @@
-//! Spotify supplies playlist metadata; playback searches YouTube lazily.
+//! Spotify supplies playlist metadata; playback searches YouTube Music, then
+//! YouTube, lazily.
 
 use std::time::Duration;
 
@@ -8,7 +9,10 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 use url::Url;
 
-use super::ytdlp::{ListedTrack, MediaList, PLAYLIST_LIMIT, PlaybackTarget, TrackMetadata};
+use super::{
+    matching::SearchQuery,
+    ytdlp::{ListedTrack, MediaList, PLAYLIST_LIMIT, PlaybackTarget, TrackMetadata},
+};
 use crate::{config::SpotifyConfig, error::AudioError};
 
 pub struct Spotify {
@@ -215,15 +219,20 @@ fn listed_track(entry: &Value) -> Option<ListedTrack> {
         return None;
     }
     let artist = artists.join(", ");
+    let duration = track
+        .get("duration_ms")
+        .and_then(Value::as_u64)
+        .map(Duration::from_millis);
     Some(ListedTrack {
-        target: PlaybackTarget::YoutubeSearch(format!("{artist} {title}")),
+        target: PlaybackTarget::Search(SearchQuery {
+            artists: artists.into_iter().map(str::to_owned).collect(),
+            title: title.to_owned(),
+            duration,
+        }),
         metadata: TrackMetadata {
             title: Some(format!("{artist} — {title}")),
             uploader: Some(artist),
-            duration: track
-                .get("duration_ms")
-                .and_then(Value::as_u64)
-                .map(Duration::from_millis),
+            duration,
             webpage_url: track
                 .pointer("/external_urls/spotify")
                 .and_then(Value::as_str)
@@ -273,9 +282,13 @@ mod tests {
     #[test]
     fn metadata_becomes_artist_and_title_search() {
         let listed = listed_track(&song("Song & punctuation?!")).unwrap();
-        assert!(
-            matches!(listed.target, PlaybackTarget::YoutubeSearch(ref q) if q == "Artist, Guest Song & punctuation?!")
-        );
+        let PlaybackTarget::Search(query) = &listed.target else {
+            panic!("expected a search");
+        };
+        assert_eq!(query.artists, ["Artist", "Guest"]);
+        assert_eq!(query.title, "Song & punctuation?!");
+        assert_eq!(query.duration, Some(Duration::from_millis(123456)));
+        assert_eq!(query.text(), "Artist, Guest Song & punctuation?!");
         assert_eq!(
             listed.metadata.duration,
             Some(Duration::from_millis(123456))

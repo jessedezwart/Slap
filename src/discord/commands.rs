@@ -1,20 +1,24 @@
 //! Playback and queue slash commands.
 
-use std::{fmt::Write as _, sync::Arc, time::Duration};
+use std::{
+    fmt::Write as _,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use rand::seq::SliceRandom;
 use songbird::tracks::TrackHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{Span, info, warn};
 use twilight_model::{
     application::{
         command::{Command, CommandType},
-        interaction::{Interaction, InteractionData, application_command::CommandOptionValue},
+        interaction::{
+            Interaction, InteractionData,
+            application_command::{CommandDataOption, CommandOptionValue},
+        },
     },
-    channel::{
-        Message,
-        message::{AllowedMentions, MessageFlags},
-    },
+    channel::message::{AllowedMentions, MessageFlags},
     http::interaction::{InteractionResponse, InteractionResponseType},
 };
 use twilight_util::builder::{
@@ -83,94 +87,153 @@ pub fn all_commands() -> Vec<Command> {
     commands
 }
 
-/// Handle one registered playback interaction from start to finish.
+/// Buttons and slash commands share authorization, execution, and logging.
+#[tracing::instrument(skip_all, fields(
+    guild_id = interaction.guild_id.map(|id| id.get()), user_id = interaction.author_id().map(|id| id.get()),
+    interaction_id = %interaction.id, command = tracing::field::Empty,
+    source = tracing::field::Empty,
+))]
 pub async fn handle_interaction(state: Arc<State>, interaction: Interaction) {
-    if let Some(InteractionData::MessageComponent(data)) = &interaction.data {
-        if let Some(command) = player::button_command(&data.custom_id) {
-            if let Err(error) = defer(&state, &interaction, true).await {
-                warn!(%error, "failed to acknowledge player button");
-                return;
-            }
-            let message = control(&state, &interaction, command, 1)
-                .await
-                .unwrap_or_else(|error| user_message(&error));
-            if let Err(error) = follow_up(&state, &interaction, &message).await {
-                warn!(%error, "failed to answer player button");
-            }
+    let (command, options, button) = match &interaction.data {
+        Some(InteractionData::ApplicationCommand(data))
+            if matches!(
+                data.name.as_str(),
+                "play" | "pause" | "resume" | "skip" | "stop" | "shuffle" | "queue"
+            ) =>
+        {
+            (data.name.as_str(), data.options.as_slice(), false)
         }
-        return;
-    }
-    let Some(InteractionData::ApplicationCommand(data)) = &interaction.data else {
-        return;
+        Some(InteractionData::MessageComponent(data)) => {
+            let Some(command) = player::button_command(&data.custom_id) else {
+                return;
+            };
+            (command, &[][..], true)
+        }
+        _ => return,
     };
-
-    if !matches!(
-        data.name.as_str(),
-        "play" | "pause" | "resume" | "skip" | "stop" | "shuffle" | "queue"
-    ) {
-        return;
-    }
-
-    // Resolving metadata takes a second or two, well past Discord's 3s limit
-    // for a first response, so acknowledge before doing any work.
-    if let Err(error) = defer(&state, &interaction, false).await {
+    Span::current().record("command", command);
+    Span::current().record("source", if button { "button" } else { "slash" });
+    let mode = ReplyMode::new(command, button);
+    let started = Instant::now();
+    info!("player interaction received");
+    if let Err(error) = defer(&state, &interaction, mode).await {
         warn!(%error, "failed to acknowledge interaction");
-
         return;
     }
+    let result = execute(&state, &interaction, command, options).await;
+    match &result {
+        Ok(_) => info!(
+            elapsed_ms = started.elapsed().as_millis(),
+            "player interaction completed"
+        ),
+        Err(error) => {
+            warn!(%error, elapsed_ms = started.elapsed().as_millis(), "player interaction rejected or failed")
+        }
+    }
+    if let Err(error) = respond(&state, &interaction, mode, result).await {
+        warn!(%error, "failed to send interaction response");
+    }
+}
 
-    let url = data
-        .options
-        .iter()
-        .find(|o| o.name == "url")
-        .and_then(|o| match &o.value {
-            CommandOptionValue::String(value) => Some(value.as_str()),
-            _ => None,
-        });
-
-    let shuffle = data
-        .options
-        .iter()
-        .any(|o| o.name == "shuffle" && matches!(o.value, CommandOptionValue::Boolean(true)));
-    let page = data
-        .options
-        .iter()
-        .find_map(|o| match o.value {
-            CommandOptionValue::Integer(page) if o.name == "page" => usize::try_from(page).ok(),
-            _ => None,
-        })
-        .unwrap_or(1)
-        .max(1);
-    let result = if data.name == "play" {
+async fn execute(
+    state: &Arc<State>,
+    interaction: &Interaction,
+    command: &str,
+    options: &[CommandDataOption],
+) -> Result<PlayReply, PlayError> {
+    let mut url = None;
+    let mut shuffle = false;
+    let mut page = 1;
+    for option in options {
+        match (option.name.as_str(), &option.value) {
+            ("url", CommandOptionValue::String(value)) => url = Some(value.as_str()),
+            ("shuffle", CommandOptionValue::Boolean(value)) => shuffle = *value,
+            ("page", CommandOptionValue::Integer(value)) => {
+                page = usize::try_from(*value).unwrap_or(1).max(1)
+            }
+            _ => {}
+        }
+    }
+    if command == "play" {
         match url {
-            Some(url) => play(&state, &interaction, url, shuffle).await,
+            Some(url) => play(state, interaction, url, shuffle).await,
             None => Ok(PlayReply::message(
                 "You need to give me an HTTP(S) media link.",
             )),
         }
     } else {
-        control(&state, &interaction, &data.name, page)
+        control(state, interaction, command, page)
             .await
             .map(PlayReply::message)
-    };
-    let reply = result.unwrap_or_else(|error| PlayReply::message(user_message(&error)));
-
-    match follow_up(&state, &interaction, &reply.message).await {
-        Ok(response) => {
-            if let Some((cancel, notice)) = reply.player {
-                match response.model().await {
-                    Ok(message) => {
-                        if let Some(guild_id) = interaction.guild_id {
-                            player::start(Arc::clone(&state), guild_id, &cancel, message, notice)
-                                .await;
-                        }
-                    }
-                    Err(error) => warn!(%error, "failed to read player message"),
-                }
-            }
-        }
-        Err(error) => warn!(%error, "failed to send interaction follow-up"),
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ReplyMode {
+    Public,
+    Private,
+    SilentButton,
+    SilentCommand,
+}
+
+impl ReplyMode {
+    fn new(command: &str, button: bool) -> Self {
+        match (matches!(command, "skip" | "stop"), button) {
+            (true, true) => Self::SilentButton,
+            (true, false) => Self::SilentCommand,
+            (false, true) => Self::Private,
+            (false, false) => Self::Public,
+        }
+    }
+}
+
+async fn respond(
+    state: &Arc<State>,
+    interaction: &Interaction,
+    mode: ReplyMode,
+    result: Result<PlayReply, PlayError>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let http = state.http.interaction(state.application_id);
+    if result.is_ok() {
+        match mode {
+            ReplyMode::SilentButton => return Ok(()),
+            ReplyMode::SilentCommand => {
+                http.delete_response(&interaction.token).await?;
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+    let reply = result.unwrap_or_else(|error| PlayReply::message(user_message(&error)));
+    let mentions = AllowedMentions::default();
+    if mode == ReplyMode::SilentButton {
+        // A deferred button update targets the player itself: errors must be
+        // separate private follow-ups, never overwrite the live player.
+        http.create_followup(&interaction.token)
+            .content(&reply.message)
+            .flags(MessageFlags::EPHEMERAL)
+            .allowed_mentions(Some(&mentions))
+            .await?;
+    } else {
+        let response = http
+            .update_response(&interaction.token)
+            .content(Some(&reply.message))
+            .allowed_mentions(Some(&mentions))
+            .await?;
+        if let Some((cancel, notice)) = reply.player
+            && let Some(guild_id) = interaction.guild_id
+        {
+            player::start(
+                Arc::clone(state),
+                guild_id,
+                &cancel,
+                response.model().await?,
+                notice,
+            )
+            .await;
+        }
+    }
+    Ok(())
 }
 
 struct PlayReply {
@@ -225,6 +288,18 @@ async fn play(
 
     // Also covers a caller leaving during the join handshake.
     crate::discord::events::reconcile_voice(Arc::clone(state), guild_id);
+    let provider = if crate::audio::spotify::is_spotify_url(&url) {
+        "spotify"
+    } else {
+        "yt-dlp"
+    };
+    info!(
+        provider,
+        host = url.host_str(),
+        shuffle,
+        "loading track or playlist metadata"
+    );
+    let started = Instant::now();
     let list = async {
         if crate::audio::spotify::is_spotify_url(&url) {
             state.spotify.list(&url).await
@@ -236,6 +311,13 @@ async fn play(
         () = cancel.cancelled() => return Err(AudioError::Cancelled.into()),
         result = list => result?,
     };
+    info!(
+        tracks = listing.tracks.len(),
+        skipped = listing.skipped,
+        truncated = listing.truncated,
+        elapsed_ms = started.elapsed().as_millis(),
+        "media import completed"
+    );
     if listing.tracks.is_empty() {
         return Ok(PlayReply::message(
             "That playlist contains no accessible tracks.",
@@ -261,7 +343,8 @@ async fn play(
                 state.ytdlp.clone(),
                 state.config.buffer,
                 cancel.clone(),
-            );
+            )
+            .in_guild(guild_id);
             if let Some(resolved) = listing.single.take() {
                 source = source.with_resolved(resolved);
             }
@@ -410,18 +493,14 @@ fn user_message(error: &PlayError) -> String {
         PlayError::Audio(AudioError::Timeout(_)) => {
             "yt-dlp took too long to answer. Try again.".to_owned()
         }
-        other => {
-            warn!(error = %other, "play command failed");
-
-            format!("Something went wrong: {other}")
-        }
+        other => format!("Something went wrong: {other}"),
     }
 }
 
 async fn defer(
     state: &Arc<State>,
     interaction: &Interaction,
-    private: bool,
+    mode: ReplyMode,
 ) -> Result<(), twilight_http::Error> {
     state
         .http
@@ -430,8 +509,12 @@ async fn defer(
             interaction.id,
             &interaction.token,
             &InteractionResponse {
-                kind: InteractionResponseType::DeferredChannelMessageWithSource,
-                data: private.then(|| {
+                kind: if mode == ReplyMode::SilentButton {
+                    InteractionResponseType::DeferredUpdateMessage
+                } else {
+                    InteractionResponseType::DeferredChannelMessageWithSource
+                },
+                data: matches!(mode, ReplyMode::Private | ReplyMode::SilentCommand).then(|| {
                     InteractionResponseDataBuilder::new()
                         .flags(MessageFlags::EPHEMERAL)
                         .build()
@@ -440,20 +523,6 @@ async fn defer(
         )
         .await
         .map(|_| ())
-}
-
-async fn follow_up(
-    state: &Arc<State>,
-    interaction: &Interaction,
-    message: &str,
-) -> Result<twilight_http::Response<Message>, twilight_http::Error> {
-    state
-        .http
-        .interaction(state.application_id)
-        .update_response(&interaction.token)
-        .content(Some(message))
-        .allowed_mentions(Some(&AllowedMentions::default()))
-        .await
 }
 
 /// Stop a track title from breaking out of its bold markers or pinging anyone.
@@ -479,20 +548,6 @@ pub(super) fn format_duration(duration: Duration) -> String {
         format!("{hours}:{minutes:02}:{seconds:02}")
     } else {
         format!("{minutes}:{seconds:02}")
-    }
-}
-
-/// Follow-ups are visible to the channel; errors stay between us and the user.
-#[allow(dead_code)]
-fn ephemeral(message: &str) -> InteractionResponse {
-    InteractionResponse {
-        kind: InteractionResponseType::ChannelMessageWithSource,
-        data: Some(
-            InteractionResponseDataBuilder::new()
-                .content(message)
-                .flags(MessageFlags::EPHEMERAL)
-                .build(),
-        ),
     }
 }
 

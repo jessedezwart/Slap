@@ -5,14 +5,15 @@
 //! [`crate::audio::stream`]. The process is spawned as argv — there is no shell
 //! anywhere in this path.
 
-use std::{collections::BTreeMap, process::Stdio, time::Duration};
+use std::{collections::BTreeMap, process::Stdio, time::Duration, time::Instant};
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, RANGE};
 use serde::Deserialize;
 use tokio::{process::Command, time};
-use tracing::debug;
+use tracing::{debug, info, warn};
 use url::Url;
 
+use super::matching::{self, SearchQuery};
 use crate::{config::YtDlpConfig, error::AudioError};
 
 /// Opus-only format selection.
@@ -57,7 +58,42 @@ pub const PLAYLIST_LIMIT: usize = 500;
 #[derive(Debug, Clone)]
 pub enum PlaybackTarget {
     Url(Url),
-    YoutubeSearch(String),
+    Search(SearchQuery),
+}
+
+/// Where searches look, best source first.
+#[derive(Debug, Clone, Copy)]
+enum SearchSource {
+    /// Label releases and official audio, without video intros.
+    YoutubeMusic,
+    /// Everything else: fan uploads, lyric videos, music videos.
+    Youtube,
+}
+
+impl SearchSource {
+    const ORDER: [Self; 2] = [Self::YoutubeMusic, Self::Youtube];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::YoutubeMusic => "YouTube Music",
+            Self::Youtube => "YouTube",
+        }
+    }
+
+    /// The yt-dlp input; still one argv entry, so the text stays literal.
+    fn input(self, text: &str) -> String {
+        match self {
+            Self::YoutubeMusic => {
+                let mut url =
+                    Url::parse_with_params("https://music.youtube.com/search", [("q", text)])
+                        .expect("static search URL is valid");
+                // Songs only: videos are what the YouTube fallback is for.
+                url.set_fragment(Some("songs"));
+                url.into()
+            }
+            Self::Youtube => format!("ytsearch1:{text}"),
+        }
+    }
 }
 
 impl From<Url> for PlaybackTarget {
@@ -97,8 +133,48 @@ impl YtDlp {
         }
     }
 
-    /// Run `yt-dlp -j` and turn its JSON into a [`Resolved`].
+    /// Resolve a link, or find and resolve the recording a search asks for.
     pub async fn resolve(&self, target: &PlaybackTarget) -> Result<Resolved, AudioError> {
+        match target {
+            PlaybackTarget::Url(url) => {
+                info!(host = url.host_str(), "resolving audio source");
+                self.resolve_input(url.as_str()).await
+            }
+            PlaybackTarget::Search(query) => self.resolve_search(query).await,
+        }
+    }
+
+    /// Resolve each source's top result until one runs about as long as the
+    /// requested track.
+    async fn resolve_search(&self, query: &SearchQuery) -> Result<Resolved, AudioError> {
+        let text = query.text();
+        for source in SearchSource::ORDER {
+            info!(query = ?text, source = source.name(), "searching for audio");
+            let resolved = match self.resolve_input(&source.input(&text)).await {
+                Ok(resolved) => resolved,
+                Err(error @ (AudioError::Spawn { .. } | AudioError::Timeout(_))) => {
+                    return Err(error);
+                }
+                // No results, unavailable, no Opus: try the next source.
+                Err(error) => {
+                    warn!(source = source.name(), error = %error, "search failed");
+                    continue;
+                }
+            };
+            if matching::matches(query, &resolved.metadata) {
+                return Ok(resolved);
+            }
+            info!(source = source.name(), title = ?resolved.metadata.title,
+                duration_secs = resolved.metadata.duration.map(|d| d.as_secs()),
+                "search result has the wrong duration");
+        }
+        warn!(query = ?text, "no search result matched");
+        Err(AudioError::NoMatch(text))
+    }
+
+    /// Run `yt-dlp -j` and turn its JSON into a [`Resolved`].
+    async fn resolve_input(&self, input: &str) -> Result<Resolved, AudioError> {
+        let started = Instant::now();
         let mut cmd = Command::new(&self.config.program);
 
         cmd.arg("-j")
@@ -106,18 +182,19 @@ impl YtDlp {
             .arg("--no-warnings")
             .arg("--no-progress")
             .arg("-f")
-            .arg(OPUS_FORMAT);
+            .arg(OPUS_FORMAT)
+            // Searches resolve their top result only; no-op for a video.
+            .args(["--playlist-end", "1"]);
 
         for arg in &self.config.extra_args {
             cmd.arg(arg);
         }
 
-        let input = match target {
-            PlaybackTarget::Url(url) => url.to_string(),
-            PlaybackTarget::YoutubeSearch(query) => format!("ytsearch1:{query}"),
-        };
-        let output = self.run(cmd, &input).await?;
-        parse_output(&output)
+        let output = self.run(cmd, input).await?;
+        let resolved = parse_output(&output)?;
+        info!(title = ?resolved.metadata.title, duration_secs = resolved.metadata.duration.map(|d| d.as_secs()),
+            elapsed_ms = started.elapsed().as_millis(), "audio source resolved");
+        Ok(resolved)
     }
 
     /// Expand playlists without resolving each entry's expiring audio URL.
@@ -297,7 +374,12 @@ pub fn parse_output(stdout: &[u8]) -> Result<Resolved, AudioError> {
                 .duration
                 .filter(|d| *d > 0.0)
                 .map(Duration::from_secs_f64),
-            uploader: output.uploader,
+            // Credited artists beat a "Name - Topic" channel.
+            uploader: output
+                .artists
+                .filter(|a| !a.is_empty())
+                .map(|a| a.join(", "))
+                .or(output.uploader),
             thumbnail: output.thumbnail,
             webpage_url: output.webpage_url,
         },
@@ -353,6 +435,7 @@ struct Output {
     duration: Option<f64>,
     webpage_url: Option<String>,
     uploader: Option<String>,
+    artists: Option<Vec<String>>,
     thumbnail: Option<String>,
     requested_downloads: Option<Vec<Format>>,
     #[serde(flatten)]
@@ -375,46 +458,130 @@ struct Format {
 mod tests {
     use super::*;
 
+    /// Fake yt-dlp: resolves each search input to its top result, and logs
+    /// every input so the tests can check which ones were run, in order.
+    #[cfg(unix)]
+    const FAKE_YTDLP: &str = r##"#!/bin/sh
+before=; last=
+for arg; do before=$last; last=$arg; done
+# The input is always one literal argument after `--`.
+[ "$before" = '--' ] || exit 7
+[ "$1" = '-j' ] && [ "$6" = 'bestaudio[acodec=opus]' ] || exit 3
+printf '%s\n' "$last" >> "$0.log"
+case "$last" in
+'https://music.youtube.com/search?q=Artist+Song+%24%28literal%29%3B#songs')
+  printf '%s\n' '{"title":"Song $(literal);","duration":181,"artists":["Artist"],"uploader":"Artist - Topic","webpage_url":"https://www.youtube.com/watch?v=song","url":"https://cdn/song","acodec":"opus"}' ;;
+'https://music.youtube.com/search?q=Artist+Rare#songs')
+  printf '%s\n' '{"title":"Rare (Extended Mix)","duration":400,"url":"https://cdn/extended","acodec":"opus"}' ;;
+'ytsearch1:Artist Rare')
+  printf '%s\n' '{"title":"Artist - Rare (Official Audio)","duration":182,"uploader":"ArtistVEVO","url":"https://cdn/rare","acodec":"opus"}' ;;
+*) echo 'ERROR: no results' >&2; exit 1 ;;
+esac
+"##;
+
     #[cfg(unix)]
     #[tokio::test]
-    async fn youtube_search_is_one_literal_argument_and_resolves_audio() {
+    async fn search_prefers_youtube_music_and_falls_back_on_wrong_duration() {
         use std::os::unix::fs::PermissionsExt;
         let path = std::env::temp_dir().join(format!(
             "rust-music-bot-ytdlp-{}-{}",
             std::process::id(),
             rand::random::<u64>()
         ));
-        // Fake yt-dlp rejects anything except the exact argv contract, including
-        // shell metacharacters that must reach it as literal song-name text.
-        std::fs::write(
-            &path,
-            r#"#!/bin/sh
-[ "$#" -eq 8 ] || exit 1
-[ "$1" = '-j' ] || exit 2
-[ "$2" = '--no-playlist' ] || exit 3
-[ "$6" = 'bestaudio[acodec=opus]' ] || exit 4
-[ "$7" = '--' ] || exit 5
-[ "$8" = 'ytsearch1:Artist Song $(literal); & more' ] || exit 6
-printf '%s\n' '{"title":"Matched song","url":"https://example.com/audio","acodec":"opus"}'
-"#,
-        )
-        .unwrap();
+        let log = path.with_extension("log");
+        std::fs::write(&path, FAKE_YTDLP).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         let ytdlp = YtDlp::new(YtDlpConfig {
             program: path.to_string_lossy().into_owned(),
             timeout: Duration::from_secs(5),
             extra_args: Vec::new(),
         });
-        let result = ytdlp
-            .resolve(&PlaybackTarget::YoutubeSearch(
-                "Artist Song $(literal); & more".into(),
-            ))
-            .await;
-        std::fs::remove_file(path).unwrap();
+        let search = |title: &str| {
+            PlaybackTarget::Search(SearchQuery {
+                artists: vec!["Artist".into()],
+                title: title.into(),
+                duration: Some(Duration::from_secs(180)),
+            })
+        };
+        let calls = || {
+            let calls = std::fs::read_to_string(&log).unwrap_or_default();
+            std::fs::remove_file(&log).ok();
+            calls.lines().map(str::to_owned).collect::<Vec<_>>()
+        };
+
+        // Shell syntax in a song name must reach yt-dlp as literal text.
+        let found = ytdlp.resolve(&search("Song $(literal);")).await;
+        let found_calls = calls();
+        // YouTube Music's top result is an extended mix.
+        let rare = ytdlp.resolve(&search("Rare")).await;
+        let rare_calls = calls();
+        let missing = ytdlp.resolve(&search("Missing")).await;
+        let missing_calls = calls();
+        std::fs::remove_file(&path).unwrap();
+
+        let found = found.unwrap();
+        assert_eq!(found.media_url, "https://cdn/song");
+        assert_eq!(found.metadata.uploader.as_deref(), Some("Artist"));
         assert_eq!(
-            result.unwrap().metadata.title.as_deref(),
-            Some("Matched song")
+            found_calls,
+            ["https://music.youtube.com/search?q=Artist+Song+%24%28literal%29%3B#songs"]
         );
+        assert_eq!(rare.unwrap().media_url, "https://cdn/rare");
+        assert_eq!(
+            rare_calls,
+            [
+                "https://music.youtube.com/search?q=Artist+Rare#songs",
+                "ytsearch1:Artist Rare",
+            ]
+        );
+        assert!(matches!(missing, Err(AudioError::NoMatch(ref q)) if q == "Artist Missing"));
+        assert_eq!(missing_calls.len(), 2);
+    }
+
+    /// Real searches where the top result has to be checked. Opt-in:
+    ///   cargo test live_search -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "requires yt-dlp and network access"]
+    async fn live_search_finds_the_requested_recording() {
+        let ytdlp = YtDlp::new(YtDlpConfig {
+            program: std::env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),
+            timeout: Duration::from_secs(60),
+            extra_args: Vec::new(),
+        });
+        for (artists, title, secs) in [
+            (
+                &["Daft Punk", "Pharrell Williams", "Nile Rodgers"][..],
+                "Get Lucky (feat. Pharrell Williams and Nile Rodgers)",
+                369,
+            ),
+            (
+                &["Daft Punk", "Pharrell Williams", "Nile Rodgers"][..],
+                "Get Lucky - Radio Edit",
+                248,
+            ),
+            (&["Beyoncé"][..], "Halo", 261),
+            (&["Oasis"][..], "Live Forever - Remastered", 277),
+        ] {
+            let query = SearchQuery {
+                artists: artists.iter().map(|&a| a.to_owned()).collect(),
+                title: title.into(),
+                duration: Some(Duration::from_secs(secs)),
+            };
+            let started = Instant::now();
+            let resolved = ytdlp
+                .resolve(&PlaybackTarget::Search(query.clone()))
+                .await
+                .unwrap();
+            println!(
+                "{title}: {:?} by {:?}, {:?}, {:?} in {:?}",
+                resolved.metadata.title,
+                resolved.metadata.uploader,
+                resolved.metadata.duration,
+                resolved.metadata.webpage_url,
+                started.elapsed()
+            );
+            assert!(matching::matches(&query, &resolved.metadata));
+        }
     }
 
     #[test]
