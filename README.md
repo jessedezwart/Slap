@@ -1,60 +1,42 @@
 # rust-music-bot
 
-A Discord music bot that plays YouTube audio **without transcoding it**.
+A Discord music bot that plays audio **without transcode** using yt-dlp and songbird. Designed to be highly efficient.
 
-yt-dlp resolves a link to YouTube's Opus-in-WebM rendition, this bot fetches those
-bytes itself over HTTP, and songbird hands the Opus packets straight to Discord's
-voice socket. Nothing decodes or re-encodes audio at any point, so per-track CPU
-cost is essentially a memcpy — which is what makes many concurrent streams viable
-on a single core.
+### Why not use Songbird's built-in YouTube source?
 
-```
-/play <url>
-  └─ yt-dlp -j ────────────► direct media URL + headers        (argv, never a shell)
-  └─ reqwest ranged GET ───► prefetch buffer (configurable)
-                             └─ songbird async adapter
-                                └─ symphonia WebM demux
-                                   └─ Opus passthrough ──► DAVE encrypt ──► UDP
-```
+First of all, this is an educational exercise. Goal is managing data efficiently across different services without blocking threads, handling disconnects across the pipeline. And seeing how performant I could make it.
 
-## Requirements
+There are a few additional advantages:
+- Controlling yt-dlp means we can set to use Opus-in-WebM, which is the only format that can be passed through to Discord without transcoding.
+- Songbird loads the entire track into memory. This has disadavantages for ram usage and startup time. And since the complete track needs to be loaded on an OS-thread, it can block the complete thread.
+- Songbird doesn't cache yt-dlp metadata. Not that big of a deal, but means additional stalling of an OS-thread.
+- Since I only delegate the playback, I have more control over the failure-handling. I think Songbird orphans instead of kills a yt-dlp process when yt-dlp fails for example.
 
-- Rust 1.83+ (songbird 0.6's MSRV)
-- **cmake** and a C toolchain — songbird's `driver` feature links libopus
-- **yt-dlp** on `PATH`, or set `YTDLP_PATH`
-- A Discord bot invited with the `bot` and `applications.commands` scopes
+## Sources
 
-No privileged gateway intents are needed: the bot uses only `GUILDS` and
-`GUILD_VOICE_STATES`.
+Some supported sources:
 
-## Running
+- YouTube
+- SoundCloud
+- Bandcamp
 
-```sh
-export DISCORD_TOKEN=...
-cargo run --release
-```
+Full list is here: https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md
 
-`/play` is registered as a global slash command at start-up. Global commands can
-take a few minutes to appear in the client the first time.
+## Architecture
+
+1. yt-dlp resolves a link to YouTube's Opus-in-WebM rendition.
+1. The bot fetches the WebM and demuxes it to Opus frames.
+1. The frames are passed to songbird for playback.
 
 ## Docker
 
-The image carries yt-dlp, so nothing but the token is needed on the host.
+Set the token in .env and run:
 
 ```sh
-docker build -t rust-music-bot .
-docker run --rm --init --env-file .env rust-music-bot
+docker compose up
 ```
 
-`--env-file` is the simplest path. Alternatively mount the file and let the bot
-read it itself, which also works with a read-only container:
-
-```sh
-docker run --rm --init -v "$PWD/.env:/app/.env:ro" rust-music-bot
-```
-
-`--init` is worth keeping: the bot is PID 1 in the container and spawns yt-dlp
-children, so a reaper avoids accumulating zombies over a long uptime.
+### Notes
 
 yt-dlp's version is pinned by the `YTDLP_VERSION` build argument. YouTube
 breaks extractors regularly, so rebuild with a newer one when resolution starts
@@ -64,58 +46,37 @@ failing:
 docker build --build-arg YTDLP_VERSION=2026.09.01 -t rust-music-bot .
 ```
 
+## Development container
+
+With Docker running and the VS Code Dev Containers extension installed, open
+this repository and run **Dev Containers: Reopen in Container**. The container
+includes Rust, rustfmt, Clippy, CMake, yt-dlp, and Rust editor extensions.
+
+Copy `.env.example` to `.env` if you have not already done so, then set
+`DISCORD_TOKEN` in `.env`. In the container terminal:
+
+```sh
+cargo run
+cargo test
+```
+
 ## Configuration
 
-Everything except the token has a working default. `.env.example` lists every
-variable with its default; copy it to `.env` and load it into the environment
-(the bot reads the environment, it does not parse `.env` itself).
-
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `DISCORD_TOKEN` | *(required)* | Bot token |
-| `BUFFER_MS` | `5000` | How much audio to hold ahead of the mixer |
-| `PREFILL_RATIO` | `0.5` | Fraction of the buffer filled before playback starts |
-| `PREFILL_TIMEOUT_MS` | `10000` | Give up waiting for prefill and start anyway |
-| `ASSUMED_BITRATE_BPS` | `160000` | Used to size the buffer when yt-dlp reports no bitrate |
-| `YTDLP_PATH` | `yt-dlp` | Binary to spawn |
-| `YTDLP_TIMEOUT_MS` | `15000` | Kill yt-dlp after this long |
-| `YTDLP_EXTRA_ARGS` | *(empty)* | Extra argv, e.g. `--cookies-from-browser firefox` |
-| `WORKER_THREADS` | `1` | Tokio worker threads |
-| `RUST_LOG` | `rust_music_bot=info,warn` | Log filter |
-
-`BUFFER_MS` is converted to a byte budget using the track's real bitrate when
-yt-dlp reports one. The budget is enforced in bytes by a semaphore, so it holds
-regardless of how the network chunks the response.
+All configuration settings are documented in `.env.example`. Copy that file to `.env`.
 
 ## Notes on behaviour
-
-**Opus passthrough is conditional.** songbird only passes Opus through while
-exactly one track is live *and* its volume is exactly `1.0`. Queued tracks are
-paused, so queueing is safe — but adding a `/volume` command would silently turn
-the whole pipeline into decode → mix → re-encode. If you add one, say so in its
-help text.
-
-**Queued tracks are lazy.** A queued song spawns no yt-dlp process and opens no
-socket until songbird's preloader readies it, a few seconds before it is due, so
-a deep queue costs nothing and resolved URLs cannot expire while waiting.
 
 **Disconnects drop everything.** Each guild owns one `CancellationToken`; every
 yt-dlp child, fetch task and buffer holds a descendant of it. Any voice
 disconnect — dropped connection, kick, channel move, shutdown — cancels that one
 token and the entire pipeline for that guild goes away.
 
-**Videos without Opus are rejected.** That is deliberate: supporting them would
-mean transcoding, which is exactly what this design avoids. The user gets a
-message saying so.
-
 ## Diagnostics
 
 Run with `RUST_LOG=rust_music_bot=debug` to see buffer depth and stream lifecycle.
 The line to watch for is:
 
-```
-audio buffer ran dry: playback may have stuttered
-```
+`audio buffer ran dry: playback may have stuttered`
 
 That is emitted when the mixer asked for bytes and the buffer was empty — the
 direct signal that `BUFFER_MS` is too low for the network in question.
@@ -130,3 +91,13 @@ cargo test -- --ignored         # end-to-end: needs yt-dlp and network access
 The ignored test resolves a real video and asserts that what songbird ends up
 holding is a `CODEC_TYPE_OPUS` track — the precondition the passthrough design
 rests on. Point it at another video with `YTDLP_TEST_URL`.
+
+## Invite
+
+[Invite the bot](https://discord.com/oauth2/authorize?client_id=881107137990918166&scope=bot%20applications.commands&permissions=3146752)
+
+Replace `client_id` with your bot's client ID. The permissions integer is the minimum needed to join a voice channel and respond to slash commands:
+
+- connect
+- speak
+- use slash commands

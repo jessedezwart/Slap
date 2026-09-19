@@ -1,6 +1,6 @@
 //! Runtime configuration, read once from the environment at start-up.
 
-use std::{env, fmt::Display, str::FromStr, time::Duration};
+use std::{env, fmt::Display, num::ParseIntError, str::FromStr, time::Duration};
 
 use crate::error::ConfigError;
 
@@ -12,9 +12,8 @@ const MAX_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub struct Config {
     pub token: String,
-    /// Tokio worker threads. One is the default: the realtime work happens on
-    /// songbird's own mixer thread, not here.
-    pub worker_threads: usize,
+    /// Tokio worker threads, or `None` for one per available core.
+    pub worker_threads: Option<usize>,
     pub ytdlp: YtDlpConfig,
     pub buffer: BufferConfig,
 }
@@ -36,18 +35,22 @@ pub struct BufferConfig {
     pub target: Duration,
     /// Fraction of `target` that must be buffered before playback starts.
     pub prefill_ratio: f32,
-    /// How long to wait for that prefill before starting anyway.
-    pub prefill_timeout: Duration,
     /// Used when yt-dlp reports no bitrate. YouTube's itag 251 is ~160 kbps.
     pub assumed_bitrate_bps: u32,
 }
 
 impl BufferConfig {
+    /// Playback rate in bytes per second, for turning a byte count into the
+    /// playback time it represents.
+    pub fn bytes_per_second(&self, bitrate_bps: Option<u32>) -> u64 {
+        u64::from(bitrate_bps.unwrap_or(self.assumed_bitrate_bps).max(8_000)) / 8
+    }
+
     /// Convert the configured playback time into a byte budget for this track.
     pub fn bytes_for(&self, bitrate_bps: Option<u32>) -> usize {
-        let bps = u64::from(bitrate_bps.unwrap_or(self.assumed_bitrate_bps).max(8_000));
+        let per_second = self.bytes_per_second(bitrate_bps);
         let millis = u64::try_from(self.target.as_millis()).unwrap_or(u64::MAX);
-        let bytes = bps / 8 * millis / 1000;
+        let bytes = per_second * millis / 1000;
 
         usize::try_from(bytes)
             .unwrap_or(MAX_BUFFER_BYTES)
@@ -81,7 +84,7 @@ impl Config {
 
         Ok(Self {
             token,
-            worker_threads: parse_env("WORKER_THREADS", 1usize)?.max(1),
+            worker_threads: parse_worker_threads()?,
             ytdlp: YtDlpConfig {
                 program: env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),
                 timeout: Duration::from_millis(parse_env("YTDLP_TIMEOUT_MS", 15_000u64)?),
@@ -94,11 +97,34 @@ impl Config {
             buffer: BufferConfig {
                 target: Duration::from_millis(parse_env("BUFFER_MS", 5_000u64)?),
                 prefill_ratio: parse_env("PREFILL_RATIO", 0.5f32)?,
-                prefill_timeout: Duration::from_millis(parse_env("PREFILL_TIMEOUT_MS", 10_000u64)?),
                 assumed_bitrate_bps: parse_env("ASSUMED_BITRATE_BPS", 160_000u32)?,
             },
         })
     }
+}
+
+/// `WORKER_THREADS`, where unset, empty, `auto` and `0` all mean "let tokio
+/// size the pool from the available cores".
+fn parse_worker_threads() -> Result<Option<usize>, ConfigError> {
+    let Ok(raw) = env::var("WORKER_THREADS") else {
+        return Ok(None);
+    };
+
+    let trimmed = raw.trim();
+
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
+        return Ok(None);
+    }
+
+    let count: usize = trimmed
+        .parse()
+        .map_err(|e: ParseIntError| ConfigError::Invalid {
+            name: "WORKER_THREADS",
+            value: raw.clone(),
+            reason: e.to_string(),
+        })?;
+
+    Ok((count > 0).then_some(count))
 }
 
 fn parse_env<T>(name: &'static str, default: T) -> Result<T, ConfigError>

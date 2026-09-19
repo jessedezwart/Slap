@@ -27,11 +27,11 @@ use crate::{
 pub fn play_command() -> Command {
     CommandBuilder::new(
         "play",
-        "Play the audio of a YouTube link in your voice channel",
+        "Play audio from a link in your voice channel",
         CommandType::ChatInput,
     )
     .option(
-        StringBuilder::new("url", "A YouTube video link")
+        StringBuilder::new("url", "An HTTP(S) media link")
             .required(true)
             .build(),
     )
@@ -70,7 +70,7 @@ pub async fn handle_interaction(state: Arc<State>, interaction: Interaction) {
             Ok(message) => message,
             Err(error) => user_message(&error),
         },
-        None => "You need to give me a YouTube link.".to_owned(),
+        None => "You need to give me an HTTP(S) media link.".to_owned(),
     };
 
     if let Err(error) = follow_up(&state, &interaction, &message).await {
@@ -121,11 +121,12 @@ async fn play(
         cancel,
     );
 
-    // Runs yt-dlp once so we can name the track; the result is cached inside
-    // the source, so playback does not pay for it again.
     let metadata = source.metadata().await?;
 
-    let (_handle, position) = state.sessions.enqueue(guild_id, source.into()).await?;
+    let (_handle, position) = state
+        .sessions
+        .enqueue(guild_id, source.into(), metadata.duration)
+        .await?;
 
     let title = metadata.title.clone().unwrap_or_else(|| raw_url.to_owned());
 
@@ -153,7 +154,7 @@ fn user_message(error: &PlayError) -> String {
         PlayError::NotInGuild => "This command only works inside a server.".to_owned(),
         PlayError::NotInVoice => "Join a voice channel first, then run `/play` again.".to_owned(),
         PlayError::Audio(AudioError::UnsupportedUrl(_)) => {
-            "That does not look like a YouTube link.".to_owned()
+            "That does not look like a valid HTTP(S) link.".to_owned()
         }
         PlayError::Audio(AudioError::NoOpusFormat) => {
             "That video has no Opus audio track, so I cannot stream it.".to_owned()

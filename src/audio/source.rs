@@ -197,7 +197,6 @@ mod tests {
         let buffer = crate::config::BufferConfig {
             target: Duration::from_millis(5_000),
             prefill_ratio: 0.5,
-            prefill_timeout: Duration::from_secs(30),
             assumed_bitrate_bps: 160_000,
         };
 

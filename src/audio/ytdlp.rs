@@ -17,24 +17,10 @@ use crate::{config::YtDlpConfig, error::AudioError};
 
 /// Opus-only format selection.
 ///
-/// 251/250/249 are YouTube's Opus-in-WebM renditions (high/medium/low). The
-/// trailing generic selector covers the rare case where those itags are absent
-/// but some other Opus rendition exists. Nothing here can select a format that
-/// would need transcoding.
-const OPUS_FORMAT: &str = "251/250/249/bestaudio[acodec=opus]";
-
-/// Hosts we are willing to hand to yt-dlp.
-///
-/// Passing argv means there is no injection risk, but this keeps the bot from
-/// being pointed at yt-dlp's several hundred other extractors.
-const ALLOWED_HOSTS: &[&str] = &[
-    "youtube.com",
-    "www.youtube.com",
-    "m.youtube.com",
-    "music.youtube.com",
-    "youtu.be",
-    "www.youtu.be",
-];
+/// Restricting to `acodec=opus` guarantees whatever yt-dlp picks needs no
+/// transcoding, while still letting it pick the highest-bitrate Opus
+/// rendition available for the video (rather than pinning to a fixed itag).
+const OPUS_FORMAT: &str = "bestaudio[acodec=opus]";
 
 /// Keeps a console window from flashing up per invocation on Windows.
 #[cfg(windows)]
@@ -69,16 +55,12 @@ impl YtDlp {
         Self { config }
     }
 
-    /// Check that `raw` is a YouTube link we are willing to resolve.
+    /// Check that `raw` is an HTTP(S) URL to hand to yt-dlp.
     pub fn validate_url(raw: &str) -> Result<Url, AudioError> {
         let url = Url::parse(raw.trim()).map_err(|_| AudioError::UnsupportedUrl(raw.to_owned()))?;
 
         let scheme_ok = matches!(url.scheme(), "http" | "https");
-        let host_ok = url
-            .host_str()
-            .is_some_and(|host| ALLOWED_HOSTS.contains(&host.to_ascii_lowercase().as_str()));
-
-        if scheme_ok && host_ok {
+        if scheme_ok && url.host_str().is_some() {
             Ok(url)
         } else {
             Err(AudioError::UnsupportedUrl(raw.to_owned()))
@@ -281,23 +263,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accepts_youtube_urls() {
+    fn accepts_http_urls_from_any_host() {
         for url in [
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
             "https://youtu.be/dQw4w9WgXcQ",
             "https://music.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://example.com/watch?v=x",
+            "http://example.com/audio.opus",
         ] {
             assert!(YtDlp::validate_url(url).is_ok(), "{url} should be accepted");
         }
     }
 
     #[test]
-    fn rejects_other_hosts_and_schemes() {
+    fn rejects_invalid_urls_and_other_schemes() {
         for url in [
-            "https://example.com/watch?v=x",
             "file:///etc/passwd",
             "not a url",
-            "https://youtube.com.evil.test/watch?v=x",
+            "ftp://example.com/audio.opus",
+            "https://",
         ] {
             assert!(
                 YtDlp::validate_url(url).is_err(),

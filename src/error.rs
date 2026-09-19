@@ -7,7 +7,7 @@ use thiserror::Error;
 /// Anything that can go wrong between a YouTube link and Opus packets on the wire.
 #[derive(Debug, Error)]
 pub enum AudioError {
-    #[error("`{0}` is not a YouTube link")]
+    #[error("`{0}` is not a valid HTTP(S) link")]
     UnsupportedUrl(String),
 
     #[error("could not run `{program}`: {source}")]

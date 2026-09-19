@@ -5,7 +5,7 @@
 //! tearing a guild down is a single `cancel()` rather than a walk over
 //! per-track state.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use dashmap::DashMap;
 use songbird::{
@@ -24,6 +24,10 @@ use twilight_model::id::{
 };
 
 use crate::voice::events::{DriverDisconnectNotifier, TrackErrorNotifier, VoiceCommand};
+
+/// How far into a track the next one starts loading, matching the lead
+/// songbird's own `enqueue` would have picked.
+const PRELOAD_LEAD: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct GuildSession {
@@ -116,18 +120,25 @@ impl SessionManager {
     /// Add a track to the guild's queue, returning its position.
     ///
     /// Position 1 means it started playing immediately.
+    ///
+    /// `duration` is passed in rather than resolved here: songbird's own
+    /// `enqueue` awaits the track's metadata while holding the `Call` lock,
+    /// and a shard's `Songbird::process` would queue behind that.
     pub async fn enqueue(
         &self,
         guild_id: Id<GuildMarker>,
         input: Input,
+        duration: Option<Duration>,
     ) -> Result<(TrackHandle, usize), SessionError> {
         let call = self
             .songbird
             .get(guild_id)
             .ok_or(SessionError::NotConnected)?;
 
+        let preload = duration.map(|duration| duration.saturating_sub(PRELOAD_LEAD));
+
         let mut call = call.lock().await;
-        let handle = call.enqueue_input(input).await;
+        let handle = call.enqueue_with_preload(input.into(), preload);
 
         Ok((handle, call.queue().len()))
     }

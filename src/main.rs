@@ -9,7 +9,7 @@ mod discord;
 mod error;
 mod voice;
 
-use std::{collections::HashMap, process::ExitCode, sync::Arc};
+use std::{collections::HashMap, num::NonZeroUsize, process::ExitCode, sync::Arc, thread};
 
 use songbird::{Config as SongbirdConfig, Songbird, shards::TwilightMap};
 use tokio::{signal, sync::watch};
@@ -59,10 +59,14 @@ fn main() -> ExitCode {
         }
     };
 
-    // One worker by default: the only realtime work is songbird's 20 ms mixer
-    // tick, which runs on its own dedicated thread rather than here.
+    let worker_threads = config
+        .worker_threads
+        .unwrap_or_else(|| thread::available_parallelism().map_or(1, NonZeroUsize::get));
+
+    info!(worker_threads, "starting the tokio runtime");
+
     let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(config.worker_threads)
+        .worker_threads(worker_threads)
         .enable_all()
         .build()
     {
