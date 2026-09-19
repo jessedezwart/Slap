@@ -161,16 +161,14 @@ async fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sy
     signal::ctrl_c().await?;
     info!("shutting down");
 
+    for guild_id in state.sessions.active_guilds() {
+        state.sessions.teardown(guild_id, "shutdown").await;
+    }
+
     let _ = shutdown_tx.send(true);
 
     for dispatcher in dispatchers {
         let _ = dispatcher.await;
-    }
-
-    // Tear every guild down explicitly so children processes and sockets go
-    // away rather than waiting on process exit.
-    for guild_id in state.sessions.active_guilds() {
-        state.sessions.teardown(guild_id, "shutdown").await;
     }
 
     command_loop.abort();
