@@ -13,6 +13,11 @@ strip = true       # drop symbols/debuginfo from the shipped binary
 # own tokio task, so a panic in one should fail that task (and get torn down
 # by its CancellationToken), not kill every other guild's voice connection too.
 
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+
 [dependencies]
 # 0.6 is the first release with DAVE (Discord's mandatory voice E2EE since 2026).
 # `tws` instead of the default `tungstenite` so songbird and twilight 0.17 share
