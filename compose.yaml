@@ -1,0 +1,10 @@
+services:
+  bot:
+    build: .
+    image: rust-music-bot
+    restart: unless-stopped
+    init: true # reaps yt-dlp children; the bot is PID 1 otherwise
+    env_file:
+      - .env
+    stop_signal: SIGINT # matches the Dockerfile; SIGTERM would skip the graceful teardown
+    stop_grace_period: 10s

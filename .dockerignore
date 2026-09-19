@@ -1,0 +1,10 @@
+# Never let a real token into an image layer.
+.env
+
+target/
+.git/
+.gitignore
+.env.example
+Dockerfile
+.dockerignore
+README.md
