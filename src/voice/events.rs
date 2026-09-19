@@ -9,6 +9,7 @@ use songbird::{
     tracks::PlayMode,
 };
 use tokio::sync::mpsc::UnboundedSender;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use twilight_model::id::{Id, marker::GuildMarker};
 
@@ -18,6 +19,7 @@ pub enum VoiceCommand {
     Teardown {
         guild_id: Id<GuildMarker>,
         reason: String,
+        cancel: CancellationToken,
     },
 }
 
@@ -25,6 +27,7 @@ pub enum VoiceCommand {
 pub struct DriverDisconnectNotifier {
     pub guild_id: Id<GuildMarker>,
     pub commands: UnboundedSender<VoiceCommand>,
+    pub cancel: CancellationToken,
 }
 
 #[async_trait::async_trait]
@@ -39,6 +42,7 @@ impl EventHandler for DriverDisconnectNotifier {
             let _ = self.commands.send(VoiceCommand::Teardown {
                 guild_id: self.guild_id,
                 reason,
+                cancel: self.cancel.clone(),
             });
         }
 

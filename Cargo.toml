@@ -70,6 +70,7 @@ async-trait = "0.1"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 bytes = "1"
 dashmap = "6"
+rand = "0.9"
 # Loads `.env` for local runs. A missing file is not an error, so this stays
 # inert in deployments where the environment is already populated.
 dotenvy = "0.15"

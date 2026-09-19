@@ -1,7 +1,9 @@
-//! The `/play` slash command.
+//! Playback and queue slash commands.
 
 use std::{fmt::Write as _, sync::Arc, time::Duration};
 
+use rand::seq::SliceRandom;
+use songbird::tracks::TrackHandle;
 use tracing::{info, warn};
 use twilight_model::{
     application::{
@@ -13,38 +15,76 @@ use twilight_model::{
 };
 use twilight_util::builder::{
     InteractionResponseDataBuilder,
-    command::{CommandBuilder, StringBuilder},
+    command::{BooleanBuilder, CommandBuilder, IntegerBuilder, StringBuilder},
 };
 
 use crate::{
-    audio::{source::OpusYtSource, ytdlp::YtDlp},
+    audio::{
+        source::OpusYtSource,
+        ytdlp::{PLAYLIST_LIMIT, TrackMetadata, YtDlp},
+    },
     discord::state::State,
     error::AudioError,
-    voice::session::SessionError,
+    voice::session::{ControlResult, SessionError},
 };
 
 /// The command definition registered with Discord at start-up.
 pub fn play_command() -> Command {
     CommandBuilder::new(
         "play",
-        "Play audio from a link in your voice channel",
+        "Play a track or add a playlist to your voice channel",
         CommandType::ChatInput,
     )
     .option(
-        StringBuilder::new("url", "An HTTP(S) media link")
+        StringBuilder::new("url", "An HTTP(S) track or playlist link")
             .required(true)
             .build(),
+    )
+    .option(
+        BooleanBuilder::new("shuffle", "Shuffle the imported playlist before adding it").build(),
     )
     .build()
 }
 
-/// Handle one `/play` interaction from start to finish.
+pub fn all_commands() -> Vec<Command> {
+    let mut commands = vec![play_command()];
+    for (name, description) in [
+        ("pause", "Pause the current track"),
+        ("resume", "Resume the paused track"),
+        ("stop", "Stop playback, clear the queue, and disconnect"),
+        (
+            "shuffle",
+            "Shuffle upcoming tracks without interrupting the current track",
+        ),
+    ] {
+        commands.push(CommandBuilder::new(name, description, CommandType::ChatInput).build());
+    }
+    commands.push(
+        CommandBuilder::new(
+            "queue",
+            "Show the current track and upcoming queue",
+            CommandType::ChatInput,
+        )
+        .option(
+            IntegerBuilder::new("page", "Queue page (five upcoming tracks per page)")
+                .min_value(1)
+                .build(),
+        )
+        .build(),
+    );
+    commands
+}
+
+/// Handle one registered playback interaction from start to finish.
 pub async fn handle_interaction(state: Arc<State>, interaction: Interaction) {
     let Some(InteractionData::ApplicationCommand(data)) = &interaction.data else {
         return;
     };
 
-    if data.name != "play" {
+    if !matches!(
+        data.name.as_str(),
+        "play" | "pause" | "resume" | "stop" | "shuffle" | "queue"
+    ) {
         return;
     }
 
@@ -65,13 +105,28 @@ pub async fn handle_interaction(state: Arc<State>, interaction: Interaction) {
             _ => None,
         });
 
-    let message = match url {
-        Some(url) => match play(&state, &interaction, url).await {
-            Ok(message) => message,
-            Err(error) => user_message(&error),
-        },
-        None => "You need to give me an HTTP(S) media link.".to_owned(),
+    let shuffle = data
+        .options
+        .iter()
+        .any(|o| o.name == "shuffle" && matches!(o.value, CommandOptionValue::Boolean(true)));
+    let page = data
+        .options
+        .iter()
+        .find_map(|o| match o.value {
+            CommandOptionValue::Integer(page) if o.name == "page" => usize::try_from(page).ok(),
+            _ => None,
+        })
+        .unwrap_or(1)
+        .max(1);
+    let result = if data.name == "play" {
+        match url {
+            Some(url) => play(&state, &interaction, url, shuffle).await,
+            None => Ok("You need to give me an HTTP(S) media link.".to_owned()),
+        }
+    } else {
+        control(&state, &interaction, &data.name, page).await
     };
+    let message = result.unwrap_or_else(|error| user_message(&error));
 
     if let Err(error) = follow_up(&state, &interaction, &message).await {
         warn!(%error, "failed to send interaction follow-up");
@@ -98,6 +153,7 @@ async fn play(
     state: &Arc<State>,
     interaction: &Interaction,
     raw_url: &str,
+    shuffle: bool,
 ) -> Result<String, PlayError> {
     let guild_id = interaction.guild_id.ok_or(PlayError::NotInGuild)?;
     let user_id = interaction.author_id().ok_or(PlayError::NotInGuild)?;
@@ -113,46 +169,151 @@ async fn play(
 
     let cancel = state.sessions.join(guild_id, channel_id).await?;
 
-    let mut source = OpusYtSource::new(
-        url,
-        state.client.clone(),
-        state.ytdlp.clone(),
-        state.config.buffer,
-        cancel,
-    );
-
-    let metadata = source.metadata().await?;
-
-    let (_handle, position) = state
-        .sessions
-        .enqueue(guild_id, source.into(), metadata.duration)
-        .await?;
-
-    let title = metadata.title.clone().unwrap_or_else(|| raw_url.to_owned());
-
-    info!(%guild_id, %channel_id, position, title, "queued track");
-
-    let mut message = if position <= 1 {
-        format!("Now playing **{}**", escape(&title))
+    // Also covers a caller leaving during the join handshake.
+    crate::discord::events::reconcile_voice(Arc::clone(state), guild_id);
+    let mut listing = tokio::select! {
+        () = cancel.cancelled() => return Err(AudioError::Cancelled.into()),
+        result = state.ytdlp.list(&url) => result?,
+    };
+    if listing.tracks.is_empty() {
+        return Ok("That playlist contains no accessible tracks.".into());
+    }
+    if shuffle {
+        listing.tracks.shuffle(&mut rand::rng());
+    }
+    let count = listing.tracks.len();
+    let title = listing.tracks[0]
+        .metadata
+        .title
+        .clone()
+        .unwrap_or_else(|| raw_url.to_owned());
+    let duration = listing.tracks[0].metadata.duration;
+    let tracks = listing
+        .tracks
+        .into_iter()
+        .map(|entry| {
+            let mut source = OpusYtSource::new(
+                entry.url,
+                state.client.clone(),
+                state.ytdlp.clone(),
+                state.config.buffer,
+                cancel.clone(),
+            );
+            if let Some(resolved) = listing.single.take() {
+                source = source.with_resolved(resolved);
+            }
+            (source.into(), entry.metadata)
+        })
+        .collect();
+    let position = state.sessions.enqueue(guild_id, &cancel, tracks).await?;
+    info!(%guild_id, %channel_id, position, count, "queued tracks");
+    let mut message = if count == 1 {
+        let mut message = if position == 1 {
+            format!("Now playing **{}**", escape(&title))
+        } else {
+            format!("Queued **{}** at position {}", escape(&title), position - 1)
+        };
+        if let Some(duration) = duration {
+            let _ = write!(message, " ({})", format_duration(duration));
+        }
+        message
     } else {
         format!(
-            "Queued **{}** at position {}",
-            escape(&title),
-            position.saturating_sub(1)
+            "Added {count} tracks{} to the queue.{}",
+            if shuffle { " in shuffled order" } else { "" },
+            if position == 1 {
+                " Playback is starting."
+            } else {
+                ""
+            }
         )
     };
-
-    if let Some(duration) = metadata.duration {
-        let _ = write!(message, " ({})", format_duration(duration));
+    if listing.skipped > 0 {
+        let _ = write!(message, " Skipped {} unavailable entries.", listing.skipped);
     }
-
+    if listing.truncated {
+        let _ = write!(
+            message,
+            " Import limited to the first {PLAYLIST_LIMIT} playlist entries."
+        );
+    }
     Ok(message)
+}
+
+async fn control(
+    state: &Arc<State>,
+    interaction: &Interaction,
+    command: &str,
+    page: usize,
+) -> Result<String, PlayError> {
+    let guild_id = interaction.guild_id.ok_or(PlayError::NotInGuild)?;
+    let user_id = interaction.author_id().ok_or(PlayError::NotInGuild)?;
+    let channel_id = state
+        .cache
+        .voice_state(user_id, guild_id)
+        .map(|voice| voice.channel_id())
+        .ok_or(PlayError::NotInVoice)?;
+    match state
+        .sessions
+        .control(guild_id, channel_id, command)
+        .await?
+    {
+        ControlResult::Message(message) => Ok(message),
+        ControlResult::Queue(tracks) => {
+            let metadata: Vec<_> = tracks
+                .iter()
+                .map(TrackHandle::data::<TrackMetadata>)
+                .collect();
+            Ok(format_queue(&metadata, page))
+        }
+    }
+}
+
+fn format_queue(tracks: &[Arc<TrackMetadata>], page: usize) -> String {
+    let Some(current) = tracks.first() else {
+        return "The queue is empty.".into();
+    };
+    let pages = tracks.len().saturating_sub(1).div_ceil(5).max(1);
+    if page == 0 || page > pages {
+        return format!("That page does not exist. Choose a page from 1 to {pages}.");
+    }
+    let label = |metadata: &TrackMetadata| {
+        let title: String = metadata
+            .title
+            .as_deref()
+            .or(metadata.webpage_url.as_deref())
+            .unwrap_or("Unknown track")
+            .chars()
+            .take(80)
+            .collect();
+        let mut label = escape(&title);
+        if let Some(duration) = metadata.duration {
+            let _ = write!(label, " ({})", format_duration(duration));
+        }
+        label
+    };
+    let mut message = format!(
+        "**Current track:** {}\n**Queue:** {} upcoming • page {page}/{pages}",
+        label(current),
+        tracks.len() - 1
+    );
+    for (index, track) in tracks.iter().enumerate().skip(1 + (page - 1) * 5).take(5) {
+        let _ = write!(message, "\n{index}. {}", label(track));
+    }
+    if pages > 1 {
+        message.push_str("\nUse `/queue page:<number>` to see another page.");
+    }
+    message
 }
 
 fn user_message(error: &PlayError) -> String {
     match error {
         PlayError::NotInGuild => "This command only works inside a server.".to_owned(),
-        PlayError::NotInVoice => "Join a voice channel first, then run `/play` again.".to_owned(),
+        PlayError::NotInVoice => "Join a voice channel first.".to_owned(),
+        PlayError::Session(error) => error.to_string(),
+        PlayError::Audio(AudioError::Cancelled) => {
+            "Playback was stopped or the voice session ended.".into()
+        }
         PlayError::Audio(AudioError::UnsupportedUrl(_)) => {
             "That does not look like a valid HTTP(S) link.".to_owned()
         }
@@ -214,6 +375,7 @@ fn escape(text: &str) -> String {
         .replace('`', "\\`")
         .replace('~', "\\~")
         .replace('|', "\\|")
+        .replace(['\n', '\r'], " ")
         .replace('@', "@\u{200b}")
 }
 
@@ -245,6 +407,34 @@ fn ephemeral(message: &str) -> InteractionResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queue_pages_are_bounded_and_keep_positions() {
+        let tracks: Vec<_> = (0..13)
+            .map(|i| {
+                Arc::new(TrackMetadata {
+                    title: Some(format!("Song {i}")),
+                    ..TrackMetadata::default()
+                })
+            })
+            .collect();
+        let page = format_queue(&tracks, 2);
+        assert!(page.contains("Current track:** Song 0"));
+        assert!(page.contains("page 2/3"));
+        assert!(page.contains("6. Song 6"));
+        assert!(page.contains("10. Song 10"));
+        assert!(!page.contains("11. Song 11"));
+        assert!(format_queue(&tracks, usize::MAX).contains("does not exist"));
+        assert_eq!(format_queue(&[], 1), "The queue is empty.");
+        let metadata = Arc::new(TrackMetadata {
+            title: Some("*@\n".repeat(100)),
+            ..TrackMetadata::default()
+        });
+        let long = vec![metadata; 10];
+        let message = format_queue(&long, 1);
+        assert!(message.chars().count() < 2000);
+        assert_eq!(message.lines().count(), 8);
+    }
 
     #[test]
     fn formats_durations() {

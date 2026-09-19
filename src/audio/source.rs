@@ -20,7 +20,7 @@ use url::Url;
 use crate::{
     audio::{
         stream::{PrefetchStream, SourceSpec},
-        ytdlp::{Resolved, TrackMetadata, YtDlp},
+        ytdlp::{Resolved, YtDlp},
     },
     config::BufferConfig,
     error::AudioError,
@@ -84,8 +84,14 @@ impl OpusYtSource {
         Ok(resolved)
     }
 
-    /// Fetch just the metadata needed to answer the user's `/play`.
-    pub async fn metadata(&mut self) -> Result<TrackMetadata, AudioError> {
+    /// Reuse the single-track metadata resolve performed while listing a URL.
+    pub fn with_resolved(mut self, resolved: Resolved) -> Self {
+        self.cached = Some((resolved, Instant::now()));
+        self
+    }
+
+    #[cfg(test)]
+    pub async fn metadata(&mut self) -> Result<crate::audio::ytdlp::TrackMetadata, AudioError> {
         self.resolve().await.map(|resolved| resolved.metadata)
     }
 }

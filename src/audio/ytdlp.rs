@@ -50,6 +50,23 @@ pub struct YtDlp {
     config: YtDlpConfig,
 }
 
+/// Limit imports so accidental channel/radio links cannot create an unbounded queue.
+pub const PLAYLIST_LIMIT: usize = 500;
+
+#[derive(Debug)]
+pub struct ListedTrack {
+    pub url: Url,
+    pub metadata: TrackMetadata,
+}
+
+#[derive(Debug)]
+pub struct MediaList {
+    pub tracks: Vec<ListedTrack>,
+    pub skipped: usize,
+    pub truncated: bool,
+    pub single: Option<Resolved>,
+}
+
 impl YtDlp {
     pub fn new(config: YtDlpConfig) -> Self {
         Self { config }
@@ -82,6 +99,31 @@ impl YtDlp {
             cmd.arg(arg);
         }
 
+        let output = self.run(cmd, url).await?;
+        parse_output(&output)
+    }
+
+    /// Expand playlists without resolving each entry's expiring audio URL.
+    pub async fn list(&self, url: &Url) -> Result<MediaList, AudioError> {
+        let mut cmd = Command::new(&self.config.program);
+        cmd.args(&self.config.extra_args)
+            .args([
+                "--dump-single-json",
+                "--flat-playlist",
+                "--yes-playlist",
+                "--ignore-errors",
+                "--no-warnings",
+                "--no-progress",
+                "--skip-download",
+                "--playlist-end",
+            ])
+            .arg((PLAYLIST_LIMIT + 1).to_string())
+            .args(["-f", OPUS_FORMAT]);
+        let output = self.run(cmd, url).await?;
+        parse_list(&output, url)
+    }
+
+    async fn run(&self, mut cmd: Command, url: &Url) -> Result<Vec<u8>, AudioError> {
         // `--` so a URL starting with `-` can never be read as an option.
         cmd.arg("--").arg(url.as_str());
 
@@ -126,8 +168,62 @@ impl YtDlp {
             });
         }
 
-        parse_output(&output.stdout)
+        Ok(output.stdout)
     }
+}
+
+fn parse_list(stdout: &[u8], original: &Url) -> Result<MediaList, AudioError> {
+    let value: serde_json::Value = serde_json::from_slice(stdout)?;
+    let Some(entries) = value.get("entries").and_then(serde_json::Value::as_array) else {
+        let resolved = parse_output(stdout)?;
+        return Ok(MediaList {
+            tracks: vec![ListedTrack {
+                url: original.clone(),
+                metadata: resolved.metadata.clone(),
+            }],
+            skipped: 0,
+            truncated: false,
+            single: Some(resolved),
+        });
+    };
+    let mut tracks = Vec::new();
+    let mut skipped = 0;
+    for entry in entries.iter().take(PLAYLIST_LIMIT) {
+        let unavailable = matches!(
+            entry.get("availability").and_then(|v| v.as_str()),
+            Some("private" | "premium_only" | "subscriber_only" | "needs_auth")
+        );
+        let url = ["webpage_url", "url"]
+            .into_iter()
+            .filter_map(|key| entry.get(key).and_then(|v| v.as_str()))
+            .find_map(|raw| YtDlp::validate_url(raw).ok());
+        let Some(url) = url.filter(|_| !unavailable) else {
+            skipped += 1;
+            continue;
+        };
+        tracks.push(ListedTrack {
+            metadata: TrackMetadata {
+                title: entry
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned),
+                duration: entry
+                    .get("duration")
+                    .and_then(|v| v.as_f64())
+                    .filter(|d| d.is_finite() && *d > 0.0)
+                    .and_then(|d| Duration::try_from_secs_f64(d).ok()),
+                webpage_url: Some(url.to_string()),
+                ..TrackMetadata::default()
+            },
+            url,
+        });
+    }
+    Ok(MediaList {
+        tracks,
+        skipped,
+        truncated: entries.len() > PLAYLIST_LIMIT,
+        single: None,
+    })
 }
 
 /// Parse a single `yt-dlp -j` record.
@@ -261,6 +357,58 @@ struct Format {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playlist_preserves_order_and_skips_invalid_or_unavailable_entries() {
+        let json = br#"{"entries":[
+            {"url":"https://example.com/first","title":"First","duration":123.5},
+            null,
+            {"url":"file:///secret"},
+            {"url":"https://example.com/private","availability":"private"},
+            {"webpage_url":"https://example.com/last","url":"https://cdn.example.com/audio","title":"Last","duration":-1}
+        ]}"#;
+        let list = parse_list(json, &Url::parse("https://example.com/playlist").unwrap()).unwrap();
+        assert_eq!(list.skipped, 3);
+        assert_eq!(list.tracks.len(), 2);
+        assert_eq!(list.tracks[0].metadata.title.as_deref(), Some("First"));
+        assert_eq!(
+            list.tracks[0].metadata.duration,
+            Some(Duration::from_millis(123500))
+        );
+        assert_eq!(list.tracks[1].url.as_str(), "https://example.com/last");
+        assert_eq!(list.tracks[1].metadata.duration, None);
+        assert!(list.single.is_none());
+        assert!(!list.truncated);
+    }
+
+    #[test]
+    fn playlist_limit_and_empty_playlists() {
+        let url = Url::parse("https://example.com/playlist").unwrap();
+        let list = parse_list(br#"{"entries":[]}"#, &url).unwrap();
+        assert!(list.tracks.is_empty());
+        let entries: Vec<_> = (0..PLAYLIST_LIMIT + 1)
+            .map(|i| serde_json::json!({"url":format!("https://example.com/{i}")}))
+            .collect();
+        let json = serde_json::to_vec(&serde_json::json!({"entries":entries})).unwrap();
+        let list = parse_list(&json, &url).unwrap();
+        assert!(list.truncated);
+        assert_eq!(list.tracks.len(), PLAYLIST_LIMIT);
+    }
+
+    #[test]
+    fn single_track_listing_reuses_resolved_audio() {
+        let url = Url::parse("https://example.com/watch").unwrap();
+        let list = parse_list(
+            br#"{"title":"Song","url":"https://cdn.example.com/audio","acodec":"opus"}"#,
+            &url,
+        )
+        .unwrap();
+        assert_eq!(list.tracks[0].url, url);
+        assert_eq!(
+            list.single.unwrap().media_url,
+            "https://cdn.example.com/audio"
+        );
+    }
 
     #[test]
     fn accepts_http_urls_from_any_host() {

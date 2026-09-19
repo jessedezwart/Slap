@@ -64,6 +64,35 @@ cargo test
 
 All configuration settings are documented in `.env.example`. Copy that file to `.env`.
 
+## Commands
+
+Join a voice channel, then use:
+
+- `/play url:<track-or-playlist-link>` — play a track or append a playlist.
+- `/play url:<playlist-link> shuffle:true` — shuffle the import before adding it.
+- `/shuffle` — shuffle upcoming tracks while keeping the current track in place.
+- `/pause` and `/resume` — pause and continue the current track.
+- `/stop` — stop playback, clear the queue, cancel pending imports, and disconnect.
+- `/queue` or `/queue page:2` — show the current track and five upcoming tracks per page.
+
+Controls require you to be in the bot's voice channel. A `/play` request from
+another channel will not move the bot or interrupt that channel's queue.
+Playlist imports inspect at most 500 entries and report skipped unavailable
+entries and truncation. Links containing both a video and a playlist import the
+playlist; remove the playlist parameter to request only the video. Tracks resolve
+their audio URLs when playback approaches, and failures advance to the next track.
+The Opus-only source restriction still applies.
+
+The bot joins **self-deafened** and disconnects as soon as it is the only member
+left in its voice channel, including while paused or loading a playlist. Other
+bots count as members. Leaving clears the queue and cancels pending imports.
+No additional permissions or privileged intents are needed: self-deafening uses
+Discord's [voice-state update](https://discord.com/developers/docs/events/gateway-events#update-voice-state),
+and does not require **Deafen Members**. The existing `GUILD_VOICE_STATES` intent
+supplies channel occupancy updates.
+
+Restart the bot after updating to register the new slash commands.
+
 ## Notes on behaviour
 
 **Disconnects drop everything.** Each guild owns one `CancellationToken`; every
@@ -100,4 +129,6 @@ Replace `client_id` with your bot's client ID. The permissions integer is the mi
 
 - connect
 - speak
-- use slash commands
+- view channel
+
+The invite also includes the `applications.commands` scope for slash commands.

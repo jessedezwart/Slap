@@ -102,7 +102,7 @@ async fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sy
     info!(%application_id, %user_id, "authenticated");
 
     http.interaction(application_id)
-        .set_global_commands(&[commands::play_command()])
+        .set_global_commands(&commands::all_commands())
         .await?;
 
     let gateway_config = GatewayConfig::new(config.token.clone(), INTENTS);
