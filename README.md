@@ -73,6 +73,7 @@ Join a voice channel, then use:
 - `/play url:<playlist-link> shuffle:true` — shuffle the import before adding it.
 - `/shuffle` — shuffle upcoming tracks while keeping the current track in place.
 - `/pause` and `/resume` — pause and continue the current track.
+- `/skip` — skip the current track and play the next queued track, or end playback if the queue is empty.
 - `/stop` — stop playback, clear the queue, cancel pending imports, and disconnect.
 - `/queue` or `/queue page:2` — show the current track and five upcoming tracks per page.
 

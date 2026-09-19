@@ -220,6 +220,10 @@ impl SessionManager {
                 queue.resume().map_err(|_| SessionError::TrackFinished)?;
                 "Resumed playback.".into()
             }
+            "skip" => {
+                queue.skip().map_err(|_| SessionError::TrackFinished)?;
+                "Skipped the current track.".into()
+            }
             "shuffle" => {
                 let count = queue.modify_queue(shuffle_upcoming);
                 if count < 2 {

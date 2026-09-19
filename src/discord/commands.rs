@@ -51,6 +51,10 @@ pub fn all_commands() -> Vec<Command> {
     for (name, description) in [
         ("pause", "Pause the current track"),
         ("resume", "Resume the paused track"),
+        (
+            "skip",
+            "Skip the current track and play the next queued track",
+        ),
         ("stop", "Stop playback, clear the queue, and disconnect"),
         (
             "shuffle",
@@ -83,7 +87,7 @@ pub async fn handle_interaction(state: Arc<State>, interaction: Interaction) {
 
     if !matches!(
         data.name.as_str(),
-        "play" | "pause" | "resume" | "stop" | "shuffle" | "queue"
+        "play" | "pause" | "resume" | "skip" | "stop" | "shuffle" | "queue"
     ) {
         return;
     }
