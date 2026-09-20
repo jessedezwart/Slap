@@ -1,9 +1,6 @@
-//! Authorized HTTP access to the Web API.
+//! Spotify client. Handles authorization and API requests.
 //!
-//! Two grants are supported. When the bot owner has supplied a refresh token
-//! the client acts as that user, which is the only way to page past a
-//! playlist's first 100 tracks. Otherwise it falls back to client credentials,
-//! which can still read public playlists.
+//! If no refresh token is provided, client credentials are used. This limits search results for playlists to the first 100 tracks.
 
 use std::time::{Duration, Instant};
 
@@ -15,15 +12,10 @@ use tokio::sync::Mutex;
 use super::SpotifyError;
 use crate::config::SpotifyConfig;
 
-/// Renew this long before a token actually expires, so a request cannot go out
-/// with one that dies in flight.
-const EXPIRY_MARGIN: Duration = Duration::from_secs(60);
+const REFRESH_TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(60);
 
-/// Never log any field of this. The mutex also makes concurrent imports share
-/// one token fetch rather than racing to refresh.
 #[derive(Default)]
 struct Auth {
-    /// Retained across imports because Spotify may rotate it on each refresh.
     refresh_token: Option<String>,
     access: Option<(String, Instant)>,
 }
@@ -55,18 +47,11 @@ impl SpotifyClient {
         })
     }
 
-    /// Whether requests are made as a user rather than as the application.
-    ///
-    /// Spotify requires user authentication for the playlist item endpoints,
-    /// so this decides which import strategy the service can use.
     pub async fn is_authorized_as_user(&self) -> bool {
         self.auth.lock().await.refresh_token.is_some()
     }
 
-    /// A usable access token, reusing the current one until it nears expiry.
-    ///
-    /// `force` discards the cached token, for when the API has just rejected
-    /// it as expired.
+    /// `force` discards the cached token, for when the API has just rejected it as expired.
     async fn access_token(&self, force: bool) -> Result<String, SpotifyError> {
         let config = self.config.as_ref().ok_or_else(|| SpotifyError::api(
             "playlist support needs SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET configured by the bot owner",
@@ -107,7 +92,7 @@ impl SpotifyClient {
         let lifetime = Duration::from_secs(token.expires_in.unwrap_or(3600));
         auth.access = Some((
             token.access_token.clone(),
-            Instant::now() + lifetime.saturating_sub(EXPIRY_MARGIN),
+            Instant::now() + lifetime.saturating_sub(REFRESH_TOKEN_EXPIRY_MARGIN),
         ));
         Ok(token.access_token)
     }

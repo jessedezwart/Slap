@@ -1,8 +1,3 @@
-//! A Discord music bot that streams YouTube's Opus audio straight through to
-//! Discord: yt-dlp resolves the link, we fetch the WebM/Opus bytes ourselves,
-//! and songbird passes the Opus packets to the voice socket without ever
-//! decoding or re-encoding them.
-
 mod audio;
 mod config;
 mod discord;
@@ -21,20 +16,15 @@ use twilight_gateway::{Config as GatewayConfig, Intents};
 use twilight_http::Client as HttpClient;
 
 use crate::{
-    audio::ytdlp::YtDlp,
+    audio::ytdlp::YtDlpService,
     config::Config,
     discord::{commands, events::dispatcher, state::State},
     voice::session::{SessionManager, run_command_loop},
 };
 
-/// We only need to see guilds and who is in which voice channel. Nothing here
-/// is privileged, so the bot works without any gateway intent approval.
 const INTENTS: Intents = Intents::GUILDS.union(Intents::GUILD_VOICE_STATES);
 
 fn main() -> ExitCode {
-    // Before the subscriber is built, so a `RUST_LOG` set in `.env` still
-    // applies. Existing environment variables win over the file, which keeps
-    // `DISCORD_TOKEN=... cargo run` working with a stale `.env` on disk.
     let dotenv = dotenvy::dotenv();
 
     // A slow terminal/container log sink must not block the audio driver or
@@ -99,8 +89,6 @@ fn main() -> ExitCode {
 }
 
 async fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Installed explicitly so the choice of provider does not depend on which
-    // crate in the graph happened to enable which feature.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let config = Arc::new(config);
@@ -131,16 +119,11 @@ async fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sy
     let songbird = Arc::new(Songbird::twilight_from_config(
         Arc::new(TwilightMap::new(senders)),
         user_id,
-        // Two tracks: the one playing plus the one the queue preloads ahead of
-        // it. Beyond that songbird reallocates, which we would rather avoid on
-        // the audio thread.
         SongbirdConfig::default().preallocated_tracks(2),
     ));
 
     let (sessions, commands_rx) = SessionManager::new(Arc::clone(&songbird));
 
-    // The cache only saves repeat searches, so failing to open it is a warning
-    // rather than a reason not to start.
     let track_cache = config.cache_path.as_deref().and_then(|path| {
         match crate::audio::cache::SpotifyTrackCache::open(path) {
             Ok(cache) => {
@@ -167,7 +150,7 @@ async fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sy
         cache,
         songbird,
         sessions: Arc::clone(&sessions),
-        ytdlp: YtDlp::new(config.ytdlp.clone()).with_track_cache(track_cache),
+        ytdlp: YtDlpService::new(config.ytdlp.clone()).with_track_cache(track_cache),
         spotify: crate::spotify::SpotifyService::new(
             config.spotify.clone(),
             crate::audio::ytdlp::PLAYLIST_LIMIT,

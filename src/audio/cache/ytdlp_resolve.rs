@@ -35,7 +35,6 @@ impl YtdlpResolveCache {
         self.entries.insert(input.to_owned(), resolved).await;
     }
 
- 
     pub async fn get_or_resolve<F>(&self, input: &str, resolve: F) -> Result<Resolved, AudioError>
     where
         F: Future<Output = Result<Resolved, AudioError>>,

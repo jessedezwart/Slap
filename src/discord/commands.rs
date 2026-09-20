@@ -29,7 +29,10 @@ use twilight_util::builder::{
 use crate::{
     audio::{
         source::OpusYtSource,
-        ytdlp::{ListedTrack, MediaList, PLAYLIST_LIMIT, PlaybackTarget, TrackMetadata, YtDlp},
+        ytdlp::{
+            ListedTrack, MediaList, PLAYLIST_LIMIT, PlaybackTarget, TrackMetadata, http_url,
+            validate_url,
+        },
     },
     discord::{player, state::State},
     error::AudioError,
@@ -286,10 +289,7 @@ fn playable(playlist: SpotifyPlaylist) -> MediaList {
                 uploader: Some(artist),
                 duration: track.duration,
                 thumbnail: track.album_art.clone(),
-                webpage_url: track
-                    .url
-                    .as_deref()
-                    .and_then(|raw| YtDlp::validate_url(raw).ok()),
+                webpage_url: track.url.as_deref().and_then(http_url),
                 ..TrackMetadata::default()
             };
             ListedTrack {
@@ -315,7 +315,7 @@ async fn play(
     let user_id = interaction.author_id().ok_or(PlayError::NotInGuild)?;
 
     // Reject the link before spawning anything.
-    let url = YtDlp::validate_url(raw_url)?;
+    let url = validate_url(raw_url)?;
 
     let channel_id = state
         .cache

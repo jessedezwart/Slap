@@ -12,7 +12,7 @@ use twilight_model::id::{Id, marker::GuildMarker};
 use crate::{
     audio::{
         stream::{PrefetchStream, SourceSpec},
-        ytdlp::{PlaybackTarget, Resolved, YtDlp},
+        ytdlp::{PlaybackTarget, Resolved, YtDlpService},
     },
     config::BufferConfig,
     error::AudioError,
@@ -25,7 +25,7 @@ pub struct OpusYtSource {
     guild_id: Option<Id<GuildMarker>>,
     target: PlaybackTarget,
     client: Client,
-    ytdlp: YtDlp,
+    ytdlp: YtDlpService,
     buffer_config: BufferConfig,
     /// Cancellation token, used for the complete guild.
     cancel: CancellationToken,
@@ -35,7 +35,7 @@ impl OpusYtSource {
     pub fn new(
         target: impl Into<PlaybackTarget>,
         client: Client,
-        ytdlp: YtDlp,
+        ytdlp: YtDlpService,
         buffer_config: BufferConfig,
         cancel: CancellationToken,
     ) -> Self {

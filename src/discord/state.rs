@@ -10,7 +10,7 @@ use twilight_model::id::{
     marker::{ApplicationMarker, UserMarker},
 };
 
-use crate::{audio::ytdlp::YtDlp, config::Config, voice::session::SessionManager};
+use crate::{audio::ytdlp::YtDlpService, config::Config, voice::session::SessionManager};
 
 pub struct State {
     pub player_tasks: tokio_util::task::TaskTracker,
@@ -21,7 +21,7 @@ pub struct State {
     pub cache: Arc<DefaultInMemoryCache>,
     pub songbird: Arc<Songbird>,
     pub sessions: Arc<SessionManager>,
-    pub ytdlp: YtDlp,
+    pub ytdlp: YtDlpService,
     pub spotify: crate::spotify::SpotifyService,
     /// Shared connection pool for every audio fetch.
     pub client: reqwest::Client,
