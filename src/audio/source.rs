@@ -1,10 +1,4 @@
-//! The lazy audio source handed to songbird.
-//!
-//! This is a [`Compose`], so nothing happens until songbird actually needs the
-//! track: a queued song spawns no yt-dlp process and opens no socket until the
-//! queue's preloader readies it, a few seconds before it is due. Deep queues
-//! therefore cost nothing, and a resolved googlevideo URL cannot go stale while
-//! it waits its turn.
+//! The audio source that songbird uses.
 
 use std::time::{Duration, Instant};
 
@@ -26,8 +20,7 @@ use crate::{
     error::AudioError,
 };
 
-/// Ring buffer songbird uses to bridge our async stream to symphonia's
-/// synchronous reads. Small on purpose: the deep buffer is ours.
+/// Small buffer songbird needs. Value is based on the default buffer size in songbird's `AsyncAdapterStream`.
 const ADAPTER_BUFFER_BYTES: usize = 64 * 1024;
 
 /// How long a resolved media URL is reused before yt-dlp is run again.
@@ -38,9 +31,8 @@ pub struct OpusYtSource {
     target: PlaybackTarget,
     client: Client,
     ytdlp: YtDlp,
-    buffer: BufferConfig,
-    /// The guild's token. Cancelling it tears down every stream this source
-    /// has produced.
+    buffer_config: BufferConfig,
+    /// Cancellation token, used for the complete guild.
     cancel: CancellationToken,
     cached: Option<(Resolved, Instant)>,
 }
@@ -50,7 +42,7 @@ impl OpusYtSource {
         target: impl Into<PlaybackTarget>,
         client: Client,
         ytdlp: YtDlp,
-        buffer: BufferConfig,
+        buffer_config: BufferConfig,
         cancel: CancellationToken,
     ) -> Self {
         Self {
@@ -58,12 +50,13 @@ impl OpusYtSource {
             target: target.into(),
             client,
             ytdlp,
-            buffer,
+            buffer_config,
             cancel,
             cached: None,
         }
     }
 
+    /// Set the guild ID for this source.
     pub fn in_guild(mut self, guild_id: Id<GuildMarker>) -> Self {
         self.guild_id = Some(guild_id);
         self
@@ -139,7 +132,7 @@ impl Compose for OpusYtSource {
             bitrate_bps: resolved.bitrate_bps,
         };
 
-        let mut stream = PrefetchStream::open(spec, self.buffer, &self.cancel, 0)
+        let mut stream = PrefetchStream::open(spec, self.buffer_config, &self.cancel, 0)
             .await
             .map_err(fail)?;
 

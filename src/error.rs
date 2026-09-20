@@ -11,7 +11,7 @@ pub enum AudioError {
     UnsupportedUrl(String),
 
     #[error("Spotify: {0}")]
-    Spotify(String),
+    Spotify(#[from] crate::spotify::SpotifyError),
 
     #[error("could not run `{program}`: {source}")]
     Spawn {

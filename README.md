@@ -123,19 +123,41 @@ Restart the bot after updating to register the new slash commands.
 
 ## Spotify playlists
 
-Configure `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, and
-`SPOTIFY_REFRESH_TOKEN` in `.env`, then restart the bot. Spotify is optional;
-other sources work without these settings.
+Configure `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` in `.env`, then
+restart the bot. Spotify is optional; other sources work without these settings.
 
 1. Create an app in the [Spotify developer dashboard](https://developer.spotify.com/dashboard).
-2. Use Spotify's [Authorization Code flow](https://developer.spotify.com/documentation/web-api/tutorials/code-flow)
-   to authorize the account whose playlists the bot will import. Register the
-   redirect URI in the dashboard and request `playlist-read-private` and
-   `playlist-read-collaborative`. Exchange the authorization code for tokens,
-   and put the returned **refresh token** in `SPOTIFY_REFRESH_TOKEN`.
-   A client-credentials token does not represent a user and is insufficient.
-3. Run `/play url:https://open.spotify.com/playlist/PLAYLIST_ID`.
+2. Put the client ID and secret in `.env`. This is enough to import **public**
+   playlists, up to their first 100 tracks.
+3. Optionally, lift that ceiling by also setting `SPOTIFY_REFRESH_TOKEN`. Use
+   Spotify's [Authorization Code flow](https://developer.spotify.com/documentation/web-api/tutorials/code-flow)
+   to authorize an account, registering the redirect URI in the dashboard and
+   requesting `playlist-read-private` and `playlist-read-collaborative`.
+   `scripts/spotify-get-refresh-token` walks through this.
+4. Run `/play url:https://open.spotify.com/playlist/PLAYLIST_ID`.
    Add `shuffle:true` to shuffle before enqueueing.
+
+### The 100-track ceiling
+
+Spotify requires user authentication for `GET /playlists/{id}/items`, which is
+the only endpoint that paginates. With client credentials the bot falls back to
+the tracks embedded in `GET /playlists/{id}`, which returns the first 100 and
+ignores `offset`. Imports past that point report the playlist as truncated.
+
+With a refresh token the bot pages properly and imports up to 1000 tracks,
+including private and collaborative playlists belonging to the authorized
+account. A rotated refresh token is retained in memory; reauthorize and update
+`.env` if authorization fails after a restart.
+
+### Resolved-track cache
+
+Searching is the slow part of a playlist import, and the answer never changes,
+so each Spotify track ID and the YouTube upload it resolved to are stored in a
+[redb](https://github.com/cberner/redb) database at `CACHE_PATH`
+(`cache.redb` by default; set it empty to disable). Repeat imports skip the
+search entirely. If a cached upload has since been taken down, the bot searches
+again. The cache is only an optimisation: if it cannot be opened or read, the
+bot logs a warning and behaves as it did without one.
 
 The bot reads playlist pages in order, up to 1000 entries, and searches for each
 track's **artist(s) + song name** when playback approaches. It takes the top
@@ -149,9 +171,9 @@ Full playlist URLs (including localized `intl-...` URLs and share parameters)
 are supported; shortened `spotify.link` URLs, albums, and individual Spotify
 track links are not.
 
-Spotify [restricts playlist contents](https://developer.spotify.com/documentation/web-api/reference/get-playlists-items)
-to playlists the authorized account owns or collaborates on. Arbitrary public
-playlists therefore cannot be imported through this integration. Development
+A playlist that is neither public nor owned by the authorized account cannot be
+read, and Spotify reports it as missing rather than forbidden, so the bot asks
+the user to check that the playlist is public. Development
 apps also require an app owner with Premium and have user allowlist limits; see
 [Spotify's development-mode rules](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide).
 All Discord users of this bot use the same configured Spotify account.

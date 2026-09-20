@@ -7,6 +7,7 @@ mod audio;
 mod config;
 mod discord;
 mod error;
+mod spotify;
 mod voice;
 
 use std::{collections::HashMap, num::NonZeroUsize, process::ExitCode, sync::Arc, thread};
@@ -138,6 +139,21 @@ async fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sy
 
     let (sessions, commands_rx) = SessionManager::new(Arc::clone(&songbird));
 
+    // The cache only saves repeat searches, so failing to open it is a warning
+    // rather than a reason not to start.
+    let track_cache = config.cache_path.as_deref().and_then(|path| {
+        match crate::audio::cache::TrackCache::open(path) {
+            Ok(cache) => {
+                info!(path = %path.display(), "track cache opened");
+                Some(Arc::new(cache))
+            }
+            Err(error) => {
+                warn!(path = %path.display(), %error, "could not open track cache; continuing without it");
+                None
+            }
+        }
+    });
+
     let cache = Arc::new(
         DefaultInMemoryCache::builder()
             .resource_types(ResourceType::VOICE_STATE)
@@ -151,8 +167,11 @@ async fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sy
         cache,
         songbird,
         sessions: Arc::clone(&sessions),
-        ytdlp: YtDlp::new(config.ytdlp.clone()),
-        spotify: crate::audio::spotify::Spotify::new(config.spotify.clone())?,
+        ytdlp: YtDlp::new(config.ytdlp.clone()).with_cache(track_cache),
+        spotify: crate::spotify::SpotifyService::new(
+            config.spotify.clone(),
+            crate::audio::ytdlp::PLAYLIST_LIMIT,
+        )?,
         client: reqwest::Client::builder()
             .user_agent("rust-music-bot")
             .build()?,

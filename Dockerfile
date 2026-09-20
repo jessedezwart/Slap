@@ -55,6 +55,12 @@ RUN apt-get update \
 COPY --from=build /usr/local/bin/yt-dlp /usr/local/bin/yt-dlp
 COPY --from=build /usr/local/bin/rust-music-bot /usr/local/bin/rust-music-bot
 
+# The working directory belongs to root, so the cache needs somewhere the
+# unprivileged user can actually write. Mount a volume here to keep resolved
+# tracks across container recreation.
+RUN install -d -o bot -g bot /app/data
+ENV CACHE_PATH=/app/data/cache.redb
+
 USER bot
 # dotenvy searches upward from the working directory, so a `.env` mounted at
 # /app/.env is picked up automatically. It is deliberately not baked into the

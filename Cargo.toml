@@ -83,6 +83,7 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
+redb = "4.3.0"
 
 [dev-dependencies]
 # The buffer tests drive a real socket through a throwaway HTTP server.

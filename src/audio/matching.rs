@@ -4,32 +4,19 @@
 use std::time::Duration;
 
 use super::ytdlp::TrackMetadata;
+use crate::spotify::SpotifyTrack;
 
-/// A track to find, from metadata that is more reliable than any upload's.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SearchQuery {
-    pub artists: Vec<String>,
-    pub title: String,
-    pub duration: Option<Duration>,
-}
-
-impl SearchQuery {
-    /// Free text for the search engines.
-    pub fn text(&self) -> String {
-        format!("{} {}", self.artists.join(", "), self.title)
-    }
-}
-
-/// Whether `found` runs about as long as the requested track.
-pub fn matches(query: &SearchQuery, found: &TrackMetadata) -> bool {
-    match (query.duration, found.duration) {
+pub fn matches(wanted: &SpotifyTrack, found: &TrackMetadata) -> bool {
+    match (wanted.duration, found.duration) {
+        // If both durations are known, check if they are within tolerance. When no duration is known, we assume it matches.
         (Some(wanted), Some(found)) => wanted.abs_diff(found) <= tolerance(wanted),
         _ => true,
     }
 }
 
-/// Uploads vary a few seconds in padding; music videos add intros.
+/// Uploads vary a few seconds in padding (music video intros for example)
 fn tolerance(wanted: Duration) -> Duration {
+    // Multiply by 0.07 to allow for a 7% difference in duration, but always allow at least 10 seconds of tolerance.
     Duration::from_secs(10).max(wanted.mul_f64(0.07))
 }
 

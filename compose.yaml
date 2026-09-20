@@ -8,3 +8,10 @@ services:
       - .env
     stop_signal: SIGINT # matches the Dockerfile; SIGTERM would skip the graceful teardown
     stop_grace_period: 10s
+    volumes:
+      # Keeps the Spotify -> YouTube lookups across recreation, so a replayed
+      # playlist does not search for every track again.
+      - cache:/app/data
+
+volumes:
+  cache:

@@ -29,10 +29,11 @@ use twilight_util::builder::{
 use crate::{
     audio::{
         source::OpusYtSource,
-        ytdlp::{PLAYLIST_LIMIT, TrackMetadata, YtDlp},
+        ytdlp::{ListedTrack, MediaList, PLAYLIST_LIMIT, PlaybackTarget, TrackMetadata, YtDlp},
     },
     discord::{player, state::State},
     error::AudioError,
+    spotify::{SpotifyPlaylist, is_spotify_url},
     voice::session::{ControlResult, SessionError},
 };
 
@@ -269,6 +270,39 @@ enum PlayError {
     Session(#[from] SessionError),
 }
 
+/// Turn Spotify's metadata into queue entries.
+///
+/// What the player displays comes from Spotify, which describes a track more
+/// reliably than any upload does; what actually plays is searched for lazily,
+/// once the queue reaches the track.
+fn playable(playlist: SpotifyPlaylist) -> MediaList {
+    let tracks = playlist
+        .tracks
+        .into_iter()
+        .map(|track| {
+            let artist = track.artist();
+            let metadata = TrackMetadata {
+                title: Some(format!("{artist} — {}", track.title)),
+                uploader: Some(artist),
+                duration: track.duration,
+                thumbnail: track.album_art.clone(),
+                webpage_url: track.url.clone(),
+                ..TrackMetadata::default()
+            };
+            ListedTrack {
+                target: PlaybackTarget::Search(track),
+                metadata,
+            }
+        })
+        .collect();
+    MediaList {
+        tracks,
+        skipped: playlist.skipped,
+        truncated: playlist.truncated,
+        single: None,
+    }
+}
+
 async fn play(
     state: &Arc<State>,
     interaction: &Interaction,
@@ -291,7 +325,7 @@ async fn play(
 
     // Also covers a caller leaving during the join handshake.
     crate::discord::events::reconcile_voice(Arc::clone(state), guild_id);
-    let provider = if crate::audio::spotify::is_spotify_url(&url) {
+    let provider = if is_spotify_url(&url) {
         "spotify"
     } else {
         "yt-dlp"
@@ -304,8 +338,15 @@ async fn play(
     );
     let started = Instant::now();
     let list = async {
-        if crate::audio::spotify::is_spotify_url(&url) {
-            state.spotify.list(&url).await
+        if is_spotify_url(&url) {
+            // Spotify only supplies metadata; each track is searched for when
+            // the queue gets to it.
+            state
+                .spotify
+                .playlist(&url)
+                .await
+                .map(playable)
+                .map_err(AudioError::from)
         } else {
             state.ytdlp.list(&url).await
         }

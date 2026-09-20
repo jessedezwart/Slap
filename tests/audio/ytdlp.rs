@@ -1,5 +1,18 @@
 use super::*;
 
+/// A Spotify track to search for. The ID only matters to the resolved-track
+/// cache, which these tests leave disabled.
+fn track(artists: &[&str], title: &str, secs: u64) -> SpotifyTrack {
+    SpotifyTrack {
+        id: format!("id-{title}"),
+        artists: artists.iter().map(|&a| a.to_owned()).collect(),
+        title: title.into(),
+        duration: Some(Duration::from_secs(secs)),
+        album_art: None,
+        url: None,
+    }
+}
+
 /// Fake yt-dlp: resolves each search input to its top result, and logs
 /// every input so the tests can check which ones were run, in order.
 #[cfg(unix)]
@@ -38,13 +51,7 @@ async fn search_prefers_youtube_music_and_falls_back_on_wrong_duration() {
         timeout: Duration::from_secs(5),
         extra_args: Vec::new(),
     });
-    let search = |title: &str| {
-        PlaybackTarget::Search(SearchQuery {
-            artists: vec!["Artist".into()],
-            title: title.into(),
-            duration: Some(Duration::from_secs(180)),
-        })
-    };
+    let search = |title: &str| PlaybackTarget::Search(track(&["Artist"], title, 180));
     let calls = || {
         let calls = std::fs::read_to_string(&log).unwrap_or_default();
         std::fs::remove_file(&log).ok();
@@ -104,11 +111,7 @@ async fn live_search_finds_the_requested_recording() {
         (&["Beyoncé"][..], "Halo", 261),
         (&["Oasis"][..], "Live Forever - Remastered", 277),
     ] {
-        let query = SearchQuery {
-            artists: artists.iter().map(|&a| a.to_owned()).collect(),
-            title: title.into(),
-            duration: Some(Duration::from_secs(secs)),
-        };
+        let query = track(artists, title, secs);
         let started = Instant::now();
         let resolved = ytdlp
             .resolve(&PlaybackTarget::Search(query.clone()))

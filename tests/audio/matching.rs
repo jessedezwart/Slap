@@ -1,10 +1,13 @@
 use super::*;
 
-fn query(secs: Option<u64>) -> SearchQuery {
-    SearchQuery {
+fn query(secs: Option<u64>) -> SpotifyTrack {
+    SpotifyTrack {
+        id: "2Foc5Q5nqNiosCNqttzHof".into(),
         artists: vec!["Daft Punk".into()],
         title: "Get Lucky".into(),
         duration: secs.map(Duration::from_secs),
+        album_art: None,
+        url: None,
     }
 }
 

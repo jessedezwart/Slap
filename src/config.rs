@@ -1,6 +1,6 @@
 //! Runtime configuration, read once from the environment at start-up.
 
-use std::{env, fmt::Display, num::ParseIntError, str::FromStr, time::Duration};
+use std::{env, fmt::Display, num::ParseIntError, path::PathBuf, str::FromStr, time::Duration};
 
 use crate::error::ConfigError;
 
@@ -16,13 +16,17 @@ pub struct Config {
     pub ytdlp: YtDlpConfig,
     pub spotify: Option<SpotifyConfig>,
     pub buffer: BufferConfig,
+    /// Where the resolved-track cache lives. `CACHE_PATH=` disables it.
+    pub cache_path: Option<PathBuf>,
 }
 
 #[derive(Clone)]
 pub struct SpotifyConfig {
     pub client_id: String,
     pub client_secret: String,
-    pub refresh_token: String,
+    /// Optional. Client credentials can read a public playlist, but only a
+    /// user token can page past its first 100 tracks.
+    pub refresh_token: Option<String>,
 }
 
 impl std::fmt::Debug for SpotifyConfig {
@@ -33,13 +37,11 @@ impl std::fmt::Debug for SpotifyConfig {
 
 impl SpotifyConfig {
     fn from_env() -> Result<Option<Self>, ConfigError> {
-        let names = [
-            "SPOTIFY_CLIENT_ID",
-            "SPOTIFY_CLIENT_SECRET",
-            "SPOTIFY_REFRESH_TOKEN",
-        ];
-        let values = names.map(|name| env::var(name).unwrap_or_default().trim().to_owned());
-        if values.iter().all(String::is_empty) {
+        let read = |name| env::var(name).unwrap_or_default().trim().to_owned();
+        let refresh_token = read("SPOTIFY_REFRESH_TOKEN");
+        let names = ["SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET"];
+        let values = names.map(read);
+        if values.iter().all(String::is_empty) && refresh_token.is_empty() {
             return Ok(None);
         }
         for (name, value) in names.iter().zip(&values) {
@@ -47,11 +49,11 @@ impl SpotifyConfig {
                 return Err(ConfigError::Missing(name));
             }
         }
-        let [client_id, client_secret, refresh_token] = values;
+        let [client_id, client_secret] = values;
         Ok(Some(Self {
             client_id,
             client_secret,
-            refresh_token,
+            refresh_token: Some(refresh_token).filter(|t| !t.is_empty()),
         }))
     }
 }
@@ -124,6 +126,11 @@ impl Config {
             token,
             worker_threads: parse_worker_threads()?,
             spotify: SpotifyConfig::from_env()?,
+            cache_path: match env::var("CACHE_PATH") {
+                Ok(path) if path.trim().is_empty() => None,
+                Ok(path) => Some(PathBuf::from(path.trim())),
+                Err(_) => Some(PathBuf::from("cache.redb")),
+            },
             ytdlp: YtDlpConfig {
                 program: env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),
                 timeout: Duration::from_millis(parse_env("YTDLP_TIMEOUT_MS", 15_000u64)?),

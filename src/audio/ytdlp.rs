@@ -5,7 +5,7 @@
 //! [`crate::audio::stream`]. The process is spawned as argv — there is no shell
 //! anywhere in this path.
 
-use std::{collections::BTreeMap, process::Stdio, time::Duration, time::Instant};
+use std::{collections::BTreeMap, process::Stdio, sync::Arc, time::Duration, time::Instant};
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, RANGE};
 use serde::Deserialize;
@@ -14,8 +14,8 @@ use tracing::{debug, info, warn};
 use twilight_model::id::{Id, marker::UserMarker};
 use url::Url;
 
-use super::matching::{self, SearchQuery};
-use crate::{config::YtDlpConfig, error::AudioError};
+use super::{cache::TrackCache, matching};
+use crate::{config::YtDlpConfig, error::AudioError, spotify::SpotifyTrack};
 
 /// Opus-only format selection.
 ///
@@ -54,6 +54,8 @@ pub struct TrackMetadata {
 #[derive(Clone)]
 pub struct YtDlp {
     config: YtDlpConfig,
+    /// Skips the search for tracks resolved on an earlier run.
+    cache: Option<Arc<TrackCache>>,
 }
 
 /// Limit imports so accidental channel/radio links cannot create an unbounded queue.
@@ -63,7 +65,8 @@ pub const PLAYLIST_LIMIT: usize = 1000;
 #[derive(Debug)]
 pub enum PlaybackTarget {
     Url(Url),
-    Search(SearchQuery),
+    /// A Spotify track to go and find an upload of.
+    Search(SpotifyTrack),
 }
 
 /// Where searches look, best source first.
@@ -123,7 +126,15 @@ pub struct MediaList {
 
 impl YtDlp {
     pub fn new(config: YtDlpConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            cache: None,
+        }
+    }
+
+    pub fn with_cache(mut self, cache: Option<Arc<TrackCache>>) -> Self {
+        self.cache = cache;
+        self
     }
 
     /// Check that `raw` is an HTTP(S) URL to hand to yt-dlp.
@@ -145,14 +156,25 @@ impl YtDlp {
                 info!(host = url.host_str(), "resolving audio source");
                 self.resolve_input(url.as_str()).await
             }
-            PlaybackTarget::Search(query) => self.resolve_search(query).await,
+            PlaybackTarget::Search(wanted) => self.resolve_search(wanted).await,
         }
     }
 
     /// Resolve each source's top result until one runs about as long as the
     /// requested track.
-    async fn resolve_search(&self, query: &SearchQuery) -> Result<Resolved, AudioError> {
-        let text = query.text();
+    async fn resolve_search(&self, wanted: &SpotifyTrack) -> Result<Resolved, AudioError> {
+        if let Some(url) = self.cache.as_ref().and_then(|c| c.get(&wanted.id)) {
+            info!(spotify_id = wanted.id, "reusing previously resolved upload");
+            match self.resolve_input(&url).await {
+                Ok(resolved) => return Ok(resolved),
+                // The upload can have been taken down since; search again.
+                Err(error) => {
+                    warn!(%error, "cached upload no longer resolves, searching again");
+                }
+            }
+        }
+
+        let text = format!("{} {}", wanted.artist(), wanted.title);
         for source in SearchSource::ORDER {
             info!(query = ?text, source = source.name(), "searching for audio");
             let resolved = match self.resolve_input(&source.input(&text)).await {
@@ -166,7 +188,8 @@ impl YtDlp {
                     continue;
                 }
             };
-            if matching::matches(query, &resolved.metadata) {
+            if matching::matches(wanted, &resolved.metadata) {
+                self.remember(wanted, &resolved).await;
                 return Ok(resolved);
             }
             info!(source = source.name(), title = ?resolved.metadata.title,
@@ -175,6 +198,18 @@ impl YtDlp {
         }
         warn!(query = ?text, "no search result matched");
         Err(AudioError::NoMatch(text))
+    }
+
+    /// Record which upload a track resolved to, so the next run skips the
+    /// search entirely.
+    async fn remember(&self, wanted: &SpotifyTrack, resolved: &Resolved) {
+        let (Some(cache), Some(url)) = (self.cache.clone(), resolved.metadata.webpage_url.clone())
+        else {
+            return;
+        };
+        let id = wanted.id.clone();
+        // Committing fsyncs, so keep it off the runtime's worker threads.
+        let _ = tokio::task::spawn_blocking(move || cache.put(&id, &url)).await;
     }
 
     /// Run `yt-dlp -j` and turn its JSON into a [`Resolved`].
