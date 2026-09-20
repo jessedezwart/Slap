@@ -1,15 +1,12 @@
 //! Decides whether a search result is the recording that was asked for.
-//!
-//! Only the duration is compared. Spotify durations are exact, so it is enough
-//! to reject radio edits, extended mixes and 30-second previews. A result or
-//! query without a duration is accepted: unknown, not wrong.
+//! Compares duration of requested track and ytdlp search result of the same track.
 
 use std::time::Duration;
 
 use super::ytdlp::TrackMetadata;
 
 /// A track to find, from metadata that is more reliable than any upload's.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SearchQuery {
     pub artists: Vec<String>,
     pub title: String,

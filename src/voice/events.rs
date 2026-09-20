@@ -17,7 +17,6 @@ use tracing::{debug, info, warn};
 use twilight_model::id::{Id, marker::GuildMarker};
 
 /// Work that must happen off the driver task.
-#[derive(Debug)]
 pub enum VoiceCommand {
     Teardown {
         guild_id: Id<GuildMarker>,

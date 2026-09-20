@@ -51,7 +51,7 @@ pub struct TrackMetadata {
     pub sequence: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct YtDlp {
     config: YtDlpConfig,
 }
@@ -60,14 +60,14 @@ pub struct YtDlp {
 pub const PLAYLIST_LIMIT: usize = 1000;
 
 /// Searches are kept lazy, just like direct video URLs.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum PlaybackTarget {
     Url(Url),
     Search(SearchQuery),
 }
 
 /// Where searches look, best source first.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 enum SearchSource {
     /// Label releases and official audio, without video intros.
     YoutubeMusic,
@@ -445,7 +445,7 @@ fn last_line(stderr: &str) -> String {
         .to_owned()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct Output {
     title: Option<String>,
     duration: Option<f64>,
@@ -458,7 +458,7 @@ struct Output {
     format: Format,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Deserialize)]
 struct Format {
     url: Option<String>,
     acodec: Option<String>,

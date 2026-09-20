@@ -165,7 +165,7 @@ async fn execute(
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 enum ReplyMode {
     Public,
     Private,

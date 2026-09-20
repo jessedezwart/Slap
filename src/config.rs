@@ -9,7 +9,6 @@ const MIN_BUFFER_BYTES: usize = 64 * 1024;
 /// Upper bound, so a silly `BUFFER_MS` cannot exhaust memory across many guilds.
 const MAX_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
-#[derive(Debug, Clone)]
 pub struct Config {
     pub token: String,
     /// Tokio worker threads, or `None` for one per available core.
@@ -68,7 +67,7 @@ pub struct YtDlpConfig {
 }
 
 /// How much audio we hold ahead of songbird's mixer.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct BufferConfig {
     /// Target depth, in playback time.
     pub target: Duration,

@@ -67,7 +67,7 @@ const STALL_LOG_THRESHOLD: Duration = Duration::from_millis(50);
 const DEPTH_LOG_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Everything needed to open — or reopen — the byte stream.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SourceSpec {
     pub client: Client,
     pub url: String,

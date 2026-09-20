@@ -42,7 +42,7 @@ use crate::voice::events::{DriverDisconnectNotifier, PlayerNotifier, VoiceComman
 /// songbird's own `enqueue` would have picked.
 const PRELOAD_LEAD: Duration = Duration::from_secs(5);
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GuildSession {
     pub channel_id: Id<ChannelMarker>,
     pub cancel: CancellationToken,
