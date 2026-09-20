@@ -1,6 +1,3 @@
-//! One lightweight message updater per voice session. No media lookups, image
-//! downloads, per-second HTTP polling, or network work on Songbird's driver.
-
 use std::{fmt::Write as _, sync::Arc, time::Duration};
 
 use songbird::tracks::{PlayMode, ReadyState, TrackState};

@@ -8,7 +8,7 @@ mod voice;
 use std::{collections::HashMap, num::NonZeroUsize, process::ExitCode, sync::Arc, thread};
 
 use songbird::{Config as SongbirdConfig, Songbird, shards::TwilightMap};
-use tokio::{signal, sync::watch};
+use tokio::{signal, sync::watch, task::JoinHandle};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use twilight_cache_inmemory::{DefaultInMemoryCache, ResourceType};
@@ -42,6 +42,8 @@ fn main() -> ExitCode {
                 .unwrap_or_else(|_| EnvFilter::new("rust_music_bot=info,warn")),
         )
         .init();
+
+    info!("starting...");
 
     match dotenv {
         Ok(path) => info!(path = %path.display(), "loaded .env"),
@@ -88,7 +90,27 @@ fn main() -> ExitCode {
     }
 }
 
+/// Everything `startup` built that `shutdown` needs to take down again.
+struct Running {
+    state: Arc<State>,
+    shutdown_tx: watch::Sender<bool>,
+    dispatchers: Vec<JoinHandle<()>>,
+    command_loop: JoinHandle<()>,
+}
+
 async fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let running = startup(config).await?;
+    info!("ready");
+
+    signal::ctrl_c().await?;
+    info!("shutting down");
+
+    shutdown(running).await;
+
+    Ok(())
+}
+
+async fn startup(config: Config) -> Result<Running, Box<dyn std::error::Error + Send + Sync>> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let config = Arc::new(config);
@@ -171,9 +193,23 @@ async fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sy
         .map(|shard| tokio::spawn(dispatcher(Arc::clone(&state), shard, shutdown_rx.clone())))
         .collect();
 
-    signal::ctrl_c().await?;
-    info!("shutting down");
+    Ok(Running {
+        state,
+        shutdown_tx,
+        dispatchers,
+        command_loop,
+    })
+}
 
+/// Leave every voice channel, stop the dispatchers and let the players clean up.
+async fn shutdown(running: Running) {
+    let Running {
+        state,
+        shutdown_tx,
+        dispatchers,
+        command_loop,
+    } = running;
+    info!("leaving voice channels");
     for guild_id in state.sessions.active_guilds() {
         state.sessions.teardown(guild_id, "shutdown").await;
     }
@@ -194,6 +230,4 @@ async fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sy
     .await;
 
     command_loop.abort();
-
-    Ok(())
 }
