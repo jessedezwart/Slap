@@ -16,7 +16,7 @@ COPY src ./src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked \
- && cp target/release/rust-music-bot /usr/local/bin/rust-music-bot
+ && cp target/release/slap /usr/local/bin/slap
 
 ARG YTDLP_VERSION
 RUN set -eux; \
@@ -38,7 +38,7 @@ RUN apt-get update \
  && useradd --create-home --uid 10001 bot
 
 COPY --from=build /usr/local/bin/yt-dlp /usr/local/bin/yt-dlp
-COPY --from=build /usr/local/bin/rust-music-bot /usr/local/bin/rust-music-bot
+COPY --from=build /usr/local/bin/slap /usr/local/bin/slap
 
 RUN install -d -o bot -g bot /app/data
 ENV CACHE_PATH=/app/data/cache.redb
@@ -46,8 +46,8 @@ ENV CACHE_PATH=/app/data/cache.redb
 USER bot
 WORKDIR /app
 
-ENV RUST_LOG=rust_music_bot=info,warn
+ENV RUST_LOG=slap=info,warn
 
 STOPSIGNAL SIGINT
 
-ENTRYPOINT ["/usr/local/bin/rust-music-bot"]
+ENTRYPOINT ["/usr/local/bin/slap"]

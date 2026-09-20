@@ -1,4 +1,4 @@
-# rust-music-bot
+# Slap
 
 A Discord music bot that plays audio **without transcode** using yt-dlp and songbird. Designed to be highly efficient.
 
@@ -44,7 +44,7 @@ breaks extractors regularly, so rebuild with a newer one when resolution starts
 failing:
 
 ```sh
-docker build --build-arg YTDLP_VERSION=2026.09.01 -t rust-music-bot .
+docker build --build-arg YTDLP_VERSION=2026.09.01 -t slap .
 ```
 
 ## Development container
@@ -213,7 +213,7 @@ token and the entire pipeline for that guild goes away.
 
 ## Diagnostics
 
-The default `RUST_LOG=rust_music_bot=info,warn` shows player interactions
+The default `RUST_LOG=slap=info,warn` shows player interactions
 (command, button/slash source, user, guild, outcome and elapsed time), playlist
 imports, YouTube searches, audio resolution/buffering, actual playback starts,
 pauses, track endings, failures and disconnects. Searching/preloading is logged
@@ -226,7 +226,7 @@ playback or growing memory indefinitely. Progress-bar refreshes do not emit
 routine logs. Media logs use titles, search terms and source hosts rather than
 signed stream URLs, request headers or credentials.
 
-Run with `RUST_LOG=rust_music_bot=debug` to see buffer depth and stream lifecycle.
+Run with `RUST_LOG=slap=debug` to see buffer depth and stream lifecycle.
 The line to watch for is:
 
 `audio buffer ran dry: playback may have stuttered`

@@ -43,7 +43,7 @@ esac
 fn fake_ytdlp(script: &str) -> (YtDlpService, impl Fn() -> Vec<String>, std::path::PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let path = std::env::temp_dir().join(format!(
-        "rust-music-bot-ytdlp-{}-{}",
+        "slap-ytdlp-{}-{}",
         std::process::id(),
         rand::random::<u64>()
     ));

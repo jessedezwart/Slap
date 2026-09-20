@@ -504,7 +504,7 @@ fn total_from_content_range(headers: &HeaderMap) -> Option<u64> {
         .ok()
 }
 
-/// Log how full the buffer is, so `rust_music_bot=debug` shows depth over time.
+/// Log how full the buffer is, so `slap=debug` shows depth over time.
 ///
 /// Free permits are bytes the buffer has room for, so the difference is what it
 /// is holding: everything queued plus the chunk the reader has in hand. Bytes

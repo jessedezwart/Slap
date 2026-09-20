@@ -178,7 +178,7 @@ async fn startup(config: Config) -> Result<Running, Box<dyn std::error::Error + 
             crate::audio::ytdlp::PLAYLIST_LIMIT,
         )?,
         client: reqwest::Client::builder()
-            .user_agent("rust-music-bot")
+            .user_agent("slap")
             .build()?,
         application_id,
         user_id,

@@ -2,7 +2,7 @@ use super::*;
 
 fn path(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "rust-music-bot-cache-{}-{name}-{}",
+        "slap-cache-{}-{name}-{}",
         std::process::id(),
         rand::random::<u64>()
     ));

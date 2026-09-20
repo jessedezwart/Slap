@@ -40,7 +40,7 @@ impl SpotifyClient {
                 .timeout(Duration::from_secs(15))
                 // The bearer token must never follow a redirect off the API host.
                 .redirect(reqwest::redirect::Policy::none())
-                .user_agent("rust-music-bot")
+                .user_agent("slap")
                 .build()?,
             api_base: "https://api.spotify.com/v1".into(),
             token_url: "https://accounts.spotify.com/api/token".into(),
