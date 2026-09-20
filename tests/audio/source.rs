@@ -1,10 +1,10 @@
-use std::env;
+use std::{env, time::Duration};
 
 use songbird::input::codecs::{get_codec_registry, get_probe};
 use symphonia_core::codecs::CODEC_TYPE_OPUS;
 
 use super::*;
-use crate::config::YtDlpConfig;
+use crate::config::{ResolveCacheConfig, YtDlpConfig};
 
 /// The whole design rests on songbird seeing an Opus track it can pass
 /// through untouched. This proves the chain end to end — yt-dlp resolve,
@@ -26,6 +26,7 @@ async fn youtube_audio_parses_as_opus() {
         program: env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),
         timeout: Duration::from_secs(60),
         extra_args: Vec::new(),
+        resolve_cache: ResolveCacheConfig::default(),
     });
 
     let buffer = crate::config::BufferConfig {

@@ -181,6 +181,29 @@ Access tokens refresh automatically for imports. If Spotify returns a rotated
 refresh token it is retained in memory; reauthorize/update `.env` if authorization
 fails after a restart.
 
+## In-memory resolve cache
+
+The redb cache above removes the *search*, but each track still costs a yt-dlp
+run to turn its page URL into a direct media URL. Those runs are shared:
+`RESOLVE_CACHE_ENTRIES` resolves (512 by default) are kept in memory across
+every guild, so the same track queued in two servers, or replayed a few minutes
+later, costs one yt-dlp invocation rather than two. Callers that ask for an
+input while a run for it is already in flight wait for that run instead of
+starting a second one.
+
+This cache has no off switch, and values below 32 are raised to it. Playing a
+single link resolves it twice over otherwise: expanding the link already
+produces everything playback needs, and the cache is how that reaches the
+player. It is the only place a resolve is held — tracks themselves keep none.
+
+An entry lives only as long as the media URL inside it. googlevideo signs its
+URLs with an expiry, which the bot reads and honours (minus a two-minute margin,
+since playback still has to start on the URL after it is handed out); anything
+without one falls back to `RESOLVE_CACHE_TTL_MS`, 10 minutes by default. Signed
+URLs are tied to the IP that requested them, and the bot is a single process
+behind a single address, so sharing them between guilds is safe. Failed
+resolves are never stored.
+
 ## Notes on behaviour
 
 **Disconnects drop everything.** Each guild owns one `CancellationToken`; every

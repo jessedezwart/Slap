@@ -1,6 +1,6 @@
 //! Error types for the audio pipeline and for start-up configuration.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use thiserror::Error;
 
@@ -51,6 +51,29 @@ pub enum AudioError {
 
     #[error("the audio pipeline was cancelled")]
     Cancelled,
+
+    /// A resolve that several callers were waiting on failed. The cause is
+    /// kept intact so [`AudioError::is_fatal`] still sees through it.
+    #[error(transparent)]
+    Shared(Arc<AudioError>),
+}
+
+impl AudioError {
+    /// Wrap the error from a resolve shared with other callers, unwrapping it
+    /// when this caller turns out to be the last one holding it.
+    pub fn shared(error: Arc<Self>) -> Self {
+        Arc::try_unwrap(error).unwrap_or_else(Self::Shared)
+    }
+
+    /// Whether yt-dlp itself is unusable, so retrying with another input would
+    /// only fail the same way.
+    pub fn is_fatal(&self) -> bool {
+        match self {
+            Self::Spawn { .. } | Self::Timeout(_) => true,
+            Self::Shared(inner) => inner.is_fatal(),
+            _ => false,
+        }
+    }
 }
 
 /// Failures while reading configuration out of the environment.

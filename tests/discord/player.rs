@@ -85,7 +85,7 @@ fn thumbnails_and_links_only_accept_https() {
     let metadata = TrackMetadata {
         title: Some("Song".into()),
         thumbnail: Some("https://i.ytimg.com/vi/x/hq.jpg".into()),
-        webpage_url: Some("https://youtu.be/x".into()),
+        webpage_url: Some("https://youtu.be/x".parse().unwrap()),
         ..Default::default()
     };
     let view = View::playing(&metadata, &TrackState::default(), 0, false, "", Id::new(1));
@@ -101,7 +101,7 @@ fn thumbnails_and_links_only_accept_https() {
     assert!(texts(&view.components).contains("**[Song](<https://youtu.be/x>)**"));
     let metadata = TrackMetadata {
         thumbnail: Some("javascript:alert(1)".into()),
-        webpage_url: Some("http://example.com".into()),
+        webpage_url: Some("http://example.com".parse().unwrap()),
         ..metadata
     };
     let view = View::playing(&metadata, &TrackState::default(), 0, false, "", Id::new(1));

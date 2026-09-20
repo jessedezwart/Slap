@@ -1,14 +1,12 @@
 //! The audio source that songbird uses.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use reqwest::Client;
-use songbird::input::{
-    AsyncAdapterStream, AudioStream, AudioStreamError, AuxMetadata, Compose, Input,
-};
+use songbird::input::{AsyncAdapterStream, AudioStream, AudioStreamError, Compose, Input};
 use symphonia_core::io::MediaSource;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::info;
 use twilight_model::id::{Id, marker::GuildMarker};
 
 use crate::{
@@ -23,9 +21,6 @@ use crate::{
 /// Small buffer songbird needs. Value is based on the default buffer size in songbird's `AsyncAdapterStream`.
 const ADAPTER_BUFFER_BYTES: usize = 64 * 1024;
 
-/// How long a resolved media URL is reused before yt-dlp is run again.
-const RESOLVE_TTL: Duration = Duration::from_secs(60);
-
 pub struct OpusYtSource {
     guild_id: Option<Id<GuildMarker>>,
     target: PlaybackTarget,
@@ -34,7 +29,6 @@ pub struct OpusYtSource {
     buffer_config: BufferConfig,
     /// Cancellation token, used for the complete guild.
     cancel: CancellationToken,
-    cached: Option<(Resolved, Instant)>,
 }
 
 impl OpusYtSource {
@@ -52,7 +46,6 @@ impl OpusYtSource {
             ytdlp,
             buffer_config,
             cancel,
-            cached: None,
         }
     }
 
@@ -62,55 +55,38 @@ impl OpusYtSource {
         self
     }
 
-    /// Resolve the video, reusing a recent result if there is one.
     async fn resolve(&mut self) -> Result<Resolved, AudioError> {
-        if let Some((resolved, at)) = &self.cached
-            && at.elapsed() < RESOLVE_TTL
-        {
-            debug!(title = ?resolved.metadata.title, "reusing resolved audio metadata");
-            return Ok(resolved.clone());
-        }
-
-        if self.cancel.is_cancelled() {
-            return Err(AudioError::Cancelled);
-        }
-
-        let resolved = tokio::select! {
-            () = self.cancel.cancelled() => return Err(AudioError::Cancelled),
+        // Start two async tasks:
+        // - One that waits for the cancellation token to be triggered.
+        // - One that runs yt-dlp to resolve the target.
+        // Bias is used to ensure that if the cancellation token is triggered, we return early and don't wait for yt-dlp to finish.
+        // This is done at the start of the poll and when the future is polled again after being woken up, so that we don't wait for yt-dlp to finish if the cancellation token is triggered while yt-dlp is running.
+        let resolved: Resolved = tokio::select! {
+            biased;
+            () =self.cancel.cancelled() => return Err(AudioError::Cancelled),
             result = self.ytdlp.resolve(&self.target) => result?,
         };
 
         // Later re-resolves (expired URL, seek) must reach the same upload
         // rather than search again and maybe land on a different one.
         if let PlaybackTarget::Search(_) = self.target
-            && let Some(url) = resolved
-                .metadata
-                .webpage_url
-                .as_deref()
-                .and_then(|url| YtDlp::validate_url(url).ok())
+            && let Some(url) = resolved.metadata.webpage_url.clone()
         {
             self.target = url.into();
         }
 
-        self.cached = Some((resolved.clone(), Instant::now()));
-
         Ok(resolved)
-    }
-
-    /// Reuse the single-track metadata resolve performed while listing a URL.
-    pub fn with_resolved(mut self, resolved: Resolved) -> Self {
-        self.cached = Some((resolved, Instant::now()));
-        self
     }
 }
 
 #[async_trait::async_trait]
+/// Everything here is async; songbird will use `create_async`.
 impl Compose for OpusYtSource {
     fn create(&mut self) -> Result<AudioStream<Box<dyn MediaSource>>, AudioStreamError> {
-        // Everything here is async; songbird will use `create_async`.
         Err(AudioStreamError::Unsupported)
     }
 
+    // Don't log all arguments
     #[tracing::instrument(skip_all, fields(guild_id = self.guild_id.map(|id| id.get())))]
     async fn create_async(
         &mut self,
@@ -151,24 +127,9 @@ impl Compose for OpusYtSource {
     fn should_create_async(&self) -> bool {
         true
     }
-
-    async fn aux_metadata(&mut self) -> Result<AuxMetadata, AudioStreamError> {
-        let resolved = self.resolve().await.map_err(fail)?;
-        let metadata = resolved.metadata;
-
-        Ok(AuxMetadata {
-            title: metadata.title.clone(),
-            track: metadata.title,
-            artist: metadata.uploader.clone(),
-            channel: metadata.uploader,
-            duration: metadata.duration,
-            source_url: metadata.webpage_url,
-            thumbnail: metadata.thumbnail,
-            ..AuxMetadata::default()
-        })
-    }
 }
 
+/// Convert an `OpusYtSource` into a songbird `Input`. This is the type songbird expects to be returned from the `Compose` trait.
 impl From<OpusYtSource> for Input {
     fn from(source: OpusYtSource) -> Self {
         Input::Lazy(Box::new(source))

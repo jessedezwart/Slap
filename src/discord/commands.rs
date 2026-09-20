@@ -286,7 +286,10 @@ fn playable(playlist: SpotifyPlaylist) -> MediaList {
                 uploader: Some(artist),
                 duration: track.duration,
                 thumbnail: track.album_art.clone(),
-                webpage_url: track.url.clone(),
+                webpage_url: track
+                    .url
+                    .as_deref()
+                    .and_then(|raw| YtDlp::validate_url(raw).ok()),
                 ..TrackMetadata::default()
             };
             ListedTrack {
@@ -299,7 +302,6 @@ fn playable(playlist: SpotifyPlaylist) -> MediaList {
         tracks,
         skipped: playlist.skipped,
         truncated: playlist.truncated,
-        single: None,
     }
 }
 
@@ -382,7 +384,7 @@ async fn play(
         .into_iter()
         .map(|mut entry| {
             entry.metadata.requester = Some(user_id);
-            let mut source = OpusYtSource::new(
+            let source = OpusYtSource::new(
                 entry.target,
                 state.client.clone(),
                 state.ytdlp.clone(),
@@ -390,9 +392,6 @@ async fn play(
                 cancel.clone(),
             )
             .in_guild(guild_id);
-            if let Some(resolved) = listing.single.take() {
-                source = source.with_resolved(resolved);
-            }
             (source.into(), entry.metadata)
         })
         .collect();
@@ -498,7 +497,7 @@ fn format_queue(tracks: &[Arc<TrackMetadata>], total: usize, page: usize) -> Str
         let title: String = metadata
             .title
             .as_deref()
-            .or(metadata.webpage_url.as_deref())
+            .or(metadata.webpage_url.as_ref().map(url::Url::as_str))
             .unwrap_or("Unknown track")
             .chars()
             .take(80)

@@ -14,7 +14,10 @@ use tracing::{debug, info, warn};
 use twilight_model::id::{Id, marker::UserMarker};
 use url::Url;
 
-use super::{cache::TrackCache, matching};
+use super::{
+    cache::{SpotifyTrackCache, YtdlpResolveCache},
+    matching,
+};
 use crate::{config::YtDlpConfig, error::AudioError, spotify::SpotifyTrack};
 
 /// Opus-only format selection.
@@ -44,7 +47,7 @@ pub struct TrackMetadata {
     pub duration: Option<Duration>,
     pub uploader: Option<String>,
     pub thumbnail: Option<String>,
-    pub webpage_url: Option<String>,
+    pub webpage_url: Option<Url>,
     /// Who queued the track; shown on the player.
     pub requester: Option<Id<UserMarker>>,
     /// Enqueue order, so turning shuffle off can restore it.
@@ -55,7 +58,9 @@ pub struct TrackMetadata {
 pub struct YtDlp {
     config: YtDlpConfig,
     /// Skips the search for tracks resolved on an earlier run.
-    cache: Option<Arc<TrackCache>>,
+    cache: Option<Arc<SpotifyTrackCache>>,
+    /// Skips yt-dlp entirely for an input another guild just resolved.
+    resolve_cache: YtdlpResolveCache,
 }
 
 /// Limit imports so accidental channel/radio links cannot create an unbounded queue.
@@ -121,18 +126,18 @@ pub struct MediaList {
     pub tracks: Vec<ListedTrack>,
     pub skipped: usize,
     pub truncated: bool,
-    pub single: Option<Resolved>,
 }
 
 impl YtDlp {
     pub fn new(config: YtDlpConfig) -> Self {
         Self {
+            resolve_cache: YtdlpResolveCache::new(config.resolve_cache),
             config,
             cache: None,
         }
     }
 
-    pub fn with_cache(mut self, cache: Option<Arc<TrackCache>>) -> Self {
+    pub fn with_track_cache(mut self, cache: Option<Arc<SpotifyTrackCache>>) -> Self {
         self.cache = cache;
         self
     }
@@ -179,9 +184,8 @@ impl YtDlp {
             info!(query = ?text, source = source.name(), "searching for audio");
             let resolved = match self.resolve_input(&source.input(&text)).await {
                 Ok(resolved) => resolved,
-                Err(error @ (AudioError::Spawn { .. } | AudioError::Timeout(_))) => {
-                    return Err(error);
-                }
+                // yt-dlp itself is unusable; the next source would fail the same way.
+                Err(error) if error.is_fatal() => return Err(error),
                 // No results, unavailable, no Opus: try the next source.
                 Err(error) => {
                     warn!(source = source.name(), error = %error, "search failed");
@@ -207,13 +211,21 @@ impl YtDlp {
         else {
             return;
         };
+        let url = url.to_string();
         let id = wanted.id.clone();
         // Committing fsyncs, so keep it off the runtime's worker threads.
         let _ = tokio::task::spawn_blocking(move || cache.put(&id, &url)).await;
     }
 
-    /// Run `yt-dlp -j` and turn its JSON into a [`Resolved`].
+    /// Resolve an input, reusing the result another caller just got for it.
     async fn resolve_input(&self, input: &str) -> Result<Resolved, AudioError> {
+        self.resolve_cache
+            .get_or_resolve(input, self.run_resolve(input))
+            .await
+    }
+
+    /// Run `yt-dlp -j` and turn its JSON into a [`Resolved`].
+    async fn run_resolve(&self, input: &str) -> Result<Resolved, AudioError> {
         let started = Instant::now();
         let mut cmd = Command::new(&self.config.program);
 
@@ -254,7 +266,15 @@ impl YtDlp {
             .arg((PLAYLIST_LIMIT + 1).to_string())
             .args(["-f", OPUS_FORMAT]);
         let output = self.run(cmd, url.as_str()).await?;
-        parse_list(&output, url)
+        let (list, resolved) = parse_list(&output, url)?;
+
+        // A lone video is fully resolved by the listing itself. Keeping that
+        // resolve is what stops playback from running yt-dlp over again.
+        if let Some(resolved) = resolved {
+            self.resolve_cache.insert(url.as_str(), resolved).await;
+        }
+
+        Ok(list)
     }
 
     async fn run(&self, mut cmd: Command, input: &str) -> Result<Vec<u8>, AudioError> {
@@ -306,19 +326,23 @@ impl YtDlp {
     }
 }
 
-fn parse_list(stdout: &[u8], original: &Url) -> Result<MediaList, AudioError> {
+/// Split a listing into its tracks and, for a lone video, the resolve that
+/// listing it already produced.
+fn parse_list(stdout: &[u8], original: &Url) -> Result<(MediaList, Option<Resolved>), AudioError> {
     let value: serde_json::Value = serde_json::from_slice(stdout)?;
     let Some(entries) = value.get("entries").and_then(serde_json::Value::as_array) else {
         let resolved = parse_output(stdout)?;
-        return Ok(MediaList {
-            tracks: vec![ListedTrack {
-                target: original.clone().into(),
-                metadata: resolved.metadata.clone(),
-            }],
-            skipped: 0,
-            truncated: false,
-            single: Some(resolved),
-        });
+        return Ok((
+            MediaList {
+                tracks: vec![ListedTrack {
+                    target: original.clone().into(),
+                    metadata: resolved.metadata.clone(),
+                }],
+                skipped: 0,
+                truncated: false,
+            },
+            Some(resolved),
+        ));
     };
     let mut tracks = Vec::new();
     let mut skipped = 0;
@@ -355,18 +379,20 @@ fn parse_list(stdout: &[u8], original: &Url) -> Result<MediaList, AudioError> {
                     .or_else(|| entry.get("thumbnail"))
                     .and_then(|v| v.as_str())
                     .map(str::to_owned),
-                webpage_url: Some(url.to_string()),
+                webpage_url: Some(url.clone()),
                 ..TrackMetadata::default()
             },
             target: url.into(),
         });
     }
-    Ok(MediaList {
-        tracks,
-        skipped,
-        truncated: entries.len() > PLAYLIST_LIMIT,
-        single: None,
-    })
+    Ok((
+        MediaList {
+            tracks,
+            skipped,
+            truncated: entries.len() > PLAYLIST_LIMIT,
+        },
+        None,
+    ))
 }
 
 /// Parse a single `yt-dlp -j` record.
@@ -430,7 +456,10 @@ pub fn parse_output(stdout: &[u8]) -> Result<Resolved, AudioError> {
                 .map(|a| a.join(", "))
                 .or(output.uploader),
             thumbnail: output.thumbnail,
-            webpage_url: output.webpage_url,
+            webpage_url: output
+                .webpage_url
+                .as_deref()
+                .and_then(|raw| YtDlp::validate_url(raw).ok()),
             requester: None,
             sequence: 0,
         },

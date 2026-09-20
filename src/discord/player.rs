@@ -275,12 +275,13 @@ impl View {
             metadata
                 .title
                 .as_deref()
-                .or(metadata.webpage_url.as_deref())
+                .or(metadata.webpage_url.as_ref().map(url::Url::as_str))
                 .unwrap_or("Unknown track"),
         );
         let mut details = match metadata
             .webpage_url
-            .as_deref()
+            .as_ref()
+            .map(url::Url::as_str)
             .filter(|url| url.starts_with("https://") && !url.contains('>'))
         {
             Some(url) => format!("**[{title}](<{url}>)**"),

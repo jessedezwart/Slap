@@ -142,7 +142,7 @@ async fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sy
     // The cache only saves repeat searches, so failing to open it is a warning
     // rather than a reason not to start.
     let track_cache = config.cache_path.as_deref().and_then(|path| {
-        match crate::audio::cache::TrackCache::open(path) {
+        match crate::audio::cache::SpotifyTrackCache::open(path) {
             Ok(cache) => {
                 info!(path = %path.display(), "track cache opened");
                 Some(Arc::new(cache))
@@ -167,7 +167,7 @@ async fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sy
         cache,
         songbird,
         sessions: Arc::clone(&sessions),
-        ytdlp: YtDlp::new(config.ytdlp.clone()).with_cache(track_cache),
+        ytdlp: YtDlp::new(config.ytdlp.clone()).with_track_cache(track_cache),
         spotify: crate::spotify::SpotifyService::new(
             config.spotify.clone(),
             crate::audio::ytdlp::PLAYLIST_LIMIT,

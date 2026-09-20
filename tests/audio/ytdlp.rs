@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::ResolveCacheConfig;
 
 /// A Spotify track to search for. The ID only matters to the resolved-track
 /// cache, which these tests leave disabled.
@@ -34,9 +35,10 @@ case "$last" in
 esac
 "##;
 
+/// Install `script` as a stand-in yt-dlp, returning it alongside a reader for
+/// the inputs it has been run with since the last read.
 #[cfg(unix)]
-#[tokio::test]
-async fn search_prefers_youtube_music_and_falls_back_on_wrong_duration() {
+fn fake_ytdlp(script: &str) -> (YtDlp, impl Fn() -> Vec<String>, std::path::PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let path = std::env::temp_dir().join(format!(
         "rust-music-bot-ytdlp-{}-{}",
@@ -44,19 +46,27 @@ async fn search_prefers_youtube_music_and_falls_back_on_wrong_duration() {
         rand::random::<u64>()
     ));
     let log = path.with_extension("log");
-    std::fs::write(&path, FAKE_YTDLP).unwrap();
+    std::fs::write(&path, script).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
     let ytdlp = YtDlp::new(YtDlpConfig {
         program: path.to_string_lossy().into_owned(),
         timeout: Duration::from_secs(5),
         extra_args: Vec::new(),
+        resolve_cache: ResolveCacheConfig::default(),
     });
-    let search = |title: &str| PlaybackTarget::Search(track(&["Artist"], title, 180));
-    let calls = || {
+    let calls = move || {
         let calls = std::fs::read_to_string(&log).unwrap_or_default();
         std::fs::remove_file(&log).ok();
         calls.lines().map(str::to_owned).collect::<Vec<_>>()
     };
+    (ytdlp, calls, path)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn search_prefers_youtube_music_and_falls_back_on_wrong_duration() {
+    let (ytdlp, calls, path) = fake_ytdlp(FAKE_YTDLP);
+    let search = |title: &str| PlaybackTarget::Search(track(&["Artist"], title, 180));
 
     // Shell syntax in a song name must reach yt-dlp as literal text.
     let found = ytdlp.resolve(&search("Song $(literal);")).await;
@@ -87,6 +97,39 @@ async fn search_prefers_youtube_music_and_falls_back_on_wrong_duration() {
     assert_eq!(missing_calls.len(), 2);
 }
 
+/// Answers both the listing and the resolve invocation with the same single
+/// video, logging every input it is handed.
+#[cfg(unix)]
+const FAKE_SINGLE_VIDEO: &str = r#"#!/bin/sh
+last=
+for arg; do last=$arg; done
+printf '%s\n' "$last" >> "$0.log"
+printf '%s\n' '{"title":"Song","duration":181,"webpage_url":"https://www.youtube.com/watch?v=song","url":"https://cdn/song","acodec":"opus"}'
+"#;
+
+/// Expanding a link already resolves it, so playing that link must not send
+/// yt-dlp after the same video a second time.
+#[cfg(unix)]
+#[tokio::test]
+async fn playing_a_single_link_runs_ytdlp_once() {
+    let (ytdlp, calls, path) = fake_ytdlp(FAKE_SINGLE_VIDEO);
+    let url = Url::parse("https://www.youtube.com/watch?v=song").unwrap();
+
+    let list = ytdlp.list(&url).await.unwrap();
+    assert_eq!(list.tracks.len(), 1);
+    assert_eq!(calls(), [url.as_str()]);
+
+    // What playback does when the track comes up.
+    let resolved = ytdlp.resolve(&list.tracks[0].target).await.unwrap();
+    std::fs::remove_file(&path).unwrap();
+
+    assert_eq!(resolved.media_url, "https://cdn/song");
+    assert!(
+        calls().is_empty(),
+        "the listing's resolve should have been kept"
+    );
+}
+
 /// Real searches where the top result has to be checked. Opt-in:
 ///   cargo test live_search -- --ignored --nocapture
 #[tokio::test]
@@ -96,6 +139,7 @@ async fn live_search_finds_the_requested_recording() {
         program: std::env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),
         timeout: Duration::from_secs(60),
         extra_args: Vec::new(),
+        resolve_cache: ResolveCacheConfig::default(),
     });
     for (artists, title, secs) in [
         (
@@ -138,7 +182,7 @@ fn playlist_preserves_order_and_skips_invalid_or_unavailable_entries() {
             {"url":"https://example.com/private","availability":"private"},
             {"webpage_url":"https://example.com/last","url":"https://cdn.example.com/audio","title":"Last","duration":-1}
         ]}"#;
-    let list = parse_list(json, &Url::parse("https://example.com/playlist").unwrap()).unwrap();
+    let (list, _) = parse_list(json, &Url::parse("https://example.com/playlist").unwrap()).unwrap();
     assert_eq!(list.skipped, 3);
     assert_eq!(list.tracks.len(), 2);
     assert_eq!(list.tracks[0].metadata.title.as_deref(), Some("First"));
@@ -154,37 +198,35 @@ fn playlist_preserves_order_and_skips_invalid_or_unavailable_entries() {
         "https://example.com/last"
     );
     assert_eq!(list.tracks[1].metadata.duration, None);
-    assert!(list.single.is_none());
     assert!(!list.truncated);
 }
 
 #[test]
 fn playlist_limit_and_empty_playlists() {
     let url = Url::parse("https://example.com/playlist").unwrap();
-    let list = parse_list(br#"{"entries":[]}"#, &url).unwrap();
+    let (list, _) = parse_list(br#"{"entries":[]}"#, &url).unwrap();
     assert!(list.tracks.is_empty());
     let entries: Vec<_> = (0..PLAYLIST_LIMIT + 1)
         .map(|i| serde_json::json!({"url":format!("https://example.com/{i}")}))
         .collect();
     let json = serde_json::to_vec(&serde_json::json!({"entries":entries})).unwrap();
-    let list = parse_list(&json, &url).unwrap();
+    let (list, _) = parse_list(&json, &url).unwrap();
     assert!(list.truncated);
     assert_eq!(list.tracks.len(), PLAYLIST_LIMIT);
 }
 
 #[test]
-fn single_track_listing_reuses_resolved_audio() {
+fn single_track_listing_yields_its_resolve() {
     let url = Url::parse("https://example.com/watch").unwrap();
-    let list = parse_list(
+    // Nothing else resolves this track: `list` puts the resolve straight into
+    // the cache, and playback picks it up from there.
+    let (list, resolved) = parse_list(
         br#"{"title":"Song","url":"https://cdn.example.com/audio","acodec":"opus"}"#,
         &url,
     )
     .unwrap();
     assert!(matches!(&list.tracks[0].target, PlaybackTarget::Url(actual) if actual == &url));
-    assert_eq!(
-        list.single.unwrap().media_url,
-        "https://cdn.example.com/audio"
-    );
+    assert_eq!(resolved.unwrap().media_url, "https://cdn.example.com/audio");
 }
 
 #[test]
