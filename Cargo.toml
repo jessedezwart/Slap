@@ -4,9 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [profile.release]
-lto = "fat"        # cross-crate inlining; the mixer-adjacent hot paths span songbird/symphonia
-codegen-units = 1  # one codegen unit lets LTO optimize globally instead of per-unit
-strip = true       # drop symbols/debuginfo from the shipped binary
+lto = "fat"
+codegen-units = 1
+strip = true
+opt-level = 3
+incremental = false
+debug-assertions = false
+overflow-checks = false
 
 [profile.profiling]
 inherits = "release"
