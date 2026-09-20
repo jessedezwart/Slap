@@ -64,10 +64,7 @@ pub fn all_commands() -> Vec<Command> {
             "Skip the current track and play the next queued track",
         ),
         ("stop", "Stop playback, clear the queue, and disconnect"),
-        (
-            "shuffle",
-            "Shuffle upcoming tracks without interrupting the current track",
-        ),
+        ("shuffle", "Turn shuffle on or off for upcoming tracks"),
     ] {
         commands.push(CommandBuilder::new(name, description, CommandType::ChatInput).build());
     }
@@ -178,7 +175,13 @@ enum ReplyMode {
 
 impl ReplyMode {
     fn new(command: &str, button: bool) -> Self {
-        match (matches!(command, "skip" | "stop"), button) {
+        // The player reflects every panel action, so only the queue replies.
+        let silent = if button {
+            command != "queue"
+        } else {
+            matches!(command, "skip" | "stop" | "shuffle")
+        };
+        match (silent, button) {
             (true, true) => Self::SilentButton,
             (true, false) => Self::SilentCommand,
             (false, true) => Self::Private,
@@ -336,7 +339,8 @@ async fn play(
     let tracks = listing
         .tracks
         .into_iter()
-        .map(|entry| {
+        .map(|mut entry| {
+            entry.metadata.requester = Some(user_id);
             let mut source = OpusYtSource::new(
                 entry.target,
                 state.client.clone(),
@@ -351,11 +355,13 @@ async fn play(
             (source.into(), entry.metadata)
         })
         .collect();
-    let position = state.sessions.enqueue(guild_id, &cancel, tracks).await?;
-    info!(%guild_id, %channel_id, position, count, "queued tracks");
+    let (position, shuffled) = state.sessions.enqueue(guild_id, &cancel, tracks).await?;
+    info!(%guild_id, %channel_id, position, count, shuffled, "queued tracks");
     let mut message = if count == 1 {
         let mut message = if position == 1 {
             format!("Now playing **{}**", escape(&title))
+        } else if shuffled {
+            format!("Queued **{}** at a random position", escape(&title))
         } else {
             format!("Queued **{}** at position {}", escape(&title), position - 1)
         };
@@ -366,7 +372,11 @@ async fn play(
     } else {
         format!(
             "Added {count} tracks{} to the queue.{}",
-            if shuffle { " in shuffled order" } else { "" },
+            if shuffle || shuffled {
+                " in shuffled order"
+            } else {
+                ""
+            },
             if position == 1 {
                 " Playback is starting."
             } else {
@@ -536,6 +546,8 @@ pub(super) fn escape(text: &str) -> String {
         .replace('`', "\\`")
         .replace('~', "\\~")
         .replace('|', "\\|")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
         .replace(['\n', '\r'], " ")
         .replace('@', "@\u{200b}")
 }
@@ -552,57 +564,5 @@ pub(super) fn format_duration(duration: Duration) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn queue_pages_are_bounded_and_keep_positions() {
-        let tracks: Vec<_> = (0..13)
-            .map(|i| {
-                Arc::new(TrackMetadata {
-                    title: Some(format!("Song {i}")),
-                    ..TrackMetadata::default()
-                })
-            })
-            .collect();
-        let visible = std::iter::once(tracks[0].clone())
-            .chain(tracks[6..11].iter().cloned())
-            .collect::<Vec<_>>();
-        let page = format_queue(&visible, tracks.len(), 2);
-        assert!(page.contains("Current track:** Song 0"));
-        assert!(page.contains("page 2/3"));
-        assert!(page.contains("6. Song 6"));
-        assert!(page.contains("10. Song 10"));
-        assert!(!page.contains("11. Song 11"));
-        assert!(format_queue(&tracks, tracks.len(), usize::MAX).contains("does not exist"));
-        assert_eq!(format_queue(&[], 0, 1), "The queue is empty.");
-        let metadata = Arc::new(TrackMetadata {
-            title: Some("*@\n".repeat(100)),
-            ..TrackMetadata::default()
-        });
-        let long = vec![metadata; 10];
-        let message = format_queue(&long, long.len(), 1);
-        assert!(message.chars().count() < 2000);
-        assert_eq!(message.lines().count(), 8);
-    }
-
-    #[test]
-    fn formats_durations() {
-        assert_eq!(format_duration(Duration::from_secs(5)), "0:05");
-        assert_eq!(format_duration(Duration::from_secs(212)), "3:32");
-        assert_eq!(format_duration(Duration::from_secs(3_725)), "1:02:05");
-    }
-
-    #[test]
-    fn escapes_markdown_and_mentions() {
-        assert_eq!(escape("a*b_c`d"), "a\\*b\\_c\\`d");
-        assert!(escape("@everyone").starts_with("@\u{200b}"));
-    }
-
-    #[test]
-    fn truncates_long_titles() {
-        let long = "x".repeat(500);
-
-        assert_eq!(escape(&long).chars().count(), 200);
-    }
-}
+#[path = "../../tests/discord/commands.rs"]
+mod tests;

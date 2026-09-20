@@ -71,19 +71,21 @@ Join a voice channel, then use:
 
 - `/play url:<track-or-playlist-link>` — play a track or append a playlist.
 - `/play url:<playlist-link> shuffle:true` — shuffle the import before adding it.
-- `/shuffle` — shuffle upcoming tracks while keeping the current track in place.
+- `/shuffle` — turn shuffle on or off. While on, upcoming tracks and later
+  imports play in random order; turning it off restores the queued order.
 - `/pause` and `/resume` — pause and continue the current track.
 - `/skip` — skip the current track and play the next queued track, or end playback if the queue is empty.
 - `/stop` — stop playback, clear the queue, cancel pending imports, and disconnect.
 - `/queue` or `/queue page:2` — show the current track and five upcoming tracks per page.
 
 The first successful `/play` response becomes a live player message with the
-current title, elapsed time, a text progress bar, and **Skip**, **Stop**,
-**Shuffle**, and **Show queue** buttons. Later imports reuse that player.
-Show queue replies privately with five upcoming tracks; use `/queue page:2`
-for further pages. Skip and Stop succeed silently; errors and other button replies are private. `/pause` and
-`/resume` also update the player. Unknown track durations show elapsed time
-without a percentage bar.
+current title, thumbnail, requester, elapsed and total time, queue size,
+shuffle state, and **Pause/Resume**, **Skip**, **Stop**, **Shuffle**, and
+**Queue** buttons. Later imports reuse that player, and it is deleted when
+playback stops. Queue replies privately with five upcoming tracks; use
+`/queue page:2` for further pages. The other buttons, `/skip`, `/stop`, and
+`/shuffle` succeed silently because the player shows the result; errors are
+private. Unknown track durations show elapsed time only.
 
 The player edits one message per voice session. Progress refreshes every
 15 seconds (four scheduled edits per minute while playing), with earlier
@@ -103,7 +105,7 @@ not limited by the interaction token's lifetime.
 
 Controls require you to be in the bot's voice channel. A `/play` request from
 another channel will not move the bot or interrupt that channel's queue.
-Playlist imports inspect at most 500 entries and report skipped unavailable
+Playlist imports inspect at most 1000 entries and report skipped unavailable
 entries and truncation. Links containing both a video and a playlist import the
 playlist; remove the playlist parameter to request only the video. Tracks resolve
 their audio URLs when playback approaches, and failures advance to the next track.
@@ -135,7 +137,7 @@ other sources work without these settings.
 3. Run `/play url:https://open.spotify.com/playlist/PLAYLIST_ID`.
    Add `shuffle:true` to shuffle before enqueueing.
 
-The bot reads playlist pages in order, up to 500 entries, and searches for each
+The bot reads playlist pages in order, up to 1000 entries, and searches for each
 track's **artist(s) + song name** when playback approaches. It takes the top
 YouTube Music song result, and if that does not run within 10 s or 7% of the
 Spotify duration, the top regular YouTube result. If neither matches, the track

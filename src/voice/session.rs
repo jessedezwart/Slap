@@ -5,7 +5,14 @@
 //! tearing a guild down is a single `cancel()` rather than a walk over
 //! per-track state.
 
-use std::{collections::VecDeque, sync::Arc, time::Duration};
+use std::{
+    collections::VecDeque,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use rand::seq::SliceRandom;
 
@@ -41,6 +48,15 @@ pub struct GuildSession {
     pub cancel: CancellationToken,
     pub updates: Arc<Notify>,
     pub panel_message: Option<Id<MessageMarker>>,
+    /// Keep upcoming tracks, including later imports, in random order.
+    pub shuffle: bool,
+}
+
+/// What the player message shows, taken under the lifecycle lock.
+pub struct PlayerSnapshot {
+    pub track: Option<TrackHandle>,
+    pub upcoming: usize,
+    pub shuffle: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -69,6 +85,8 @@ pub struct SessionManager {
     sessions: DashMap<Id<GuildMarker>, GuildSession>,
     commands: UnboundedSender<VoiceCommand>,
     locks: DashMap<Id<GuildMarker>, Arc<Mutex<()>>>,
+    /// Enqueue order, so turning shuffle off can restore it.
+    sequence: AtomicU64,
 }
 
 impl SessionManager {
@@ -80,6 +98,7 @@ impl SessionManager {
             sessions: DashMap::new(),
             commands,
             locks: DashMap::new(),
+            sequence: AtomicU64::new(0),
         });
 
         (manager, receiver)
@@ -162,6 +181,7 @@ impl SessionManager {
                 cancel: cancel.clone(),
                 updates,
                 panel_message: None,
+                shuffle: false,
             },
         );
 
@@ -176,22 +196,37 @@ impl SessionManager {
     }
 
     /// Append a complete import atomically, rejecting work cancelled by stop/leave.
+    ///
+    /// Returns the first track's queue position and whether shuffle mode
+    /// scattered the import through the queue.
     pub async fn enqueue(
         &self,
         guild_id: Id<GuildMarker>,
         cancel: &CancellationToken,
-        tracks: Vec<(Input, TrackMetadata)>,
-    ) -> Result<usize, SessionError> {
+        mut tracks: Vec<(Input, TrackMetadata)>,
+    ) -> Result<(usize, bool), SessionError> {
         let _guard = self.lock(guild_id).await;
-        if cancel.is_cancelled() || self.channel_of(guild_id).is_none() {
+        if cancel.is_cancelled() {
             return Err(SessionError::NotConnected);
         }
+        let shuffle = self
+            .sessions
+            .get(&guild_id)
+            .ok_or(SessionError::NotConnected)?
+            .shuffle;
         let call = self
             .songbird
             .get(guild_id)
             .ok_or(SessionError::NotConnected)?;
         let mut call = call.lock().await;
         let position = call.queue().len() + 1;
+        for (_, metadata) in &mut tracks {
+            metadata.sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
+        }
+        if shuffle {
+            // Also randomizes the first track when this import starts playback.
+            tracks.shuffle(&mut rand::rng());
+        }
         for (input, metadata) in tracks {
             let preload = metadata
                 .duration
@@ -199,8 +234,11 @@ impl SessionManager {
             let track = Track::new_with_data(input, Arc::new(metadata));
             call.enqueue_with_preload(track, preload);
         }
+        if shuffle {
+            call.queue().modify_queue(shuffle_upcoming);
+        }
         self.notify_player(guild_id);
-        Ok(position)
+        Ok((position, shuffle))
     }
 
     /// Voice controls share the lifecycle lock with joins, enqueues and teardown.
@@ -280,11 +318,21 @@ impl SessionManager {
                 "Skipped the current track.".into()
             }
             "shuffle" => {
-                let count = queue.modify_queue(shuffle_upcoming);
-                if count < 2 {
-                    "There are fewer than two upcoming tracks to shuffle.".into()
+                let mut session = self
+                    .sessions
+                    .get_mut(&guild_id)
+                    .ok_or(SessionError::NotConnected)?;
+                session.shuffle = !session.shuffle;
+                if session.shuffle {
+                    queue.modify_queue(shuffle_upcoming);
+                    "Shuffle is on.".into()
                 } else {
-                    format!("Shuffled {count} upcoming tracks.")
+                    queue.modify_queue(|queue| {
+                        restore_order(queue, |track| {
+                            track.handle().data::<TrackMetadata>().sequence
+                        });
+                    });
+                    "Shuffle is off.".into()
                 }
             }
             _ => unreachable!("only registered controls reach this method"),
@@ -333,20 +381,21 @@ impl SessionManager {
         &self,
         guild_id: Id<GuildMarker>,
         message_id: Id<MessageMarker>,
-    ) -> Option<(Option<TrackHandle>, usize)> {
+    ) -> Option<PlayerSnapshot> {
         let _guard = self.lock(guild_id).await;
-        if !self.sessions.get(&guild_id).is_some_and(|session| {
-            session.panel_message == Some(message_id) && !session.cancel.is_cancelled()
-        }) {
-            return None;
-        }
+        let shuffle = self
+            .sessions
+            .get(&guild_id)
+            .filter(|session| {
+                session.panel_message == Some(message_id) && !session.cancel.is_cancelled()
+            })?
+            .shuffle;
         let call = self.songbird.get(guild_id)?;
         let call = call.lock().await;
-        Some(call.queue().modify_queue(|queue| {
-            (
-                queue.front().map(|track| track.handle()),
-                queue.len().saturating_sub(1),
-            )
+        Some(call.queue().modify_queue(|queue| PlayerSnapshot {
+            track: queue.front().map(|track| track.handle()),
+            upcoming: queue.len().saturating_sub(1),
+            shuffle,
         }))
     }
 
@@ -423,6 +472,13 @@ fn shuffle_upcoming<T>(queue: &mut VecDeque<T>) -> usize {
     upcoming.len()
 }
 
+/// Undo shuffling, leaving the playing track at the front.
+fn restore_order<T>(queue: &mut VecDeque<T>, sequence: impl Fn(&T) -> u64) {
+    if let Some(upcoming) = queue.make_contiguous().get_mut(1..) {
+        upcoming.sort_by_cached_key(sequence);
+    }
+}
+
 /// Drains [`VoiceCommand`]s off songbird's driver task.
 pub async fn run_command_loop(
     manager: Arc<SessionManager>,
@@ -444,169 +500,5 @@ pub async fn run_command_loop(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn test_manager() -> Arc<SessionManager> {
-        // No gateway or voice connection is opened in these lifecycle tests.
-        let songbird = Songbird::twilight_from_config(
-            Arc::new(songbird::shards::TwilightMap::new(Default::default())),
-            Id::<twilight_model::id::marker::UserMarker>::new(100),
-            songbird::Config::default(),
-        );
-        SessionManager::new(Arc::new(songbird)).0
-    }
-
-    #[tokio::test]
-    async fn stop_rejects_other_channels_and_cancels_pending_work() {
-        let manager = test_manager();
-        let guild = Id::new(1);
-        let channel = Id::new(10);
-        let cancel = CancellationToken::new();
-        let child = cancel.child_token();
-        manager.sessions.insert(
-            guild,
-            GuildSession {
-                channel_id: channel,
-                cancel: cancel.clone(),
-                updates: Arc::new(Notify::new()),
-                panel_message: None,
-            },
-        );
-        assert!(matches!(
-            manager.control(guild, Id::new(20), "stop", 1, None).await,
-            Err(SessionError::WrongChannel)
-        ));
-        assert!(!child.is_cancelled());
-        assert!(
-            manager
-                .control(guild, channel, "stop", 1, None)
-                .await
-                .is_ok()
-        );
-        assert!(child.is_cancelled());
-        assert_eq!(manager.channel_of(guild), None);
-
-        // A late playlist result cannot append to the next voice session.
-        let replacement = CancellationToken::new();
-        manager.sessions.insert(
-            guild,
-            GuildSession {
-                channel_id: channel,
-                cancel: replacement.clone(),
-                updates: Arc::new(Notify::new()),
-                panel_message: None,
-            },
-        );
-        assert!(matches!(
-            manager.enqueue(guild, &cancel, vec![]).await,
-            Err(SessionError::NotConnected)
-        ));
-        manager
-            .teardown_if(guild, "stale disconnect", || !cancel.is_cancelled())
-            .await;
-        assert!(!replacement.is_cancelled());
-        assert_eq!(manager.channel_of(guild), Some(channel));
-        manager.teardown(guild, "test cleanup").await;
-    }
-
-    #[test]
-    fn shuffle_preserves_current_and_all_upcoming_tracks() {
-        let mut queue: VecDeque<_> = (0..100).collect();
-        assert_eq!(shuffle_upcoming(&mut queue), 99);
-        assert_eq!(queue.front(), Some(&0));
-        let mut items: Vec<_> = queue.into_iter().collect();
-        items.sort_unstable();
-        assert_eq!(items, (0..100).collect::<Vec<_>>());
-        assert_eq!(shuffle_upcoming(&mut VecDeque::<u8>::new()), 0);
-        assert_eq!(shuffle_upcoming(&mut VecDeque::from([1])), 0);
-        let mut two = VecDeque::from([1, 2]);
-        assert_eq!(shuffle_upcoming(&mut two), 1);
-        assert_eq!(two, VecDeque::from([1, 2]));
-    }
-
-    #[tokio::test]
-    async fn panel_ownership_is_unique_and_old_buttons_cannot_stop_replacements() {
-        let manager = test_manager();
-        let guild = Id::new(1);
-        let channel = Id::new(10);
-        let cancel = CancellationToken::new();
-        manager.sessions.insert(
-            guild,
-            GuildSession {
-                channel_id: channel,
-                cancel: cancel.clone(),
-                updates: Arc::new(Notify::new()),
-                panel_message: None,
-            },
-        );
-        let (first, second) = tokio::join!(
-            manager.attach_panel(guild, &cancel, Id::new(100)),
-            manager.attach_panel(guild, &cancel, Id::new(200)),
-        );
-        assert_ne!(
-            first.is_some(),
-            second.is_some(),
-            "exactly one updater wins"
-        );
-        let message = first.or(second).unwrap().panel_message.unwrap();
-        assert!(matches!(
-            manager
-                .control(guild, Id::new(20), "stop", 1, Some(message))
-                .await,
-            Err(SessionError::WrongChannel)
-        ));
-        assert!(!cancel.is_cancelled());
-        manager
-            .control(guild, channel, "stop", 1, Some(message))
-            .await
-            .unwrap();
-        assert!(cancel.is_cancelled());
-
-        let replacement = CancellationToken::new();
-        manager.sessions.insert(
-            guild,
-            GuildSession {
-                channel_id: channel,
-                cancel: replacement.clone(),
-                updates: Arc::new(Notify::new()),
-                panel_message: None,
-            },
-        );
-        assert!(
-            manager
-                .attach_panel(guild, &cancel, Id::new(300))
-                .await
-                .is_none()
-        );
-        assert!(
-            manager
-                .attach_panel(guild, &replacement, Id::new(400))
-                .await
-                .is_some()
-        );
-        // Cleanup by the previous worker must not release the new panel.
-        manager.release_panel(guild, message);
-        assert_eq!(
-            manager.sessions.get(&guild).unwrap().panel_message,
-            Some(Id::new(400))
-        );
-        assert!(matches!(
-            manager
-                .control(guild, channel, "stop", 1, Some(message))
-                .await,
-            Err(SessionError::StalePanel)
-        ));
-        assert!(!replacement.is_cancelled());
-
-        // Deleting a panel permits a fresh /play response to take ownership.
-        manager.release_panel(guild, Id::new(400));
-        assert!(
-            manager
-                .attach_panel(guild, &replacement, Id::new(500))
-                .await
-                .is_some()
-        );
-        manager.teardown(guild, "test cleanup").await;
-    }
-}
+#[path = "../../tests/voice/session.rs"]
+mod tests;

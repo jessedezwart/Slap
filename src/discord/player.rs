@@ -1,7 +1,7 @@
 //! One lightweight message updater per voice session. No media lookups, image
 //! downloads, per-second HTTP polling, or network work on Songbird's driver.
 
-use std::{sync::Arc, time::Duration};
+use std::{fmt::Write as _, sync::Arc, time::Duration};
 
 use songbird::tracks::{PlayMode, ReadyState, TrackState};
 use tokio::time::{self, Instant, MissedTickBehavior};
@@ -11,8 +11,11 @@ use twilight_model::{
     channel::{
         Message,
         message::{
-            AllowedMentions, Component,
-            component::{ActionRow, Button, ButtonStyle},
+            AllowedMentions, Component, EmojiReactionType, MessageFlags,
+            component::{
+                ActionRow, Button, ButtonStyle, Container, Section, Separator,
+                SeparatorSpacingSize, TextDisplay, Thumbnail, UnfurledMediaItem,
+            },
         },
     },
     id::{
@@ -22,7 +25,11 @@ use twilight_model::{
 };
 
 use super::commands::{escape, format_duration};
-use crate::{audio::ytdlp::TrackMetadata, discord::state::State, voice::session::GuildSession};
+use crate::{
+    audio::ytdlp::TrackMetadata,
+    discord::state::State,
+    voice::session::{GuildSession, PlayerSnapshot},
+};
 
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(15);
 const MIN_UPDATE_INTERVAL: Duration = Duration::from_secs(2);
@@ -30,6 +37,8 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub fn button_command(custom_id: &str) -> Option<&'static str> {
     match custom_id {
+        "player:pause" => Some("pause"),
+        "player:resume" => Some("resume"),
         "player:skip" => Some("skip"),
         "player:stop" => Some("stop"),
         "player:shuffle" => Some("shuffle"),
@@ -123,7 +132,12 @@ async fn run(
             () = session.cancel.cancelled() => break,
             snapshot = state.sessions.player_snapshot(guild_id, message_id) => snapshot,
         };
-        let Some((track, upcoming)) = snapshot else {
+        let Some(PlayerSnapshot {
+            track,
+            upcoming,
+            shuffle,
+        }) = snapshot
+        else {
             break;
         };
         let view = if let Some(track) = track {
@@ -137,9 +151,16 @@ async fn run(
             let Ok(Ok(info)) = info else {
                 continue;
             };
-            View::playing(&track.data::<TrackMetadata>(), &info, upcoming, &notice)
+            View::playing(
+                &track.data::<TrackMetadata>(),
+                &info,
+                upcoming,
+                shuffle,
+                &notice,
+                session.channel_id,
+            )
         } else {
-            View::empty(&notice)
+            View::empty(shuffle, &notice)
         };
         if previous.as_ref() == Some(&view) {
             continue;
@@ -147,12 +168,9 @@ async fn run(
         if session.cancel.is_cancelled() {
             break;
         }
-        // Serialize edits, including the final disabled state. No lock is held
+        // Serialize edits, including the final delete. No lock is held
         // during HTTP, and requests cannot strand this task indefinitely.
-        let update_components = previous
-            .as_ref()
-            .is_none_or(|old: &View| old.components != view.components);
-        let result = edit(&state, channel_id, message_id, &view, update_components).await;
+        let result = edit(&state, channel_id, message_id, &view).await;
         next_update = Instant::now() + MIN_UPDATE_INTERVAL;
         match result {
             Ok(()) => {
@@ -169,7 +187,17 @@ async fn run(
             }
         }
     }
-    let _ = edit(&state, channel_id, message_id, &View::ended(), true).await;
+    // Stopped, disconnected or superseded: a dead player is just clutter.
+    match time::timeout(
+        HTTP_TIMEOUT,
+        state.http.delete_message(channel_id, message_id),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => warn!(%message_id, %error, "failed to delete player message"),
+        Err(_) => warn!(%message_id, "player message delete timed out"),
+    }
 }
 
 enum EditError {
@@ -182,20 +210,17 @@ async fn edit(
     channel_id: Id<ChannelMarker>,
     message_id: Id<MessageMarker>,
     view: &View,
-    update_components: bool,
 ) -> Result<(), EditError> {
     let mentions = AllowedMentions::default();
+    // The first edit converts the plain /play reply into a V2 message, which
+    // requires dropping its text content. Discord never converts it back.
     let request = state
         .http
         .update_message(channel_id, message_id)
-        .content(Some(&view.content))
+        .content(None)
+        .flags(MessageFlags::IS_COMPONENTS_V2)
+        .components(Some(&view.components))
         .allowed_mentions(Some(&mentions));
-    // Progress-only edits send just the small text payload, not the buttons.
-    let request = if update_components {
-        request.components(Some(&view.components))
-    } else {
-        request
-    };
     match time::timeout(HTTP_TIMEOUT, request).await {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(error)) => {
@@ -217,22 +242,34 @@ async fn edit(
     }
 }
 
+const ACCENT_PLAYING: u32 = 0x8B5CF6;
+const ACCENT_PAUSED: u32 = 0xF0B232;
+const ACCENT_IDLE: u32 = 0x80848E;
+
+/// A Components V2 message: everything lives in one accented container.
 #[derive(Debug, PartialEq)]
 struct View {
-    content: String,
     components: Vec<Component>,
 }
 
 impl View {
-    fn playing(metadata: &TrackMetadata, info: &TrackState, upcoming: usize, notice: &str) -> Self {
-        let status = if info.playing.is_done() {
-            "Changing tracks…"
-        } else if info.playing == PlayMode::Pause {
-            "Paused"
+    fn playing(
+        metadata: &TrackMetadata,
+        info: &TrackState,
+        upcoming: usize,
+        shuffle: bool,
+        notice: &str,
+        voice_channel: Id<ChannelMarker>,
+    ) -> Self {
+        let paused = info.playing == PlayMode::Pause;
+        let (status, accent) = if info.playing.is_done() {
+            ("Changing tracks…", ACCENT_IDLE)
+        } else if paused {
+            ("Paused", ACCENT_PAUSED)
         } else if info.ready != ReadyState::Playable {
-            "Loading…"
+            ("Loading…", ACCENT_IDLE)
         } else {
-            "Now playing"
+            ("Now playing", ACCENT_PLAYING)
         };
         let title = escape(
             metadata
@@ -241,137 +278,142 @@ impl View {
                 .or(metadata.webpage_url.as_deref())
                 .unwrap_or("Unknown track"),
         );
-        Self {
-            content: format!(
-                "**{status}**\n**{title}**\n{}\n{upcoming} upcoming tracks{notice}",
-                progress(info.position, metadata.duration)
-            ),
-            components: buttons(false, false, upcoming),
+        let mut details = match metadata
+            .webpage_url
+            .as_deref()
+            .filter(|url| url.starts_with("https://") && !url.contains('>'))
+        {
+            Some(url) => format!("**[{title}](<{url}>)**"),
+            None => format!("**{title}**"),
+        };
+        if let Some(user) = metadata.requester {
+            let _ = write!(details, "\n- Added by <@{user}>");
         }
+        let _ = write!(details, "\n- <#{voice_channel}>");
+        let details = match metadata.thumbnail.as_deref() {
+            Some(url) if url.starts_with("https://") => Component::Section(Section {
+                id: None,
+                components: vec![text(details)],
+                accessory: Box::new(Component::Thumbnail(Thumbnail {
+                    id: None,
+                    media: UnfurledMediaItem {
+                        url: url.to_owned(),
+                        proxy_url: None,
+                        height: None,
+                        width: None,
+                        content_type: None,
+                    },
+                    description: None,
+                    spoiler: None,
+                })),
+            }),
+            _ => text(details),
+        };
+        let mut components = vec![
+            text(format!("### {status}")),
+            separator(true),
+            details,
+            text(format!(
+                "{} · Queue size: `{upcoming}` · Shuffle: `{}`",
+                time(info.position, metadata.duration),
+                if shuffle { "On" } else { "Off" }
+            )),
+        ];
+        push_notice(&mut components, notice);
+        components.push(buttons(false, paused, shuffle));
+        Self::container(accent, components)
     }
 
-    fn empty(notice: &str) -> Self {
-        Self {
-            content: format!(
-                "**Queue finished**\nAdd more music with `/play`, or press Stop to disconnect.{notice}"
-            ),
-            components: buttons(false, true, 0),
-        }
+    fn empty(shuffle: bool, notice: &str) -> Self {
+        let mut components = vec![
+            text("### Queue finished".into()),
+            separator(true),
+            text("Add more music with `/play`, or press Stop to disconnect.".into()),
+        ];
+        push_notice(&mut components, notice);
+        components.push(buttons(true, false, shuffle));
+        Self::container(ACCENT_IDLE, components)
     }
 
-    fn ended() -> Self {
+    fn container(accent: u32, components: Vec<Component>) -> Self {
         Self {
-            content: "**Playback ended**\nUse `/play` to start a new session.".into(),
-            components: buttons(true, true, 0),
+            components: vec![Component::Container(Container {
+                id: None,
+                accent_color: Some(Some(accent)),
+                spoiler: None,
+                components,
+            })],
         }
     }
 }
 
-fn progress(position: Duration, duration: Option<Duration>) -> String {
+fn text(content: String) -> Component {
+    Component::TextDisplay(TextDisplay { id: None, content })
+}
+
+fn separator(divider: bool) -> Component {
+    Component::Separator(Separator {
+        id: None,
+        divider: Some(divider),
+        spacing: Some(SeparatorSpacingSize::Small),
+    })
+}
+
+fn push_notice(components: &mut Vec<Component>, notice: &str) {
+    let notice = notice.trim();
+    if !notice.is_empty() {
+        components.push(text(format!("-# {notice}")));
+    }
+}
+
+fn time(position: Duration, duration: Option<Duration>) -> String {
     let Some(duration) = duration.filter(|duration| !duration.is_zero()) else {
-        return format!("`{} elapsed • duration unknown`", format_duration(position));
+        return format!("`{}`", format_duration(position));
     };
-    let position = position.min(duration);
-    let filled = ((position.as_secs_f64() / duration.as_secs_f64()) * 16.0) as usize;
     format!(
-        "`{}{} {} / {}`",
-        "━".repeat(filled),
-        "─".repeat(16 - filled),
-        format_duration(position),
+        "`{} / {}`",
+        format_duration(position.min(duration)),
         format_duration(duration)
     )
 }
 
-fn buttons(ended: bool, empty: bool, upcoming: usize) -> Vec<Component> {
-    vec![Component::ActionRow(ActionRow {
+fn buttons(empty: bool, paused: bool, shuffle: bool) -> Component {
+    let (toggle, toggle_label, toggle_emoji) = if paused {
+        ("resume", "Resume", "▶️")
+    } else {
+        ("pause", "Pause", "⏸️")
+    };
+    Component::ActionRow(ActionRow {
         id: None,
         components: [
-            ("skip", "Skip", ButtonStyle::Primary, empty),
-            ("stop", "Stop", ButtonStyle::Danger, false),
-            ("shuffle", "Shuffle", ButtonStyle::Secondary, upcoming < 2),
-            ("queue", "Show queue", ButtonStyle::Secondary, false),
+            (toggle, toggle_label, toggle_emoji, empty, false),
+            ("skip", "Skip", "⏭️", empty, false),
+            ("stop", "Stop", "⏹️", false, false),
+            ("shuffle", "Shuffle", "🔀", empty, shuffle),
+            ("queue", "Queue", "📜", false, false),
         ]
         .into_iter()
-        .map(|(command, label, style, disabled)| {
+        .map(|(command, label, emoji, disabled, active)| {
             Component::Button(Button {
                 id: None,
                 custom_id: Some(format!("player:{command}")),
                 label: Some(label.into()),
-                style,
-                disabled: ended || disabled,
-                emoji: None,
+                // Highlighted while its mode is on.
+                style: if active {
+                    ButtonStyle::Primary
+                } else {
+                    ButtonStyle::Secondary
+                },
+                disabled,
+                emoji: Some(EmojiReactionType::Unicode { name: emoji.into() }),
                 url: None,
                 sku_id: None,
             })
         })
         .collect(),
-    })]
+    })
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn progress_handles_unknown_zero_and_overrun() {
-        assert_eq!(
-            progress(Duration::from_secs(30), Some(Duration::from_secs(60))),
-            "`━━━━━━━━──────── 0:30 / 1:00`"
-        );
-        assert_eq!(
-            progress(Duration::from_secs(90), Some(Duration::from_secs(60))),
-            "`━━━━━━━━━━━━━━━━ 1:00 / 1:00`"
-        );
-        for duration in [None, Some(Duration::ZERO)] {
-            assert_eq!(
-                progress(Duration::from_secs(30), duration),
-                "`0:30 elapsed • duration unknown`"
-            );
-        }
-    }
-
-    #[test]
-    fn paused_views_are_stable_and_titles_are_bounded() {
-        let metadata = TrackMetadata {
-            title: Some("*@everyone\n".repeat(1000)),
-            duration: Some(Duration::from_secs(60)),
-            ..Default::default()
-        };
-        let info = TrackState {
-            playing: PlayMode::Pause,
-            position: Duration::from_secs(30),
-            ready: ReadyState::Playable,
-            ..Default::default()
-        };
-        let view = View::playing(&metadata, &info, 500, "");
-        assert!(view.content.starts_with("**Paused**"));
-        assert!(!view.content.contains("@everyone"));
-        assert!(view.content.chars().count() < 1000);
-        assert_eq!(view, View::playing(&metadata, &info, 500, ""));
-        assert!(
-            View::playing(&metadata, &TrackState::default(), 0, "")
-                .content
-                .starts_with("**Loading…**")
-        );
-    }
-
-    #[test]
-    fn controls_disable_for_empty_and_ended_sessions() {
-        for (view, expected) in [
-            (View::empty(""), [true, false, true, false]),
-            (View::ended(), [true; 4]),
-        ] {
-            let Component::ActionRow(row) = &view.components[0] else {
-                panic!()
-            };
-            for (component, disabled) in row.components.iter().zip(expected) {
-                let Component::Button(button) = component else {
-                    panic!()
-                };
-                assert_eq!(button.disabled, disabled);
-                assert!(button_command(button.custom_id.as_deref().unwrap()).is_some());
-            }
-        }
-        assert_eq!(button_command("player:destroy"), None);
-    }
-}
+#[path = "../../tests/discord/player.rs"]
+mod tests;
