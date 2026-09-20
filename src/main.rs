@@ -39,7 +39,7 @@ fn main() -> ExitCode {
         .with_writer(log_writer)
         .with_env_filter(
             EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("rust_music_bot=info,warn")),
+                .unwrap_or_else(|_| EnvFilter::new("Slap=info,warn")),
         )
         .init();
 

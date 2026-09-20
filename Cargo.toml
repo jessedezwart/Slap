@@ -1,17 +1,12 @@
 [package]
-name = "rust-music-bot"
+name = "Slap"
 version = "0.1.0"
 edition = "2024"
 
-# This bot is a long-running daemon, not a CLI invoked often, so slower builds
-# in exchange for a faster, smaller binary are the right trade.
 [profile.release]
 lto = "fat"        # cross-crate inlining; the mixer-adjacent hot paths span songbird/symphonia
 codegen-units = 1  # one codegen unit lets LTO optimize globally instead of per-unit
 strip = true       # drop symbols/debuginfo from the shipped binary
-# Deliberately NOT panic = "abort": each guild's fetch/interaction work is its
-# own tokio task, so a panic in one should fail that task (and get torn down
-# by its CancellationToken), not kill every other guild's voice connection too.
 
 [profile.profiling]
 inherits = "release"
@@ -19,9 +14,6 @@ debug = true
 strip = false
 
 [dependencies]
-# 0.6 is the first release with DAVE (Discord's mandatory voice E2EE since 2026).
-# `tws` instead of the default `tungstenite` so songbird and twilight 0.17 share
-# one WebSocket stack.
 songbird = { version = "0.6", default-features = false, features = [
     "driver",
     "gateway",
@@ -31,9 +23,7 @@ songbird = { version = "0.6", default-features = false, features = [
     "builtin-queue",
 ] }
 
-# MUST be declared: songbird depends on symphonia with default-features = false,
-# so the WebM/Matroska demuxer only exists if *we* turn it on here. Without this
-# the Opus-in-WebM stream from YouTube will not probe at all.
+# mkv and ogg demuxers are needed
 symphonia = { version = "0.5.4", default-features = false, features = ["mkv", "ogg"] }
 
 twilight-gateway = { version = "0.17", default-features = false, features = [
@@ -49,13 +39,11 @@ twilight-cache-inmemory = "0.17"
 twilight-util = { version = "0.17", features = ["builder"] }
 
 tokio = { version = "1", features = [
-    "rt",
     "rt-multi-thread",
     "macros",
     "process",
     "sync",
     "time",
-    "io-util",
     "signal",
 ] }
 tokio-util = { version = "0.7", features = ["rt"] }
@@ -65,18 +53,11 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 
 async-trait = "0.1"
-# Pinned so the rustls provider is installed explicitly rather than relying on
-# exactly one provider feature being live in the dependency graph.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 bytes = "1"
 dashmap = "6"
-# Single-flight + per-entry TTL for the in-memory resolve cache. Coalescing
-# concurrent identical resolves is the part worth a dependency; doing it by
-# hand means a map of in-flight futures and the cancellation edge cases.
 moka = { version = "0.12", default-features = false, features = ["future"] }
 rand = "0.9"
-# Loads `.env` for local runs. A missing file is not an error, so this stays
-# inert in deployments where the environment is already populated.
 dotenvy = "0.15"
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
@@ -90,5 +71,4 @@ url = "2"
 redb = "4.3.0"
 
 [dev-dependencies]
-# The buffer tests drive a real socket through a throwaway HTTP server.
 tokio = { version = "1", features = ["net", "io-util", "macros", "rt-multi-thread", "sync", "time"] }

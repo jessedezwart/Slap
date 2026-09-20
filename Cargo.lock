@@ -3,6 +3,39 @@
 version = 4
 
 [[package]]
+name = "Slap"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "dashmap",
+ "dotenvy",
+ "futures-util",
+ "moka",
+ "rand 0.9.5",
+ "redb",
+ "reqwest",
+ "rustls 0.23.45",
+ "serde",
+ "serde_json",
+ "songbird",
+ "symphonia",
+ "symphonia-core",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "twilight-cache-inmemory",
+ "twilight-gateway",
+ "twilight-http",
+ "twilight-model",
+ "twilight-util",
+ "url",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2780,39 +2813,6 @@ dependencies = [
  "num-integer",
  "num-traits",
  "realfft",
-]
-
-[[package]]
-name = "rust-music-bot"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "dashmap",
- "dotenvy",
- "futures-util",
- "moka",
- "rand 0.9.5",
- "redb",
- "reqwest",
- "rustls 0.23.45",
- "serde",
- "serde_json",
- "songbird",
- "symphonia",
- "symphonia-core",
- "thiserror 2.0.20",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "twilight-cache-inmemory",
- "twilight-gateway",
- "twilight-http",
- "twilight-model",
- "twilight-util",
- "url",
 ]
 
 [[package]]
