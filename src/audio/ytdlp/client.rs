@@ -65,9 +65,7 @@ impl YtDlpClient {
     }
 
     async fn run(&self, mut cmd: Command, input: &str) -> Result<Vec<u8>, AudioError> {
-        if let Some(path) = &self.config.cookies_file {
-            cmd.arg("--cookies").arg(path);
-        }
+        cmd.arg("--cookies").arg(&self.config.cookies_file);
         // Keep the input literal, including anything that looks like an option.
         cmd.arg("--").arg(input);
 

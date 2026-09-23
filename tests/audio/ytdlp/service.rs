@@ -54,7 +54,7 @@ fn fake_ytdlp(script: &str) -> (YtDlpService, impl Fn() -> Vec<String>, std::pat
         program: path.to_string_lossy().into_owned(),
         timeout: Duration::from_secs(5),
         extra_args: Vec::new(),
-        cookies_file: None,
+        cookies_file: "secrets/cookies.txt".into(),
         resolve_cache: ResolveCacheConfig::default(),
     });
     let calls = move || {
@@ -142,7 +142,7 @@ async fn live_search_finds_the_requested_recording() {
         program: std::env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),
         timeout: Duration::from_secs(60),
         extra_args: Vec::new(),
-        cookies_file: None,
+        cookies_file: "secrets/cookies.txt".into(),
         resolve_cache: ResolveCacheConfig::default(),
     });
     for (artists, title, secs) in [
@@ -233,7 +233,7 @@ printf '%s\n' '{"url":"https://cdn/audio","acodec":"opus"}'
         program: path.to_string_lossy().into_owned(),
         timeout: Duration::from_secs(5),
         extra_args: vec![],
-        cookies_file: Some("/tmp/cookie directory/.env.cookies".into()),
+        cookies_file: "/tmp/cookie directory/.env.cookies".into(),
         resolve_cache: ResolveCacheConfig::default(),
     });
     let url = Url::parse("https://youtube.com/watch?v=test").unwrap();

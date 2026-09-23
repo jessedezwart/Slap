@@ -98,7 +98,7 @@ pub struct YtDlpConfig {
     /// Extra argv entries, e.g. `--cookies-from-browser firefox`. Split on
     /// whitespace; still argv, still no shell.
     pub extra_args: Vec<String>,
-    pub cookies_file: Option<PathBuf>,
+    pub cookies_file: PathBuf,
     pub resolve_cache: ResolveCacheConfig,
 }
 
@@ -156,19 +156,20 @@ impl Config {
             return Err(ConfigError::Missing("DISCORD_TOKEN"));
         }
 
-        let cookies_file = env::var("YTDLP_COOKIES_FILE")
-            .ok()
-            .filter(|path| !path.trim().is_empty())
-            .map(PathBuf::from);
+        let cookies_file = match env::var("YTDLP_COOKIES_FILE") {
+            Ok(path) if !path.trim().is_empty() => PathBuf::from(path.trim()),
+            _ => PathBuf::from("secrets/cookies.txt"),
+        };
         let extra_args: Vec<String> = env::var("YTDLP_EXTRA_ARGS")
             .unwrap_or_default()
             .split_whitespace()
             .map(str::to_owned)
             .collect();
 
-        if cookies_file.is_none() && !extra_args.iter().any(|arg| arg.contains("cookies")) {
+        if !cookies_file.exists() && !extra_args.iter().any(|arg| arg.contains("cookies")) {
             warn!(
-                "no YouTube cookies configured (YTDLP_COOKIES_FILE unset); \
+                path = %cookies_file.display(),
+                "no YouTube cookies file found; \
                  yt-dlp requests may be rate-limited or rejected as bot traffic"
             );
         }
