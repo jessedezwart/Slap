@@ -1,7 +1,12 @@
 # syntax=docker/dockerfile:1
 
 ARG YTDLP_VERSION=2026.08.19
+# Keep in step with the provider image tag in compose.yaml.
+ARG BGUTIL_VERSION=2.0.0
+ARG DENO_VERSION=2.9.7
 ARG RUST_VERSION=1
+
+FROM denoland/deno:bin-${DENO_VERSION} AS deno
 
 FROM rust:${RUST_VERSION}-bookworm AS build
 
@@ -30,6 +35,13 @@ RUN set -eux; \
     chmod 0755 /usr/local/bin/yt-dlp; \
     /usr/local/bin/yt-dlp --version
 
+# PO token plugin: without a token, googlevideo cuts streams off with a 403
+# after the first MiB. It fetches tokens from the provider in compose.yaml.
+ARG BGUTIL_VERSION
+RUN mkdir -p /etc/yt-dlp/plugins \
+ && curl -fsSL -o /etc/yt-dlp/plugins/bgutil-ytdlp-pot-provider.zip \
+      "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/releases/download/${BGUTIL_VERSION}/bgutil-ytdlp-pot-provider.zip"
+
 FROM debian:bookworm-slim
 
 RUN apt-get update \
@@ -38,6 +50,9 @@ RUN apt-get update \
  && useradd --create-home --uid 10001 bot
 
 COPY --from=build /usr/local/bin/yt-dlp /usr/local/bin/yt-dlp
+COPY --from=build /etc/yt-dlp/plugins /etc/yt-dlp/plugins
+# yt-dlp needs a JS runtime to solve YouTube's player challenges.
+COPY --from=deno /deno /usr/local/bin/deno
 COPY --from=build /usr/local/bin/slap /usr/local/bin/slap
 
 RUN install -d -o bot -g bot /app/data

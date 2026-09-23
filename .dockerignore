@@ -1,6 +1,6 @@
 # Never let a real token into an image layer.
 .env
-.env.cookies
+secrets/
 
 target/
 .git/
@@ -9,3 +9,4 @@ target/
 Dockerfile
 .dockerignore
 README.md
+debug.log

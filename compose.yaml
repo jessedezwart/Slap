@@ -10,6 +10,20 @@ services:
     stop_grace_period: 10s
     volumes:
       - cache:/app/data
+      # Optional YouTube cookies; see README. Writable because yt-dlp saves
+      # its cookie jar back.
+      - ./secrets:/app/secrets
+
+  # PO token provider for yt-dlp's bgutil plugin. It shares the bot's network
+  # namespace, so the plugin's default http://127.0.0.1:4416 reaches it and
+  # nothing is published on the host. Keep the tag equal to BGUTIL_VERSION.
+  pot-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider:2.0.0
+    restart: unless-stopped
+    init: true
+    network_mode: service:bot
+    depends_on:
+      - bot
 
 volumes:
   cache:

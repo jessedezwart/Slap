@@ -47,6 +47,28 @@ failing:
 docker build --build-arg YTDLP_VERSION=2026.09.01 -t slap .
 ```
 
+YouTube stops serving audio with `403 Forbidden` after the first MiB unless
+yt-dlp sends a proof-of-origin (PO) token. The image ships the
+[bgutil PO token plugin](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)
+and Deno, and `compose.yaml` runs the token provider next to the bot. When
+bumping the plugin, change `BGUTIL_VERSION` in the `Dockerfile` and the
+`pot-provider` image tag together. To check the setup:
+
+```sh
+docker compose exec bot yt-dlp -v --skip-download "https://www.youtube.com/watch?v=0uPEeFVtMpI" 2>&1 | grep -i "pot\]"
+```
+
+It should list `bgutil:http-2.0.0` among the PO Token Providers and print no
+connection errors for it.
+
+Outside Docker, install the plugin zip into a
+[yt-dlp plugin folder](https://github.com/yt-dlp/yt-dlp#installing-plugins),
+install Deno, and run the provider on the loopback interface:
+
+```sh
+docker run -d --init --name bgutil-provider -p 127.0.0.1:4416:4416 brainicism/bgutil-ytdlp-pot-provider:2.0.0
+```
+
 ## Development container
 
 With Docker running and the VS Code Dev Containers extension installed, open
@@ -68,33 +90,37 @@ All configuration settings are documented in `.env.example`. Copy that file to `
 ## YouTube cookies
 
 If YouTube asks to sign in to confirm you are not a bot, export YouTube cookies
-in Netscape/Mozilla cookie-file format to `.env.cookies`. This is a cookie jar,
-not a second dotenv file. Follow yt-dlp's
+in Netscape/Mozilla cookie-file format to `secrets/cookies.txt`. Follow yt-dlp's
 [YouTube cookie export instructions](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies).
-For a local run, set this in `.env` and restart the bot:
+Then set this in `.env` and restart the bot:
 
 ```env
-YTDLP_COOKIES_FILE=.env.cookies
+YTDLP_COOKIES_FILE=secrets/cookies.txt
 ```
+
+The same line works for a local run and for Docker: `compose.yaml` always
+mounts `./secrets` at `/app/secrets`, the container's working directory. With
+the variable unset, the bot runs without cookies.
 
 The bot passes this path to `yt-dlp --cookies` for searches, track resolution,
 and playlist listings. Paths containing spaces are supported. The existing
-`YTDLP_EXTRA_ARGS=--cookies .env.cookies` also works for paths without spaces;
-use one configuration method. Cookies may expire; replace the file if YouTube
-asks for authentication again.
+`YTDLP_EXTRA_ARGS=--cookies secrets/cookies.txt` also works for paths without
+spaces; use one configuration method. Cookies may expire; replace the file if
+YouTube asks for authentication again.
 
-For Docker, create the exported file first and make it readable and writable
-by the container's bot user (UID 10001). On Linux, for example:
+For Docker, yt-dlp saves its cookie jar back, so the directory and file must be
+readable and writable by the container's bot user (UID 10001). On Linux, for
+example:
 
 ```sh
-sudo chown 10001:10001 .env.cookies
-sudo chmod 600 .env.cookies
-docker compose -f compose.yaml -f compose.cookies.yaml up --build
+sudo chown -R 10001:10001 secrets
+sudo chmod 700 secrets
+sudo chmod 600 secrets/cookies.txt
+docker compose up --build
 ```
 
-The optional override mounts the file and sets its path inside the container.
-The mount is writable because yt-dlp saves its cookie jar. `.env.cookies` is
-excluded from Git and Docker build contexts.
+Everything in `secrets/` except `.gitkeep` is excluded from Git and Docker
+build contexts.
 
 When this authentication error occurs, the affected guild's playback stops,
 its queue is cleared, and the bot disconnects from voice. A separate warning
