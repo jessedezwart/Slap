@@ -33,6 +33,11 @@ fn playlist_limit_and_empty_playlists() {
     let url = Url::parse("https://example.com/playlist").unwrap();
     let (list, _) = parse_list(br#"{"entries":[]}"#, &url).unwrap();
     assert!(list.tracks.is_empty());
+    assert_eq!(list.title, None);
+    let (list, _) = parse_list(br#"{"title":"  Road Trip  ","entries":[]}"#, &url).unwrap();
+    assert_eq!(list.title.as_deref(), Some("Road Trip"));
+    let (list, _) = parse_list(br#"{"title":"   ","entries":[]}"#, &url).unwrap();
+    assert_eq!(list.title, None);
     let entries: Vec<_> = (0..PLAYLIST_LIMIT + 1)
         .map(|i| serde_json::json!({"url":format!("https://example.com/{i}")}))
         .collect();
@@ -53,6 +58,8 @@ fn single_track_listing_yields_its_resolve() {
     )
     .unwrap();
     assert!(matches!(&list.tracks[0].target, PlaybackTarget::Url(actual) if actual == &url));
+    // A lone video's title is the track's, not a playlist's.
+    assert_eq!(list.title, None);
     assert_eq!(resolved.unwrap().media_url, "https://cdn.example.com/audio");
 }
 

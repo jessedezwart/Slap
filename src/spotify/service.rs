@@ -58,6 +58,19 @@ impl SpotifyService {
         }
     }
 
+    /// The playlist's name, which `/items` pages do not carry.
+    ///
+    /// Only a label on the player, so a failure here is not worth failing an
+    /// import that otherwise succeeded.
+    async fn name(&self, id: &str) -> Option<String> {
+        let body = self
+            .client
+            .get(&format!("playlists/{id}"), &[("fields", "name".to_owned())])
+            .await
+            .ok()?;
+        models::playlist_name(&body)
+    }
+
     /// Walk `/playlists/{id}/items` until the playlist or our limit runs out.
     async fn paged(&self, id: &str) -> Result<SpotifyPlaylist, SpotifyError> {
         let mut playlist = SpotifyPlaylist::default();
@@ -91,6 +104,11 @@ impl SpotifyService {
             // Build the next URL ourselves: credentials never follow a URL
             // that came back in a response body.
         }
+        // After the import, so a failed one still reports its own error and an
+        // unreadable playlist costs no extra request.
+        if !playlist.tracks.is_empty() {
+            playlist.name = self.name(id).await;
+        }
         Ok(playlist)
     }
 
@@ -107,7 +125,10 @@ impl SpotifyService {
         let entries = entries(page);
         let count = entries.len();
 
-        let mut playlist = SpotifyPlaylist::default();
+        let mut playlist = SpotifyPlaylist {
+            name: models::playlist_name(&body),
+            ..SpotifyPlaylist::default()
+        };
         self.collect_into(&mut playlist, entries);
         playlist.truncated = total(page).is_some_and(|total| total > count) || count > self.limit;
         Ok(playlist)

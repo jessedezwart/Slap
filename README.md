@@ -105,25 +105,41 @@ The bot process keeps running; retry `/play` after fixing the cookie setup.
 
 ## Commands
 
-Join a voice channel, then use:
+Join a voice channel, then run `/play`. Pass the link directly:
 
-- `/play url:<track-or-playlist-link>` — play a track or append a playlist.
-- `/play url:<playlist-link> shuffle:true` — shuffle the import before adding it.
-- `/shuffle` — turn shuffle on or off. While on, upcoming tracks and later
-  imports play in random order; turning it off restores the queued order.
-- `/pause` and `/resume` — pause and continue the current track.
-- `/skip` — skip the current track and play the next queued track, or end playback if the queue is empty.
-- `/stop` — stop playback, clear the queue, cancel pending imports, and disconnect.
-- `/queue` or `/queue page:2` — show the current track and five upcoming tracks per page.
+```
+/play url: https://… shuffle: Off
+```
+
+Both options are optional. `shuffle` defaults to **On**, and a link passed this
+way is always added to the back of the queue. Running `/play` with no options
+opens a form instead, with:
+
+- **Track or playlist link** — an HTTP(S) track or playlist link.
+- **Shuffle** — On (the default) shuffles the import before adding it, Off keeps
+  its original order.
+- **If something is already playing** — where the import goes: *Add to the
+  queue* (the default) appends it, *Play next* puts it directly after the
+  current track, and *Replace the queue* stops the current track, clears
+  everything queued, and starts the import instead.
+
+Everything else is a button on the player message: **Pause/Resume**, **Skip**,
+**Stop**, **Add**, and **Queue**. **Add** opens the same form as `/play`, so a
+link can be queued without leaving the player.
 
 The first successful `/play` response becomes a live player message with the
-current title, thumbnail, requester, elapsed and total time, queue size,
-shuffle state, and **Pause/Resume**, **Skip**, **Stop**, **Shuffle**, and
-**Queue** buttons. Later imports reuse that player, and it is deleted when
-playback stops. Queue replies privately with five upcoming tracks; use
-`/queue page:2` for further pages. The other buttons, `/skip`, `/stop`, and
-`/shuffle` succeed silently because the player shows the result; errors are
-private. Unknown track durations show elapsed time only.
+current title, thumbnail, requester, elapsed and total time, queue size, and
+those buttons. Later imports reuse that player, and it is deleted when playback
+stops. A playlist import names its playlist on the player, next to
+the track it is playing. A stopped player keeps a **Play again** button,
+the playlist's name, and the `/play` line that reproduces it, ready to copy.
+Only the newest stopped player in a server can be replayed, and only while the
+bot is running: the button is shown disabled when the bot was disconnected
+rather than stopped, when a newer player takes over, and on every stopped
+player left when the process shuts down. The `/play` line stays either way. Queue replies
+privately with the current track and the first five
+upcoming tracks. Skip and Stop succeed silently because the player shows the
+result; errors are private. Unknown track durations show elapsed time only.
 
 The player edits one message per voice session. Progress refreshes every
 15 seconds (four scheduled edits per minute while playing), with earlier
@@ -132,7 +148,7 @@ at least two seconds apart. Unchanged paused/empty views cause no HTTP edits.
 Progress-only updates send text without resending the buttons. The updater
 uses existing metadata and Songbird's playback position: no extra yt-dlp,
 Spotify, artwork or audio requests. Queue reads clone only the current track
-and the requested five-track page.
+and the first five upcoming tracks.
 
 All updates run in an asynchronous task, with no playback locks held during
 HTTP or driver queries. Requests have timeouts and transient failures back off.
@@ -173,8 +189,8 @@ restart the bot. Spotify is optional; other sources work without these settings.
    to authorize an account, registering the redirect URI in the dashboard and
    requesting `playlist-read-private` and `playlist-read-collaborative`.
    `scripts/spotify-get-refresh-token` walks through this.
-4. Run `/play url:https://open.spotify.com/playlist/PLAYLIST_ID`.
-   Add `shuffle:true` to shuffle before enqueueing.
+4. Run `/play` and paste `https://open.spotify.com/playlist/PLAYLIST_ID` into
+   the form.
 
 ### The 100-track ceiling
 

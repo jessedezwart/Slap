@@ -27,11 +27,19 @@ impl SpotifyTrack {
 
 #[derive(Debug, Default)]
 pub struct SpotifyPlaylist {
+    /// The playlist's own name, when the response carried one.
+    pub name: Option<String>,
     pub tracks: Vec<SpotifyTrack>,
     /// Entries that were local files, podcasts, or otherwise unplayable.
     pub skipped: usize,
     /// More tracks exist than were returned.
     pub truncated: bool,
+}
+
+/// The playlist's own name, from a playlist object.
+pub fn playlist_name(body: &Value) -> Option<String> {
+    let name = body.get("name").and_then(Value::as_str)?.trim();
+    (!name.is_empty()).then(|| name.chars().take(100).collect())
 }
 
 /// Read one playlist entry, or `None` if it is not a track we can play.

@@ -22,7 +22,7 @@ use twilight_http::Client as HttpClient;
 use crate::{
     audio::ytdlp::YtDlpService,
     config::Config,
-    discord::{commands, events::dispatcher, state::State},
+    discord::{commands, events::dispatcher, player, state::State},
     voice::session::{SessionManager, run_command_loop},
 };
 
@@ -144,7 +144,7 @@ async fn startup(config: Config) -> Result<Running, Box<dyn std::error::Error + 
     info!(%application_id, %user_id, "authenticated");
 
     http.interaction(application_id)
-        .set_global_commands(&commands::all_commands())
+        .set_global_commands(&[commands::play_command()])
         .await?;
 
     let gateway_config = GatewayConfig::new(config.token.clone(), INTENTS);
@@ -194,6 +194,7 @@ async fn startup(config: Config) -> Result<Running, Box<dyn std::error::Error + 
         cache,
         songbird,
         sessions: Arc::clone(&sessions),
+        replays: dashmap::DashMap::new(),
         ytdlp: YtDlpService::new(config.ytdlp.clone()).with_track_cache(track_cache),
         spotify: crate::spotify::SpotifyService::new(
             config.spotify.clone(),
@@ -252,6 +253,19 @@ async fn shutdown(running: Running) {
         state.player_tasks.wait(),
     )
     .await;
+
+    // Players stopped earlier in this run still offer a replay, and nothing
+    // will be here to answer it. Their buttons go with the process.
+    let offered: Vec<_> = state.replays.iter().map(|entry| *entry.key()).collect();
+    if !offered.is_empty() {
+        info!(players = offered.len(), "retiring stopped players");
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(12), async {
+            for guild_id in offered {
+                player::revoke(&state, guild_id).await;
+            }
+        })
+        .await;
+    }
 
     command_loop.abort();
 }

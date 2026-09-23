@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, RANGE};
 use serde::Deserialize;
@@ -28,8 +28,16 @@ pub struct TrackMetadata {
     pub webpage_url: Option<Url>,
     /// Who queued the track; shown on the player.
     pub requester: Option<Id<UserMarker>>,
-    /// Enqueue order, so turning shuffle off can restore it.
-    pub sequence: u64,
+    /// The playlist this track was imported from, shared by every track of
+    /// that import so the player can name it without a second lookup.
+    pub playlist: Option<Arc<Playlist>>,
+}
+
+/// A named playlist, and the link it was imported from.
+#[derive(Debug)]
+pub struct Playlist {
+    pub name: String,
+    pub url: Url,
 }
 
 #[derive(Debug)]
@@ -43,6 +51,8 @@ pub struct MediaList {
     pub tracks: Vec<ListedTrack>,
     pub skipped: usize,
     pub truncated: bool,
+    /// The playlist's own name, when the import was a playlist at all.
+    pub title: Option<String>,
 }
 
 pub fn parse_list(
@@ -60,6 +70,8 @@ pub fn parse_list(
                 }],
                 skipped: 0,
                 truncated: false,
+                // A lone track belongs to no playlist.
+                title: None,
             },
             Some(resolved),
         ));
@@ -110,6 +122,7 @@ pub fn parse_list(
             tracks,
             skipped,
             truncated: entries.len() > PLAYLIST_LIMIT,
+            title: playlist_title(&value),
         },
         None,
     ))
@@ -179,9 +192,18 @@ pub fn parse_output(stdout: &[u8]) -> Result<Resolved, AudioError> {
             thumbnail: output.thumbnail,
             webpage_url: output.webpage_url.as_deref().and_then(http_url),
             requester: None,
-            sequence: 0,
+            playlist: None,
         },
     })
+}
+
+/// The playlist's own name, ignoring the placeholders yt-dlp falls back to.
+fn playlist_title(value: &serde_json::Value) -> Option<String> {
+    let title = value
+        .get("title")
+        .and_then(serde_json::Value::as_str)?
+        .trim();
+    (!title.is_empty()).then(|| title.chars().take(100).collect())
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

@@ -15,32 +15,44 @@ use twilight_model::{
         command::{Command, CommandType},
         interaction::{
             Interaction, InteractionData,
-            application_command::{CommandDataOption, CommandOptionValue},
+            application_command::{CommandData, CommandOptionValue},
+            modal::{ModalInteractionComponent, ModalInteractionData},
         },
     },
-    channel::message::{AllowedMentions, MessageFlags},
+    channel::message::{
+        AllowedMentions, Component, MessageFlags,
+        component::{
+            Label, SelectMenu, SelectMenuOption, SelectMenuType, TextInput, TextInputStyle,
+        },
+    },
     http::interaction::{InteractionResponse, InteractionResponseType},
 };
 use twilight_util::builder::{
     InteractionResponseDataBuilder,
-    command::{BooleanBuilder, CommandBuilder, IntegerBuilder, StringBuilder},
+    command::{CommandBuilder, StringBuilder},
 };
 
 use crate::{
     audio::{
         source::OpusYtSource,
         ytdlp::{
-            ListedTrack, MediaList, PLAYLIST_LIMIT, PlaybackTarget, TrackMetadata, http_url,
-            validate_url,
+            ListedTrack, MediaList, PLAYLIST_LIMIT, PlaybackTarget, Playlist, TrackMetadata,
+            http_url, validate_url,
         },
     },
     discord::{player, state::State},
     error::AudioError,
     spotify::{SpotifyPlaylist, is_spotify_url},
-    voice::session::{ControlResult, SessionError},
+    voice::session::{ControlResult, QueueMode, SessionError},
 };
 
-/// The command definition registered with Discord at start-up.
+/// Identifies both the modal `/play` opens and the submission it sends back.
+const PLAY_MODAL: &str = "play:modal";
+
+/// The only command registered with Discord; everything else is a button.
+///
+/// Both options are optional: `/play` on its own opens the same form the
+/// player's Add button does, so neither entry point needs the other.
 pub fn play_command() -> Command {
     CommandBuilder::new(
         "play",
@@ -49,43 +61,192 @@ pub fn play_command() -> Command {
     )
     .option(
         StringBuilder::new("url", "An HTTP(S) track or playlist link")
-            .required(true)
-            .build(),
+            .required(false)
+            .max_length(1024),
     )
     .option(
-        BooleanBuilder::new("shuffle", "Shuffle the imported playlist before adding it").build(),
+        StringBuilder::new(
+            "shuffle",
+            "Shuffle a playlist before adding it (default: On)",
+        )
+        .required(false)
+        .choices([("On", "on"), ("Off", "off")]),
     )
     .build()
 }
 
-pub fn all_commands() -> Vec<Command> {
-    let mut commands = vec![play_command()];
-    for (name, description) in [
-        ("pause", "Pause the current track"),
-        ("resume", "Resume the paused track"),
-        (
-            "skip",
-            "Skip the current track and play the next queued track",
-        ),
-        ("stop", "Stop playback, clear the queue, and disconnect"),
-        ("shuffle", "Turn shuffle on or off for upcoming tracks"),
-    ] {
-        commands.push(CommandBuilder::new(name, description, CommandType::ChatInput).build());
-    }
-    commands.push(
-        CommandBuilder::new(
-            "queue",
-            "Show the current track and upcoming queue",
-            CommandType::ChatInput,
-        )
-        .option(
-            IntegerBuilder::new("page", "Queue page (five upcoming tracks per page)")
-                .min_value(1)
+/// What the user passed to `/play` directly, if they passed a link at all.
+fn command_input(data: &CommandData) -> Option<PlayInput> {
+    let value = |name: &str| {
+        data.options
+            .iter()
+            .find(|option| option.name == name)
+            .map(|option| &option.value)
+    };
+    let url = match value("url") {
+        Some(CommandOptionValue::String(url)) => url.trim().to_owned(),
+        _ => return None,
+    };
+    Some(PlayInput {
+        url,
+        // Matching the form: shuffling is what an untouched option does.
+        shuffle: !matches!(value("shuffle"), Some(CommandOptionValue::String(value)) if value == "off"),
+        // The placement only matters next to an existing queue, which is what
+        // the form and the Add button are for.
+        mode: QueueMode::Append,
+    })
+}
+
+/// The form `/play` opens: the link, plus how to order a playlist.
+#[allow(deprecated)] // TextInput::label is superseded by the Label component.
+fn play_modal() -> InteractionResponse {
+    let url = Component::Label(Label {
+        id: None,
+        label: "Track or playlist link".into(),
+        description: Some("An HTTP(S) track or playlist link".into()),
+        component: Box::new(Component::TextInput(TextInput {
+            id: None,
+            custom_id: "url".into(),
+            label: None,
+            max_length: Some(1024),
+            min_length: Some(1),
+            placeholder: Some("https://…".into()),
+            required: Some(true),
+            style: TextInputStyle::Short,
+            value: None,
+        })),
+    });
+    let shuffle = Component::Label(Label {
+        id: None,
+        label: "Shuffle".into(),
+        description: Some("Shuffle the imported playlist before adding it".into()),
+        component: Box::new(Component::SelectMenu(SelectMenu {
+            id: None,
+            channel_types: None,
+            custom_id: "shuffle".into(),
+            default_values: None,
+            disabled: false,
+            kind: SelectMenuType::Text,
+            max_values: Some(1),
+            min_values: Some(1),
+            options: Some(vec![
+                SelectMenuOption {
+                    default: true,
+                    description: None,
+                    emoji: None,
+                    label: "On".into(),
+                    value: "on".into(),
+                },
+                SelectMenuOption {
+                    default: false,
+                    description: None,
+                    emoji: None,
+                    label: "Off".into(),
+                    value: "off".into(),
+                },
+            ]),
+            placeholder: Some("On".into()),
+            required: Some(false),
+        })),
+    });
+    let mode = Component::Label(Label {
+        id: None,
+        label: "If something is already playing".into(),
+        description: Some("Where this import goes relative to the current queue".into()),
+        component: Box::new(Component::SelectMenu(SelectMenu {
+            id: None,
+            channel_types: None,
+            custom_id: "mode".into(),
+            default_values: None,
+            disabled: false,
+            kind: SelectMenuType::Text,
+            max_values: Some(1),
+            min_values: Some(1),
+            options: Some(vec![
+                SelectMenuOption {
+                    default: true,
+                    description: Some("Play it after everything already queued".into()),
+                    emoji: None,
+                    label: "Add to the queue".into(),
+                    value: "append".into(),
+                },
+                SelectMenuOption {
+                    default: false,
+                    description: Some("Jump the queue, after the current track".into()),
+                    emoji: None,
+                    label: "Play next".into(),
+                    value: "next".into(),
+                },
+                SelectMenuOption {
+                    default: false,
+                    description: Some("Clear the queue and start this instead".into()),
+                    emoji: None,
+                    label: "Replace the queue".into(),
+                    value: "replace".into(),
+                },
+            ]),
+            placeholder: Some("Add to the queue".into()),
+            required: Some(false),
+        })),
+    });
+    InteractionResponse {
+        kind: InteractionResponseType::Modal,
+        data: Some(
+            InteractionResponseDataBuilder::new()
+                .custom_id(PLAY_MODAL)
+                .title("Play")
+                .components([url, shuffle, mode])
                 .build(),
-        )
-        .build(),
-    );
-    commands
+        ),
+    }
+}
+
+/// What the user typed into the modal. Shuffle defaults to on, and an import
+/// defaults to the back of the queue.
+struct PlayInput {
+    url: String,
+    shuffle: bool,
+    mode: QueueMode,
+}
+
+fn play_input(data: &ModalInteractionData) -> PlayInput {
+    let mut input = PlayInput {
+        url: String::new(),
+        shuffle: true,
+        mode: QueueMode::Append,
+    };
+    // Labels wrap one component each; action rows are accepted for safety.
+    fn walk(components: &[ModalInteractionComponent], input: &mut PlayInput) {
+        for component in components {
+            match component {
+                ModalInteractionComponent::Label(label) => {
+                    walk(std::slice::from_ref(&label.component), input);
+                }
+                ModalInteractionComponent::ActionRow(row) => walk(&row.components, input),
+                ModalInteractionComponent::TextInput(text) if text.custom_id == "url" => {
+                    input.url = text.value.trim().to_owned();
+                }
+                ModalInteractionComponent::StringSelect(select)
+                    if select.custom_id == "shuffle" =>
+                {
+                    // An untouched select submits nothing, which keeps the default.
+                    if let Some(value) = select.values.first() {
+                        input.shuffle = value != "off";
+                    }
+                }
+                ModalInteractionComponent::StringSelect(select) if select.custom_id == "mode" => {
+                    input.mode = match select.values.first().map(String::as_str) {
+                        Some("next") => QueueMode::Next,
+                        Some("replace") => QueueMode::Replace,
+                        _ => QueueMode::Append,
+                    };
+                }
+                _ => {}
+            }
+        }
+    }
+    walk(&data.components, &mut input);
+    input
 }
 
 /// Buttons and slash commands share authorization, execution, and logging.
@@ -95,20 +256,40 @@ pub fn all_commands() -> Vec<Command> {
     source = tracing::field::Empty,
 ))]
 pub async fn handle_interaction(state: Arc<State>, interaction: Interaction) {
-    let (command, options, button) = match &interaction.data {
-        Some(InteractionData::ApplicationCommand(data))
-            if matches!(
-                data.name.as_str(),
-                "play" | "pause" | "resume" | "skip" | "stop" | "shuffle" | "queue"
-            ) =>
-        {
-            (data.name.as_str(), data.options.as_slice(), false)
+    let (command, input, button) = match &interaction.data {
+        // The command itself only opens the form; the submission does the work.
+        Some(InteractionData::ApplicationCommand(data)) if data.name == "play" => {
+            Span::current().record("command", "play");
+            Span::current().record("source", "slash");
+            match command_input(data) {
+                Some(input) => ("play", Some(input), false),
+                // Without a link the command only opens the form; the
+                // submission does the work.
+                None => {
+                    if let Err(error) = open_modal(&state, &interaction).await {
+                        warn!(%error, "failed to open the play modal");
+                    }
+                    return;
+                }
+            }
+        }
+        Some(InteractionData::ModalSubmit(data)) if data.custom_id == PLAY_MODAL => {
+            ("play", Some(play_input(data)), false)
         }
         Some(InteractionData::MessageComponent(data)) => {
             let Some(command) = player::button_command(&data.custom_id) else {
                 return;
             };
-            (command, &[][..], true)
+            // Add opens the same form /play does; its submission does the work.
+            if command == "play" {
+                Span::current().record("command", "play");
+                Span::current().record("source", "button");
+                if let Err(error) = open_modal(&state, &interaction).await {
+                    warn!(%error, "failed to open the play modal");
+                }
+                return;
+            }
+            (command, None, true)
         }
         _ => return,
     };
@@ -128,7 +309,7 @@ pub async fn handle_interaction(state: Arc<State>, interaction: Interaction) {
     } else {
         None
     };
-    let result = execute(&state, &interaction, command, options).await;
+    let result = execute(&state, &interaction, command, input).await;
     match &result {
         Ok(_) => info!(
             "{}",
@@ -184,32 +365,19 @@ async fn execute(
     state: &Arc<State>,
     interaction: &Interaction,
     command: &str,
-    options: &[CommandDataOption],
+    input: Option<PlayInput>,
 ) -> Result<PlayReply, PlayError> {
-    let mut url = None;
-    let mut shuffle = false;
-    let mut page = 1;
-    for option in options {
-        match (option.name.as_str(), &option.value) {
-            ("url", CommandOptionValue::String(value)) => url = Some(value.as_str()),
-            ("shuffle", CommandOptionValue::Boolean(value)) => shuffle = *value,
-            ("page", CommandOptionValue::Integer(value)) => {
-                page = usize::try_from(*value).unwrap_or(1).max(1)
-            }
-            _ => {}
+    match (command, input) {
+        ("play-again", _) => replay(state, interaction).await,
+        ("play", Some(input)) if !input.url.is_empty() => {
+            play(state, interaction, &input.url, input.shuffle, input.mode).await
         }
-    }
-    if command == "play" {
-        match url {
-            Some(url) => play(state, interaction, url, shuffle).await,
-            None => Ok(PlayReply::message(
-                "You need to give me an HTTP(S) media link.",
-            )),
-        }
-    } else {
-        control(state, interaction, command, page)
+        ("play", _) => Ok(PlayReply::message(
+            "You need to give me an HTTP(S) media link.",
+        )),
+        _ => control(state, interaction, command)
             .await
-            .map(PlayReply::message)
+            .map(PlayReply::message),
     }
 }
 
@@ -223,11 +391,15 @@ enum ReplyMode {
 
 impl ReplyMode {
     fn new(command: &str, button: bool) -> Self {
+        // A replay posts a new public player, not an edit of the stopped one.
+        if command == "play-again" {
+            return Self::Public;
+        }
         // The player reflects every panel action, so only the queue replies.
         let silent = if button {
             command != "queue"
         } else {
-            matches!(command, "skip" | "stop" | "shuffle")
+            matches!(command, "skip" | "stop")
         };
         match (silent, button) {
             (true, true) => Self::SilentButton,
@@ -271,15 +443,16 @@ async fn respond(
             .content(Some(&reply.message))
             .allowed_mentions(Some(&mentions))
             .await?;
-        if let Some((cancel, notice)) = reply.player
+        if let Some(panel) = reply.player
             && let Some(guild_id) = interaction.guild_id
         {
             player::start(
                 Arc::clone(state),
                 guild_id,
-                &cancel,
+                &panel.cancel,
                 response.model().await?,
-                notice,
+                panel.notice,
+                panel.replay,
             )
             .await;
         }
@@ -289,7 +462,14 @@ async fn respond(
 
 struct PlayReply {
     message: String,
-    player: Option<(CancellationToken, String)>,
+    player: Option<Panel>,
+}
+
+/// Everything the player task needs, including what a later Play again replays.
+struct Panel {
+    cancel: CancellationToken,
+    notice: String,
+    replay: player::Replay,
 }
 
 impl PlayReply {
@@ -346,6 +526,7 @@ fn playable(playlist: SpotifyPlaylist) -> MediaList {
         tracks,
         skipped: playlist.skipped,
         truncated: playlist.truncated,
+        title: playlist.name,
     }
 }
 
@@ -354,6 +535,7 @@ async fn play(
     interaction: &Interaction,
     raw_url: &str,
     shuffle: bool,
+    mode: QueueMode,
 ) -> Result<PlayReply, PlayError> {
     let guild_id = interaction.guild_id.ok_or(PlayError::NotInGuild)?;
     let user_id = interaction.author_id().ok_or(PlayError::NotInGuild)?;
@@ -388,6 +570,7 @@ async fn play(
         provider,
         host = url.host_str(),
         shuffle,
+        ?mode,
         "loading track or playlist metadata"
     );
     let started = Instant::now();
@@ -433,6 +616,13 @@ async fn play(
         listing.tracks.shuffle(&mut rand::rng());
     }
     let count = listing.tracks.len();
+    // One allocation for the whole import, shared by every track of it.
+    let playlist = listing.title.take().filter(|_| count > 1).map(|name| {
+        Arc::new(Playlist {
+            name,
+            url: url.clone(),
+        })
+    });
     let title = listing.tracks[0]
         .metadata
         .title
@@ -444,6 +634,7 @@ async fn play(
         .into_iter()
         .map(|mut entry| {
             entry.metadata.requester = Some(user_id);
+            entry.metadata.playlist = playlist.clone();
             let source = OpusYtSource::new(
                 entry.target,
                 state.client.clone(),
@@ -455,13 +646,18 @@ async fn play(
             (source.into(), entry.metadata)
         })
         .collect();
-    let (position, shuffled) = state.sessions.enqueue(guild_id, &cancel, tracks).await?;
-    debug!(%guild_id, %channel_id, position, count, shuffled, "queued tracks");
+    let position = state
+        .sessions
+        .enqueue(guild_id, &cancel, tracks, mode)
+        .await?;
+    debug!(%guild_id, %channel_id, position, count, ?mode, "queued tracks");
+    // A replaced queue starts over, so those imports report position 1 too.
+    let jumped = mode == QueueMode::Next && position > 1;
     let mut message = if count == 1 {
         let mut message = if position == 1 {
             format!("Now playing **{}**", escape(&title))
-        } else if shuffled {
-            format!("Queued **{}** at a random position", escape(&title))
+        } else if jumped {
+            format!("Queued **{}** to play next", escape(&title))
         } else {
             format!("Queued **{}** at position {}", escape(&title), position - 1)
         };
@@ -471,11 +667,16 @@ async fn play(
         message
     } else {
         format!(
-            "Added {count} tracks{} to the queue.{}",
-            if shuffle || shuffled {
-                " in shuffled order"
+            "Added {count} tracks{}{}{}.{}",
+            match playlist.as_deref() {
+                Some(playlist) => format!(" from {}", player::playlist_link(playlist)),
+                None => String::new(),
+            },
+            if shuffle { " in shuffled order" } else { "" },
+            if jumped {
+                " to the front of the queue"
             } else {
-                ""
+                " to the queue"
             },
             if position == 1 {
                 " Playback is starting."
@@ -497,15 +698,53 @@ async fn play(
     message.push_str(&notice);
     Ok(PlayReply {
         message,
-        player: Some((cancel, notice)),
+        player: Some(Panel {
+            cancel,
+            notice,
+            replay: player::Replay {
+                url: raw_url.to_owned(),
+                shuffle,
+                playlist,
+            },
+        }),
     })
+}
+
+/// Restart the link a stopped player was created from.
+async fn replay(state: &Arc<State>, interaction: &Interaction) -> Result<PlayReply, PlayError> {
+    let guild_id = interaction.guild_id.ok_or(PlayError::NotInGuild)?;
+    let message = interaction
+        .message
+        .as_ref()
+        .ok_or(SessionError::StalePanel)?;
+    // Take the offer: only the newest stopped player in this guild replays,
+    // and only once, so a double press cannot import the list twice.
+    let (_, offer) = state
+        .replays
+        .remove_if(&guild_id, |_, offer| offer.message_id == message.id)
+        .ok_or(SessionError::StalePanel)?;
+    // Nothing is queued behind a stopped player, so the placement is moot.
+    let result = play(
+        state,
+        interaction,
+        &offer.replay.url,
+        offer.replay.shuffle,
+        QueueMode::Append,
+    )
+    .await;
+    if result.is_ok() {
+        // The new player supersedes it; a stopped player is just clutter.
+        player::delete_player(state, message.channel_id, message.id).await;
+    } else {
+        state.replays.insert(guild_id, offer);
+    }
+    result
 }
 
 async fn control(
     state: &Arc<State>,
     interaction: &Interaction,
     command: &str,
-    page: usize,
 ) -> Result<String, PlayError> {
     let guild_id = interaction.guild_id.ok_or(PlayError::NotInGuild)?;
     let user_id = interaction.author_id().ok_or(PlayError::NotInGuild)?;
@@ -527,7 +766,7 @@ async fn control(
     };
     match state
         .sessions
-        .control(guild_id, channel_id, command, page, panel_message)
+        .control(guild_id, channel_id, command, 1, panel_message)
         .await?
     {
         ControlResult::Message(message) => Ok(message),
@@ -578,7 +817,7 @@ fn format_queue(tracks: &[Arc<TrackMetadata>], total: usize, page: usize) -> Str
         let _ = write!(message, "\n{index}. {}", label(track));
     }
     if pages > 1 {
-        message.push_str("\nUse `/queue page:<number>` to see another page.");
+        message.push_str("\nOnly the first five upcoming tracks are shown.");
     }
     message
 }
@@ -608,6 +847,19 @@ fn user_message(error: &PlayError) -> String {
         }
         other => format!("Something went wrong: {other}"),
     }
+}
+
+/// A slash `/play` answers with the form instead of a deferred reply.
+async fn open_modal(
+    state: &Arc<State>,
+    interaction: &Interaction,
+) -> Result<(), twilight_http::Error> {
+    state
+        .http
+        .interaction(state.application_id)
+        .create_response(interaction.id, &interaction.token, &play_modal())
+        .await
+        .map(|_| ())
 }
 
 async fn defer(

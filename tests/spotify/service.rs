@@ -77,6 +77,7 @@ async fn imports_pages_in_order_skips_unavailable_and_refreshes_authorization() 
         (401, json!({})),
         (200, json!({"access_token":"second"})),
         (200, json!({"items":[song("Last")], "next":null})),
+        (200, json!({"name":"Late Night"})),
     ])
     .await;
     let list = service(&base, Some("refresh"))
@@ -87,6 +88,7 @@ async fn imports_pages_in_order_skips_unavailable_and_refreshes_authorization() 
     assert_eq!(list.skipped, 1);
     assert!(!list.truncated);
     assert_eq!(list.tracks[1].title, "Last");
+    assert_eq!(list.name.as_deref(), Some("Late Night"));
 
     let requests = task.await.unwrap();
     assert!(requests[0].contains("grant_type=refresh_token&refresh_token=refresh"));
@@ -99,6 +101,8 @@ async fn imports_pages_in_order_skips_unavailable_and_refreshes_authorization() 
             .to_ascii_lowercase()
             .contains("authorization: bearer second")
     );
+    // The name is a label, so it is only looked up once the tracks are in.
+    assert!(requests[5].starts_with("GET /playlists/playlist?fields=name "));
 }
 
 #[tokio::test]
@@ -111,6 +115,7 @@ async fn import_stops_at_limit_and_reports_truncation() {
             json!({"items":vec![song("Repeated"); 50], "next":"more"}),
         ));
     }
+    responses.push((200, json!({"name":"Repeats"})));
     let (base, task) = server(responses).await;
     let list = service(&base, Some("refresh"))
         .playlist_by_id("playlist")
@@ -118,7 +123,7 @@ async fn import_stops_at_limit_and_reports_truncation() {
         .unwrap();
     assert_eq!(list.tracks.len(), LIMIT);
     assert!(list.truncated);
-    assert_eq!(task.await.unwrap().len(), pages + 1);
+    assert_eq!(task.await.unwrap().len(), pages + 2);
 }
 
 // Spotify requires user auth for `/playlists/{id}/items`, so without a refresh
@@ -142,6 +147,7 @@ async fn client_credentials_reads_only_the_embedded_first_page() {
         .await
         .unwrap();
     assert_eq!(list.tracks.len(), 2);
+    assert_eq!(list.name.as_deref(), Some("LEVELING"));
     // `total` exceeds what was returned, so the user is told it was cut short.
     assert!(list.truncated);
 

@@ -9,12 +9,10 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
-
-use rand::seq::SliceRandom;
 
 use dashmap::DashMap;
 use songbird::{
@@ -48,15 +46,15 @@ pub struct GuildSession {
     pub cancel: CancellationToken,
     pub updates: Arc<Notify>,
     pub panel_message: Option<Id<MessageMarker>>,
-    /// Keep upcoming tracks, including later imports, in random order.
-    pub shuffle: bool,
+    /// Set when the session ends for any reason other than the Stop button, so
+    /// a player left behind does not offer a replay nobody is there to serve.
+    pub disconnected: Arc<AtomicBool>,
 }
 
 /// What the player message shows, taken under the lifecycle lock.
 pub struct PlayerSnapshot {
     pub track: Option<TrackHandle>,
     pub upcoming: usize,
-    pub shuffle: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -85,8 +83,6 @@ pub struct SessionManager {
     sessions: DashMap<Id<GuildMarker>, GuildSession>,
     commands: UnboundedSender<VoiceCommand>,
     locks: DashMap<Id<GuildMarker>, Arc<Mutex<()>>>,
-    /// Enqueue order, so turning shuffle off can restore it.
-    sequence: AtomicU64,
 }
 
 impl SessionManager {
@@ -98,7 +94,6 @@ impl SessionManager {
             sessions: DashMap::new(),
             commands,
             locks: DashMap::new(),
-            sequence: AtomicU64::new(0),
         });
 
         (manager, receiver)
@@ -138,7 +133,8 @@ impl SessionManager {
         {
             return Err(SessionError::WrongChannel);
         }
-        self.teardown_locked(guild_id, "reconnecting").await;
+        self.teardown_locked(guild_id, "reconnecting", Ending::Disconnected)
+            .await;
 
         let cancel = CancellationToken::new();
         let updates = Arc::new(Notify::new());
@@ -185,12 +181,13 @@ impl SessionManager {
                 cancel: cancel.clone(),
                 updates,
                 panel_message: None,
-                shuffle: false,
+                disconnected: Arc::new(AtomicBool::new(false)),
             },
         );
 
         if let Err(error) = self.songbird.join(guild_id, channel_id).await {
-            self.teardown_locked(guild_id, "join failed").await;
+            self.teardown_locked(guild_id, "join failed", Ending::Disconnected)
+                .await;
             return Err(error.into());
         }
 
@@ -199,38 +196,35 @@ impl SessionManager {
         Ok(cancel)
     }
 
-    /// Append a complete import atomically, rejecting work cancelled by stop/leave.
+    /// Add a complete import atomically, rejecting work cancelled by stop/leave.
     ///
-    /// Returns the first track's queue position and whether shuffle mode
-    /// scattered the import through the queue.
+    /// Returns the first track's queue position, counting the playing track as
+    /// position 1.
     pub async fn enqueue(
         &self,
         guild_id: Id<GuildMarker>,
         cancel: &CancellationToken,
-        mut tracks: Vec<(Input, TrackMetadata)>,
-    ) -> Result<(usize, bool), SessionError> {
+        tracks: Vec<(Input, TrackMetadata)>,
+        mode: QueueMode,
+    ) -> Result<usize, SessionError> {
         let _guard = self.lock(guild_id).await;
         if cancel.is_cancelled() {
             return Err(SessionError::NotConnected);
         }
-        let shuffle = self
-            .sessions
-            .get(&guild_id)
-            .ok_or(SessionError::NotConnected)?
-            .shuffle;
+        if !self.sessions.contains_key(&guild_id) {
+            return Err(SessionError::NotConnected);
+        }
         let call = self
             .songbird
             .get(guild_id)
             .ok_or(SessionError::NotConnected)?;
         let mut call = call.lock().await;
-        let position = call.queue().len() + 1;
-        for (_, metadata) in &mut tracks {
-            metadata.sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
+        if mode == QueueMode::Replace {
+            // Stops the current track and drops the rest, freeing their buffers.
+            call.queue().stop();
         }
-        if shuffle {
-            // Also randomizes the first track when this import starts playback.
-            tracks.shuffle(&mut rand::rng());
-        }
+        let count = tracks.len();
+        let appended_at = call.queue().len() + 1;
         for (input, metadata) in tracks {
             let preload = metadata
                 .duration
@@ -238,11 +232,14 @@ impl SessionManager {
             let track = Track::new_with_data(input, Arc::new(metadata));
             call.enqueue_with_preload(track, preload);
         }
-        if shuffle {
-            call.queue().modify_queue(shuffle_upcoming);
-        }
+        let position = if mode == QueueMode::Next && appended_at > 1 {
+            call.queue().modify_queue(|queue| play_next(queue, count));
+            2
+        } else {
+            appended_at
+        };
         self.notify_player(guild_id);
-        Ok((position, shuffle))
+        Ok(position)
     }
 
     /// Voice controls share the lifecycle lock with joins, enqueues and teardown.
@@ -271,7 +268,8 @@ impl SessionManager {
             return Err(SessionError::WrongChannel);
         }
         if command == "stop" {
-            self.teardown_locked(guild_id, "stop command").await;
+            self.teardown_locked(guild_id, "stop command", Ending::Stopped)
+                .await;
             return Ok(ControlResult::Message(
                 "Stopped playback, cleared the queue, and disconnected.".into(),
             ));
@@ -311,7 +309,7 @@ impl SessionManager {
         let message = match command {
             "pause" => {
                 queue.pause().map_err(|_| SessionError::TrackFinished)?;
-                "Paused. Use `/resume` to continue.".into()
+                "Paused. Press Resume to continue.".into()
             }
             "resume" => {
                 queue.resume().map_err(|_| SessionError::TrackFinished)?;
@@ -320,24 +318,6 @@ impl SessionManager {
             "skip" => {
                 queue.skip().map_err(|_| SessionError::TrackFinished)?;
                 "Skipped the current track.".into()
-            }
-            "shuffle" => {
-                let mut session = self
-                    .sessions
-                    .get_mut(&guild_id)
-                    .ok_or(SessionError::NotConnected)?;
-                session.shuffle = !session.shuffle;
-                if session.shuffle {
-                    queue.modify_queue(shuffle_upcoming);
-                    "Shuffle is on.".into()
-                } else {
-                    queue.modify_queue(|queue| {
-                        restore_order(queue, |track| {
-                            track.handle().data::<TrackMetadata>().sequence
-                        });
-                    });
-                    "Shuffle is off.".into()
-                }
             }
             _ => unreachable!("only registered controls reach this method"),
         };
@@ -397,19 +377,14 @@ impl SessionManager {
         message_id: Id<MessageMarker>,
     ) -> Option<PlayerSnapshot> {
         let _guard = self.lock(guild_id).await;
-        let shuffle = self
-            .sessions
-            .get(&guild_id)
-            .filter(|session| {
-                session.panel_message == Some(message_id) && !session.cancel.is_cancelled()
-            })?
-            .shuffle;
+        self.sessions.get(&guild_id).filter(|session| {
+            session.panel_message == Some(message_id) && !session.cancel.is_cancelled()
+        })?;
         let call = self.songbird.get(guild_id)?;
         let call = call.lock().await;
         Some(call.queue().modify_queue(|queue| PlayerSnapshot {
             track: queue.front().map(|track| track.handle()),
             upcoming: queue.len().saturating_sub(1),
-            shuffle,
         }))
     }
 
@@ -422,7 +397,8 @@ impl SessionManager {
     ) -> bool {
         let _guard = self.lock(guild_id).await;
         if condition() {
-            self.teardown_locked(guild_id, reason).await;
+            self.teardown_locked(guild_id, reason, Ending::Disconnected)
+                .await;
             true
         } else {
             false
@@ -435,14 +411,20 @@ impl SessionManager {
     /// disconnect our own `leave` provokes does not recurse.
     pub async fn teardown(&self, guild_id: Id<GuildMarker>, reason: &str) {
         let _guard = self.lock(guild_id).await;
-        self.teardown_locked(guild_id, reason).await;
+        self.teardown_locked(guild_id, reason, Ending::Disconnected)
+            .await;
     }
 
-    async fn teardown_locked(&self, guild_id: Id<GuildMarker>, reason: &str) {
+    async fn teardown_locked(&self, guild_id: Id<GuildMarker>, reason: &str, ending: Ending) {
         let Some((_, session)) = self.sessions.remove(&guild_id) else {
             return;
         };
 
+        // Published before the cancel the player is waiting on, so the player
+        // always reads the reason it woke up for.
+        session
+            .disconnected
+            .store(ending == Ending::Disconnected, Ordering::Release);
         // One cancel aborts every fetch task, closes every connection and frees
         // every buffer for this guild.
         session.cancel.cancel();
@@ -474,6 +456,26 @@ impl SessionManager {
     }
 }
 
+/// How a session ended. Only the Stop button leaves a player worth replaying;
+/// a disconnect or a shutdown means nothing will answer the button.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    Stopped,
+    Disconnected,
+}
+
+/// Where a fresh import lands relative to what is already queued.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum QueueMode {
+    /// Append after everything already queued.
+    #[default]
+    Append,
+    /// Insert directly after the current track.
+    Next,
+    /// Clear the queue and the current track, then play this import.
+    Replace,
+}
+
 pub enum ControlResult {
     Message(String),
     Queue {
@@ -483,16 +485,20 @@ pub enum ControlResult {
     },
 }
 
-fn shuffle_upcoming<T>(queue: &mut VecDeque<T>) -> usize {
-    let upcoming = queue.make_contiguous().get_mut(1..).unwrap_or_default();
-    upcoming.shuffle(&mut rand::rng());
-    upcoming.len()
-}
-
-/// Undo shuffling, leaving the playing track at the front.
-fn restore_order<T>(queue: &mut VecDeque<T>, sequence: impl Fn(&T) -> u64) {
-    if let Some(upcoming) = queue.make_contiguous().get_mut(1..) {
-        upcoming.sort_by_cached_key(sequence);
+/// Move the `count` tracks just appended to the front of the upcoming ones,
+/// leaving the playing track at the head of the queue.
+fn play_next<T>(queue: &mut VecDeque<T>, count: usize) {
+    let start = queue.len().saturating_sub(count);
+    if start <= 1 {
+        return;
+    }
+    // Each removal shifts the remaining import down by one and the insertion
+    // shifts it back, so the next track to move stays at `start + offset`.
+    for offset in 0..count {
+        let Some(track) = queue.remove(start + offset) else {
+            break;
+        };
+        queue.insert(1 + offset, track);
     }
 }
 

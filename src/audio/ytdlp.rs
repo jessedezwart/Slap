@@ -14,7 +14,7 @@ pub mod service;
 use url::Url;
 
 pub use client::YtDlpClient;
-pub use models::{ListedTrack, MediaList, Resolved, TrackMetadata};
+pub use models::{ListedTrack, MediaList, Playlist, Resolved, TrackMetadata};
 pub use service::YtDlpService;
 
 use crate::{error::AudioError, spotify::SpotifyTrack};

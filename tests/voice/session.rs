@@ -1,5 +1,7 @@
 use super::*;
 
+use std::sync::atomic::AtomicBool;
+
 fn test_manager() -> Arc<SessionManager> {
     // No gateway or voice connection is opened in these lifecycle tests.
     let songbird = Songbird::twilight_from_config(
@@ -24,7 +26,7 @@ async fn stop_rejects_other_channels_and_cancels_pending_work() {
             cancel: cancel.clone(),
             updates: Arc::new(Notify::new()),
             panel_message: None,
-            shuffle: false,
+            disconnected: Arc::new(AtomicBool::new(false)),
         },
     );
     assert!(matches!(
@@ -50,11 +52,13 @@ async fn stop_rejects_other_channels_and_cancels_pending_work() {
             cancel: replacement.clone(),
             updates: Arc::new(Notify::new()),
             panel_message: None,
-            shuffle: false,
+            disconnected: Arc::new(AtomicBool::new(false)),
         },
     );
     assert!(matches!(
-        manager.enqueue(guild, &cancel, vec![]).await,
+        manager
+            .enqueue(guild, &cancel, vec![], QueueMode::Append)
+            .await,
         Err(SessionError::NotConnected)
     ));
     manager
@@ -66,29 +70,22 @@ async fn stop_rejects_other_channels_and_cancels_pending_work() {
 }
 
 #[test]
-fn shuffle_preserves_current_and_all_upcoming_tracks() {
-    let mut queue: VecDeque<_> = (0..100).collect();
-    assert_eq!(shuffle_upcoming(&mut queue), 99);
-    assert_eq!(queue.front(), Some(&0));
-    let mut items: Vec<_> = queue.into_iter().collect();
-    items.sort_unstable();
-    assert_eq!(items, (0..100).collect::<Vec<_>>());
-    assert_eq!(shuffle_upcoming(&mut VecDeque::<u8>::new()), 0);
-    assert_eq!(shuffle_upcoming(&mut VecDeque::from([1])), 0);
-    let mut two = VecDeque::from([1, 2]);
-    assert_eq!(shuffle_upcoming(&mut two), 1);
-    assert_eq!(two, VecDeque::from([1, 2]));
-}
+fn playing_next_keeps_the_current_track_and_the_import_order() {
+    let mut queue: VecDeque<u32> = VecDeque::from([0, 1, 2, 10, 11, 12]);
+    play_next(&mut queue, 3);
+    assert_eq!(queue, VecDeque::from([0, 10, 11, 12, 1, 2]));
 
-#[test]
-fn restoring_order_keeps_the_current_track_first() {
-    let mut queue: VecDeque<u64> = (0..100).collect();
-    queue.push_front(500);
-    shuffle_upcoming(&mut queue);
-    restore_order(&mut queue, |sequence| *sequence);
-    assert_eq!(queue.pop_front(), Some(500));
-    assert!(queue.iter().copied().eq(0..100));
-    restore_order(&mut VecDeque::<u64>::new(), |sequence| *sequence);
+    // A queue that only holds the import has nothing to jump ahead of.
+    let mut fresh: VecDeque<u32> = VecDeque::from([10, 11]);
+    play_next(&mut fresh, 2);
+    assert_eq!(fresh, VecDeque::from([10, 11]));
+
+    // The import already sits directly behind the current track.
+    let mut behind: VecDeque<u32> = VecDeque::from([0, 10]);
+    play_next(&mut behind, 1);
+    assert_eq!(behind, VecDeque::from([0, 10]));
+
+    play_next(&mut VecDeque::<u32>::new(), 0);
 }
 
 #[tokio::test]
@@ -104,7 +101,7 @@ async fn panel_ownership_is_unique_and_old_buttons_cannot_stop_replacements() {
             cancel: cancel.clone(),
             updates: Arc::new(Notify::new()),
             panel_message: None,
-            shuffle: false,
+            disconnected: Arc::new(AtomicBool::new(false)),
         },
     );
     let (first, second) = tokio::join!(
@@ -138,7 +135,7 @@ async fn panel_ownership_is_unique_and_old_buttons_cannot_stop_replacements() {
             cancel: replacement.clone(),
             updates: Arc::new(Notify::new()),
             panel_message: None,
-            shuffle: false,
+            disconnected: Arc::new(AtomicBool::new(false)),
         },
     );
     assert!(
