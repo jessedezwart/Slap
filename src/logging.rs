@@ -111,7 +111,7 @@ fn local_timestamp() -> String {
     let minutes = seconds.unsigned_abs() / 60;
     let hours = minutes / 60;
 
-    let offset = if minutes % 60 == 0 {
+    let offset = if minutes.is_multiple_of(60) {
         format!("UTC{sign}{hours}")
     } else {
         format!("UTC{sign}{hours}:{:02}", minutes % 60)
