@@ -6,7 +6,7 @@ use reqwest::Client;
 use songbird::input::{AsyncAdapterStream, AudioStream, AudioStreamError, Compose, Input};
 use symphonia_core::io::MediaSource;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::debug;
 use twilight_model::id::{Id, marker::GuildMarker};
 
 use crate::{
@@ -87,14 +87,22 @@ impl Compose for OpusYtSource {
     }
 
     // Don't log all arguments
-    #[tracing::instrument(skip_all, fields(guild_id = self.guild_id.map(|id| id.get())))]
+    #[tracing::instrument(skip_all, fields(guild_id = self.guild_id.map(|id| id.get()), title = tracing::field::Empty))]
     async fn create_async(
         &mut self,
     ) -> Result<AudioStream<Box<dyn MediaSource>>, AudioStreamError> {
         let resolved = self.resolve().await.map_err(fail)?;
+        tracing::Span::current().record(
+            "title",
+            resolved
+                .metadata
+                .title
+                .as_deref()
+                .unwrap_or("Unknown track"),
+        );
 
         let started = Instant::now();
-        info!(
+        debug!(
             title = ?resolved.metadata.title,
             bitrate_bps = resolved.bitrate_bps,
             "opening audio stream"
@@ -114,7 +122,7 @@ impl Compose for OpusYtSource {
 
         // Never hand songbird a track whose buffer is still empty.
         stream.prefill().await.map_err(fail)?;
-        info!(title = ?resolved.metadata.title, elapsed_ms = started.elapsed().as_millis(), "audio buffer ready");
+        debug!(title = ?resolved.metadata.title, elapsed_ms = started.elapsed().as_millis(), "audio buffer ready");
 
         Ok(AudioStream {
             input: Box::new(AsyncAdapterStream::new(

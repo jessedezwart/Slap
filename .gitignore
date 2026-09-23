@@ -3,3 +3,4 @@
 .gitignore
 *.redb
 .env.cookies
+debug.log

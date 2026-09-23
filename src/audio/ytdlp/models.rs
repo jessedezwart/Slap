@@ -157,7 +157,8 @@ pub fn parse_output(stdout: &[u8]) -> Result<Resolved, AudioError> {
     Ok(Resolved {
         media_url,
         headers: build_headers(format.http_headers.as_ref()),
-        content_length: format.filesize.or(format.filesize_approx),
+        // Estimates must never become a download cutoff.
+        content_length: format.filesize,
         bitrate_bps: format
             .abr
             .or(format.tbr)
@@ -236,7 +237,6 @@ struct Format {
     abr: Option<f64>,
     tbr: Option<f64>,
     filesize: Option<u64>,
-    filesize_approx: Option<u64>,
     format_id: Option<String>,
     http_headers: Option<BTreeMap<String, String>>,
 }

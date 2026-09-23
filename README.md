@@ -250,28 +250,6 @@ yt-dlp child, fetch task and buffer holds a descendant of it. Any voice
 disconnect — dropped connection, kick, channel move, shutdown — cancels that one
 token and the entire pipeline for that guild goes away.
 
-## Diagnostics
-
-The default `RUST_LOG=slap=info,warn` shows player interactions
-(command, button/slash source, user, guild, outcome and elapsed time), playlist
-imports, YouTube searches, audio resolution/buffering, actual playback starts,
-pauses, track endings, failures and disconnects. Searching/preloading is logged
-separately from **now playing**, which is emitted when a track is playable and
-playing. Skip and Stop remain silent in Discord but appear in these logs.
-
-Console output uses a dedicated writer with a 1,024-line bounded queue. If the
-log destination cannot keep up, excess lines are dropped instead of blocking
-playback or growing memory indefinitely. Progress-bar refreshes do not emit
-routine logs. Media logs use titles, search terms and source hosts rather than
-signed stream URLs, request headers or credentials.
-
-Run with `RUST_LOG=slap=debug` to see buffer depth and stream lifecycle.
-The line to watch for is:
-
-`audio buffer ran dry: playback may have stuttered`
-
-That is emitted when the mixer asked for bytes and the buffer was empty — the
-direct signal that `BUFFER_MS` is too low for the network in question.
 
 ## Tests
 

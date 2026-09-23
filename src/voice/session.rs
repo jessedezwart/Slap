@@ -29,7 +29,7 @@ use tokio::sync::{
     mpsc::{self, UnboundedReceiver, UnboundedSender},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 use twilight_model::id::{
     Id,
     marker::{ChannelMarker, GuildMarker, MessageMarker},
@@ -194,7 +194,7 @@ impl SessionManager {
             return Err(error.into());
         }
 
-        info!(%guild_id, %channel_id, "joined voice channel");
+        debug!(%guild_id, %channel_id, "joined voice channel");
 
         Ok(cancel)
     }
@@ -341,9 +341,19 @@ impl SessionManager {
             }
             _ => unreachable!("only registered controls reach this method"),
         };
-        info!(%guild_id, %channel_id, command, remaining = queue.len(), result = %message, "playback control applied");
+        debug!(%guild_id, %channel_id, command, remaining = queue.len(), result = %message, "playback control applied");
         self.notify_player(guild_id);
         Ok(ControlResult::Message(message))
+    }
+
+    /// Title of the current track, for human-facing control activity logs.
+    pub async fn current_track_title(&self, guild_id: Id<GuildMarker>) -> Option<String> {
+        let _guard = self.lock(guild_id).await;
+        let call = self.songbird.get(guild_id)?;
+        let call = call.lock().await;
+        call.queue()
+            .current()
+            .and_then(|track| track.data::<TrackMetadata>().title.clone())
     }
 
     fn notify_player(&self, guild_id: Id<GuildMarker>) {
@@ -448,7 +458,7 @@ impl SessionManager {
             warn!(%guild_id, %error, "failed to remove voice connection");
         }
 
-        info!(%guild_id, reason, "tore down voice pipeline");
+        debug!(%guild_id, reason, "tore down voice pipeline");
     }
 
     /// Channel we believe we are connected to, if any.

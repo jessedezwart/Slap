@@ -87,13 +87,34 @@ impl EventHandler for PlayerNotifier {
                         if state.playing == PlayMode::Play
                             && state.ready == ReadyState::Playable =>
                     {
-                        info!(position_secs = state.position.as_secs(), "now playing");
+                        info!(
+                            "{}",
+                            crate::logging::track(
+                                metadata.title.as_deref().unwrap_or("Unknown track"),
+                                "now playing",
+                            )
+                        );
+                        debug!(position_secs = state.position.as_secs(), "playback started");
                     }
                     TrackEvent::Pause if state.ready == ReadyState::Playable => {
-                        info!(position_secs = state.position.as_secs(), "playback paused");
+                        info!(
+                            "{}",
+                            crate::logging::track(
+                                metadata.title.as_deref().unwrap_or("Unknown track"),
+                                "paused",
+                            )
+                        );
+                        debug!(position_secs = state.position.as_secs(), "playback paused");
                     }
                     TrackEvent::End => {
-                        info!(reason = ?state.playing, position_secs = state.position.as_secs(), "track ended");
+                        info!(
+                            "{}",
+                            crate::logging::track(
+                                metadata.title.as_deref().unwrap_or("Unknown track"),
+                                "ended",
+                            )
+                        );
+                        debug!(reason = ?state.playing, position_secs = state.position.as_secs(), "track ended");
                     }
                     TrackEvent::Error => {
                         if let PlayMode::Errored(error) = &state.playing {

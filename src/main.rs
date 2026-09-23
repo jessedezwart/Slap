@@ -2,15 +2,19 @@ mod audio;
 mod config;
 mod discord;
 mod error;
+mod logging;
 mod spotify;
 mod voice;
 
-use std::{collections::HashMap, num::NonZeroUsize, process::ExitCode, sync::Arc, thread};
+use std::{
+    collections::HashMap, fs::File, num::NonZeroUsize, process::ExitCode, sync::Arc, thread,
+};
 
 use songbird::{Config as SongbirdConfig, Songbird, shards::TwilightMap};
 use tokio::{signal, sync::watch, task::JoinHandle};
-use tracing::{error, info, warn};
+use tracing::{Level, error, info, warn};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::writer::MakeWriterExt as _;
 use twilight_cache_inmemory::{DefaultInMemoryCache, ResourceType};
 use twilight_gateway::{Config as GatewayConfig, Intents};
 use twilight_http::Client as HttpClient;
@@ -27,6 +31,16 @@ const INTENTS: Intents = Intents::GUILDS.union(Intents::GUILD_VOICE_STATES);
 fn main() -> ExitCode {
     let dotenv = dotenvy::dotenv();
 
+    // Start each process with a fresh operational log. `File::create` both
+    // creates the file when absent and truncates the previous run when present.
+    let log_file = match File::create("debug.log") {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!("could not create debug.log: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     // A slow terminal/container log sink must not block the audio driver or
     // Tokio workers. Bound memory and drop excess logs under sustained pressure.
     // Keep the guard alive through runtime shutdown to flush remaining lines.
@@ -34,13 +48,21 @@ fn main() -> ExitCode {
         .buffered_lines_limit(1024)
         .lossy(true)
         .thread_name("log-writer")
-        .finish(std::io::stdout());
+        .finish(log_file);
+    let (stdout_writer, _stdout_guard) =
+        tracing_appender::non_blocking::NonBlockingBuilder::default()
+            .buffered_lines_limit(1024)
+            .lossy(true)
+            .thread_name("stdout-log-writer")
+            .finish(std::io::stdout());
     tracing_subscriber::fmt()
-        .with_writer(log_writer)
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("Slap=info,warn")),
+        .with_writer(
+            stdout_writer
+                .with_max_level(Level::INFO)
+                .and(log_writer.with_max_level(Level::DEBUG)),
         )
+        .event_format(crate::logging::HumanEvent)
+        .with_env_filter(EnvFilter::new("slap=debug,warn"))
         .init();
 
     info!("starting...");
@@ -161,7 +183,7 @@ async fn startup(config: Config) -> Result<Running, Box<dyn std::error::Error + 
 
     let cache = Arc::new(
         DefaultInMemoryCache::builder()
-            .resource_types(ResourceType::VOICE_STATE)
+            .resource_types(ResourceType::GUILD | ResourceType::VOICE_STATE)
             .build(),
     );
 
@@ -177,9 +199,7 @@ async fn startup(config: Config) -> Result<Running, Box<dyn std::error::Error + 
             config.spotify.clone(),
             crate::audio::ytdlp::PLAYLIST_LIMIT,
         )?,
-        client: reqwest::Client::builder()
-            .user_agent("slap")
-            .build()?,
+        client: reqwest::Client::builder().user_agent("slap").build()?,
         application_id,
         user_id,
     });

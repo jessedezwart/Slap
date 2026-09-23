@@ -9,7 +9,7 @@ use std::{
 use rand::seq::SliceRandom;
 use songbird::tracks::TrackHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{Span, info, warn};
+use tracing::{Span, debug, info, warn};
 use twilight_model::{
     application::{
         command::{Command, CommandType},
@@ -116,24 +116,68 @@ pub async fn handle_interaction(state: Arc<State>, interaction: Interaction) {
     Span::current().record("source", if button { "button" } else { "slash" });
     let mode = ReplyMode::new(command, button);
     let started = Instant::now();
-    info!("player interaction received");
+    debug!("player interaction received");
     if let Err(error) = defer(&state, &interaction, mode).await {
         warn!(%error, "failed to acknowledge interaction");
         return;
     }
+    let track = if matches!(command, "skip" | "pause" | "resume" | "stop")
+        && let Some(guild_id) = interaction.guild_id
+    {
+        state.sessions.current_track_title(guild_id).await
+    } else {
+        None
+    };
     let result = execute(&state, &interaction, command, options).await;
     match &result {
         Ok(_) => info!(
-            elapsed_ms = started.elapsed().as_millis(),
-            "player interaction completed"
+            "{}",
+            crate::logging::interaction(
+                &guild_name(&state, &interaction),
+                player_name(&interaction),
+                track.as_deref(),
+                command,
+            )
         ),
         Err(error) => {
             warn!(%error, elapsed_ms = started.elapsed().as_millis(), "player interaction rejected or failed")
         }
     }
+    if result.is_ok() {
+        debug!(
+            elapsed_ms = started.elapsed().as_millis(),
+            "player interaction completed"
+        );
+    }
     if let Err(error) = respond(&state, &interaction, mode, result).await {
         warn!(%error, "failed to send interaction response");
     }
+}
+
+fn guild_name(state: &State, interaction: &Interaction) -> String {
+    interaction
+        .guild_id
+        .and_then(|guild_id| {
+            state
+                .cache
+                .guild(guild_id)
+                .map(|guild| guild.name().to_owned())
+        })
+        .unwrap_or_else(|| "Unknown guild".into())
+}
+
+fn player_name(interaction: &Interaction) -> &str {
+    interaction
+        .member
+        .as_ref()
+        .and_then(|member| member.nick.as_deref())
+        .or_else(|| {
+            interaction
+                .author()
+                .and_then(|user| user.global_name.as_deref())
+        })
+        .or_else(|| interaction.author().map(|user| user.name.as_str()))
+        .unwrap_or("Unknown player")
 }
 
 async fn execute(
@@ -340,7 +384,7 @@ async fn play(
     } else {
         "yt-dlp"
     };
-    info!(
+    debug!(
         provider,
         host = url.host_str(),
         shuffle,
@@ -373,7 +417,7 @@ async fn play(
             }
         },
     };
-    info!(
+    debug!(
         tracks = listing.tracks.len(),
         skipped = listing.skipped,
         truncated = listing.truncated,
@@ -412,7 +456,7 @@ async fn play(
         })
         .collect();
     let (position, shuffled) = state.sessions.enqueue(guild_id, &cancel, tracks).await?;
-    info!(%guild_id, %channel_id, position, count, shuffled, "queued tracks");
+    debug!(%guild_id, %channel_id, position, count, shuffled, "queued tracks");
     let mut message = if count == 1 {
         let mut message = if position == 1 {
             format!("Now playing **{}**", escape(&title))

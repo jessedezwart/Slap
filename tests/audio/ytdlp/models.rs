@@ -106,3 +106,14 @@ fn errors_on_empty_output() {
         Err(AudioError::NoMetadata)
     ));
 }
+
+#[test]
+fn estimated_filesize_is_not_a_download_limit() {
+    let resolved = parse_output(
+        br#"{"url":"https://example.com/audio","acodec":"opus","filesize_approx":131072}"#,
+    )
+    .unwrap();
+    assert_eq!(resolved.content_length, None);
+    let resolved = parse_output(br#"{"url":"https://example.com/audio","acodec":"opus","filesize":524288,"filesize_approx":131072}"#).unwrap();
+    assert_eq!(resolved.content_length, Some(524288));
+}

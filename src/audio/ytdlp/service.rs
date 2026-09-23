@@ -2,7 +2,7 @@
 
 use std::{sync::Arc, time::Instant};
 
-use tracing::{info, warn};
+use tracing::{debug, warn};
 use url::Url;
 
 use super::{
@@ -46,7 +46,7 @@ impl YtDlpService {
     pub async fn resolve(&self, target: &PlaybackTarget) -> Result<Resolved, AudioError> {
         match target {
             PlaybackTarget::Url(url) => {
-                info!(host = url.host_str(), "resolving audio source");
+                debug!(host = url.host_str(), "resolving audio source");
                 self.resolve_input(url.as_str()).await
             }
             PlaybackTarget::Search(wanted) => self.resolve_search(wanted).await,
@@ -57,7 +57,7 @@ impl YtDlpService {
     /// requested track.
     async fn resolve_search(&self, wanted: &SpotifyTrack) -> Result<Resolved, AudioError> {
         if let Some(url) = self.cache.as_ref().and_then(|c| c.get(&wanted.id)) {
-            info!(spotify_id = wanted.id, "reusing previously resolved upload");
+            debug!(spotify_id = wanted.id, "reusing previously resolved upload");
             match self.resolve_input(&url).await {
                 Ok(resolved) => return Ok(resolved),
                 Err(error) if error.is_fatal() => return Err(error),
@@ -70,7 +70,7 @@ impl YtDlpService {
 
         let text = format!("{} {}", wanted.artist(), wanted.title);
         for source in SearchSource::ORDER {
-            info!(query = ?text, source = source.name(), "searching for audio");
+            debug!(query = ?text, source = source.name(), "searching for audio");
             let resolved = match self.resolve_input(&source.input(&text)).await {
                 Ok(resolved) => resolved,
                 // yt-dlp itself is unusable; the next source would fail the same way.
@@ -85,7 +85,7 @@ impl YtDlpService {
                 self.remember(wanted, &resolved).await;
                 return Ok(resolved);
             }
-            info!(source = source.name(), title = ?resolved.metadata.title,
+            debug!(source = source.name(), title = ?resolved.metadata.title,
                 duration_secs = resolved.metadata.duration.map(|d| d.as_secs()),
                 "search result has the wrong duration");
         }
@@ -118,7 +118,7 @@ impl YtDlpService {
         let started = Instant::now();
         let output = self.client.resolve(input).await?;
         let resolved = models::parse_output(&output)?;
-        info!(title = ?resolved.metadata.title, duration_secs = resolved.metadata.duration.map(|d| d.as_secs()),
+        debug!(title = ?resolved.metadata.title, duration_secs = resolved.metadata.duration.map(|d| d.as_secs()),
             elapsed_ms = started.elapsed().as_millis(), "audio source resolved");
         Ok(resolved)
     }

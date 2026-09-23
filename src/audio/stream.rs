@@ -43,7 +43,7 @@ use tokio::{
     time::{self, Instant},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{Level, debug, enabled, warn};
+use tracing::{Instrument, Level, debug, enabled, warn};
 
 use crate::{config::BufferConfig, error::AudioError};
 
@@ -100,6 +100,7 @@ pub struct PrefetchStream {
     len: Option<u64>,
     /// Set when a read finds the queue empty: the mixer is being starved.
     starved_since: Option<Instant>,
+    span: tracing::Span,
 }
 
 impl PrefetchStream {
@@ -108,7 +109,7 @@ impl PrefetchStream {
     /// The initial request happens here rather than in the background task so
     /// that a dead URL surfaces as an error before songbird is handed a track.
     pub async fn open(
-        spec: SourceSpec,
+        mut spec: SourceSpec,
         buffer: BufferConfig,
         parent: &CancellationToken,
         offset: u64,
@@ -123,15 +124,13 @@ impl PrefetchStream {
 
         // With a *windowed* request `Content-Length` describes the window, not
         // the file, so the total has to come from `Content-Range` or from
-        // yt-dlp. The bare `Content-Length` is only meaningful as a last resort,
+        // yt-dlp. The bare `Content-Length` is only meaningful
         // when the server ignored the range and sent the whole body.
-        let len = total_from_content_range(response.headers())
-            .or(spec.content_length)
-            .or_else(|| {
-                response
-                    .content_length()
-                    .map(|remaining| offset.saturating_add(remaining))
-            });
+        let len = response_total(&response).or(spec.content_length);
+        // The pump and subsequent ranges must use the same authoritative size.
+        debug!(metadata_bytes = ?spec.content_length, http_bytes = ?response_total(&response),
+            effective_bytes = ?len, "selected audio file length");
+        spec.content_length = len;
 
         let budget = Arc::new(Semaphore::new(budget_bytes));
         let ready = Arc::new(Notify::new());
@@ -141,28 +140,34 @@ impl PrefetchStream {
         let channel_capacity = (budget_bytes / MAX_CHUNK_BYTES).max(4) + 4;
         let (tx, rx) = mpsc::channel(channel_capacity);
 
-        let task = tokio::spawn(pump(
-            spec.clone(),
-            response,
-            offset,
-            requested,
-            window,
-            tx,
-            Arc::clone(&budget),
-            prefill_bytes,
-            Arc::clone(&ready),
-            cancel.clone(),
-        ));
+        let task = tokio::spawn(
+            pump(
+                spec.clone(),
+                response,
+                offset,
+                requested,
+                window,
+                tx,
+                Arc::clone(&budget),
+                prefill_bytes,
+                Arc::clone(&ready),
+                cancel.clone(),
+            )
+            .in_current_span(),
+        );
 
         // Sampling the semaphore costs an atomic load, but a task per stream is
         // not worth paying for when nobody is listening.
         if enabled!(Level::DEBUG) {
-            tokio::spawn(log_depth(
-                budget,
-                budget_bytes,
-                buffer.bytes_per_second(spec.bitrate_bps),
-                cancel.clone(),
-            ));
+            tokio::spawn(
+                log_depth(
+                    budget,
+                    budget_bytes,
+                    buffer.bytes_per_second(spec.bitrate_bps),
+                    cancel.clone(),
+                )
+                .in_current_span(),
+            );
         }
 
         debug!(
@@ -187,6 +192,7 @@ impl PrefetchStream {
             pos: offset,
             len,
             starved_since: None,
+            span: tracing::Span::current(),
         })
     }
 
@@ -305,17 +311,22 @@ impl AsyncMediaSource for PrefetchStream {
         &mut self,
         offset: u64,
     ) -> Result<Box<dyn AsyncMediaSource>, AudioStreamError> {
-        debug!(offset, "resuming audio stream after error");
+        debug!(parent: &self.span, offset, expected_bytes = ?self.len, "resuming audio stream after error");
 
         let mut stream = Self::open(self.spec.clone(), self.buffer, &self.parent, offset)
+            .instrument(self.span.clone())
             .await
-            .map_err(|error| AudioStreamError::Fail(Box::new(error)))?;
+            .map_err(|error| {
+                debug!(parent: &self.span, offset, %error, "audio stream resume failed");
+                AudioStreamError::Fail(Box::new(error))
+            })?;
 
-        stream
-            .prefill()
-            .await
-            .map_err(|error| AudioStreamError::Fail(Box::new(error)))?;
+        stream.prefill().await.map_err(|error| {
+            debug!(parent: &self.span, offset, %error, "audio stream resume prefill failed");
+            AudioStreamError::Fail(Box::new(error))
+        })?;
 
+        debug!(parent: &self.span, offset, "audio stream resumed");
         Ok(Box::new(stream))
     }
 }
@@ -327,7 +338,7 @@ impl AsyncMediaSource for PrefetchStream {
 /// after it is requested here.
 #[allow(clippy::too_many_arguments)]
 async fn pump(
-    spec: SourceSpec,
+    mut spec: SourceSpec,
     response: Response,
     offset: u64,
     requested: u64,
@@ -344,18 +355,30 @@ async fn pump(
     let mut announced = false;
 
     while let Some((response, requested)) = next.take() {
+        let started = Instant::now();
+        let partial = response.status() == StatusCode::PARTIAL_CONTENT;
+        let total = response_total(&response).or(spec.content_length);
+        if total != spec.content_length {
+            debug!(offset, previous_bytes = ?spec.content_length, effective_bytes = ?total,
+                "audio file length changed");
+        }
+        spec.content_length = total;
         let mut body = Box::pin(response.bytes_stream());
         let mut received = 0u64;
 
         let completed = loop {
             let next = tokio::select! {
-                () = cancel.cancelled() => return,
+                () = cancel.cancelled() => {
+                    debug!(offset, received, buffered, reason = "cancelled", "audio download stopped");
+                    return;
+                },
                 next = body.next() => next,
             };
 
             let mut bytes = match next {
                 Some(Ok(bytes)) => bytes,
                 Some(Err(error)) => {
+                    debug!(offset, received, requested, %error, "audio response body failed");
                     let _ = tx.send(Err(io::Error::other(error))).await;
 
                     break false;
@@ -375,7 +398,10 @@ async fn pump(
                 // once the configured buffer is full this parks until the mixer
                 // catches up.
                 let permit = tokio::select! {
-                    () = cancel.cancelled() => return,
+                    () = cancel.cancelled() => {
+                        debug!(offset, received, buffered, reason = "cancelled", "audio download stopped");
+                        return;
+                    },
                     permit = Arc::clone(&budget).acquire_many_owned(take as u32) => match permit {
                         Ok(permit) => permit,
                         Err(_) => return,
@@ -388,7 +414,13 @@ async fn pump(
                 };
 
                 if tx.send(Ok(chunk)).await.is_err() {
-                    // Reader went away.
+                    debug!(
+                        offset,
+                        received,
+                        buffered,
+                        reason = "reader_dropped",
+                        "audio download stopped"
+                    );
                     return;
                 }
 
@@ -401,21 +433,65 @@ async fn pump(
             }
         };
 
+        debug!(offset, received, requested, completed, partial,
+            expected_bytes = ?spec.content_length, elapsed_ms = started.elapsed().as_millis(),
+            "audio window finished");
         offset = offset.saturating_add(received);
 
-        if !completed || at_end(&spec, offset, received, requested) {
+        let stop_reason = if !completed {
+            Some("body_error")
+        } else if !partial {
+            Some("full_response_consumed")
+        } else if spec.content_length.is_some_and(|length| offset >= length) {
+            Some("known_length_reached")
+        } else {
+            None
+        };
+        if let Some(reason) = stop_reason {
+            debug!(offset, buffered, expected_bytes = ?spec.content_length, reason, "audio download stopped");
+            break;
+        }
+        if received > 0 && received < requested {
+            debug!(offset, received, requested, expected_bytes = ?spec.content_length,
+                "short audio window; continuing download");
+        }
+
+        if received == 0 {
+            warn!(offset, expected_bytes = ?spec.content_length, "audio response made no progress");
+            let _ = tx
+                .send(Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "empty partial audio response before end of file",
+                )))
+                .await;
             break;
         }
 
-        debug!(offset, "requesting next window");
-
         next = match request_window(&spec, offset, window, &cancel).await {
             Ok(next) => Some(next),
-            Err(AudioError::Cancelled) => return,
-            // We asked past the last byte: the length we were working from was
-            // a little short, and the file is simply over.
-            Err(AudioError::HttpStatus(StatusCode::RANGE_NOT_SATISFIABLE)) => break,
+            Err(AudioError::Cancelled) => {
+                debug!(
+                    offset,
+                    buffered,
+                    reason = "cancelled",
+                    "audio download stopped"
+                );
+                return;
+            }
+            // For an unknown total, probing past the last byte establishes EOF.
+            Err(AudioError::HttpStatus(StatusCode::RANGE_NOT_SATISFIABLE))
+                if spec.content_length.is_none() =>
+            {
+                debug!(
+                    offset,
+                    buffered,
+                    reason = "range_exhausted",
+                    "audio download stopped"
+                );
+                break;
+            }
             Err(error) => {
+                warn!(offset, expected_bytes = ?spec.content_length, %error, "audio download interrupted");
                 let _ = tx.send(Err(io::Error::other(error))).await;
 
                 break;
@@ -428,12 +504,13 @@ async fn pump(
     ready.notify_one();
 }
 
-/// Whether the window that just finished was the last one.
-///
-/// A window that came up short is the end of the file whatever any header
-/// claimed, which is also how a source of unknown length terminates.
-fn at_end(spec: &SourceSpec, offset: u64, received: u64, requested: u64) -> bool {
-    received < requested || spec.content_length.is_some_and(|length| offset >= length)
+/// A partial response's Content-Length is only its window size.
+fn response_total(response: &Response) -> Option<u64> {
+    if response.status() == StatusCode::PARTIAL_CONTENT {
+        total_from_content_range(response.headers())
+    } else {
+        response.content_length()
+    }
 }
 
 /// How much one request asks for.
@@ -456,6 +533,8 @@ async fn request_window(
 ) -> Result<(Response, u64), AudioError> {
     let (range, requested) = window_range(offset, spec.content_length, window);
 
+    let started = Instant::now();
+    debug!(offset, requested, %range, expected_bytes = ?spec.content_length, "requesting audio window");
     let request = spec
         .client
         .get(&spec.url)
@@ -468,8 +547,12 @@ async fn request_window(
     };
 
     // 206 when the range was served, 200 if the server ignored it and sent the
-    // whole body — which the pump copes with, since it counts what arrives.
+    // whole body — the pump finishes after consuming that response.
     let status = response.status();
+    debug!(offset, requested, %status,
+        content_range = ?response.headers().get(CONTENT_RANGE).and_then(|v| v.to_str().ok()),
+        response_bytes = ?response.content_length(), total_bytes = ?response_total(&response),
+        elapsed_ms = started.elapsed().as_millis(), "audio window response");
     if !status.is_success() {
         return Err(AudioError::HttpStatus(status));
     }

@@ -189,6 +189,14 @@ async fn dropping_the_stream_cancels_its_token() {
 /// the test finishes. Honours the range exactly, so what the client asks
 /// for is what it gets — and the counter makes the windowing observable.
 async fn serve_ranges(body: Vec<u8>) -> (String, Arc<AtomicUsize>) {
+    serve_ranges_with(body, usize::MAX, true).await
+}
+
+async fn serve_ranges_with(
+    body: Vec<u8>,
+    max_response: usize,
+    report_total: bool,
+) -> (String, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     let requests = Arc::new(AtomicUsize::new(0));
@@ -226,13 +234,19 @@ async fn serve_ranges(body: Vec<u8>) -> (String, Arc<AtomicUsize>) {
                     return;
                 }
 
-                let end = asked.min(body.len() - 1);
+                let end = asked
+                    .min(body.len() - 1)
+                    .min(start.saturating_add(max_response - 1));
                 let slice = &body[start..=end];
 
                 let head = format!(
                     "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{end}/{}\r\nConnection: close\r\n\r\n",
                     slice.len(),
-                    body.len()
+                    if report_total {
+                        body.len().to_string()
+                    } else {
+                        "*".into()
+                    }
                 );
 
                 if socket.write_all(head.as_bytes()).await.is_err() {
@@ -378,18 +392,94 @@ fn total_is_read_from_content_range() {
     assert_eq!(total_from_content_range(&HeaderMap::new()), None);
 }
 
-/// A window that comes up short ends the stream, whatever the length said.
-#[test]
-fn a_short_window_ends_the_stream() {
+/// Servers may cap each partial response below the requested window. Both
+/// known and unknown totals must keep downloading from the next unread byte.
+#[tokio::test]
+async fn short_partial_responses_do_not_end_the_file() {
+    for report_total in [true, false] {
+        let expected = body();
+        let cap = 128 * 1024;
+        let (url, requests) = serve_ranges_with(expected.clone(), cap, report_total).await;
+        let cancel = CancellationToken::new();
+        let spec = SourceSpec {
+            client: Client::new(),
+            url,
+            headers: HeaderMap::new(),
+            content_length: None,
+            bitrate_bps: Some(160_000),
+        };
+        let mut stream = PrefetchStream::open(spec, test_buffer_config(), &cancel, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            stream.byte_len().await,
+            report_total.then_some(BODY_LEN as u64)
+        );
+        let mut actual = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut actual))
+            .await
+            .expect("download should finish")
+            .expect("complete download");
+        assert_eq!(actual, expected);
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            BODY_LEN / cap + usize::from(!report_total)
+        );
+    }
+}
+
+/// HTTP's total must replace stale metadata for the download itself, not just
+/// for byte_len(). Test both an undercount and an overcount.
+#[tokio::test]
+async fn http_total_overrides_metadata_for_all_windows() {
+    for reported_size in [128 * 1024, BODY_LEN * 2] {
+        let expected = body();
+        let (url, requests) = serve_ranges(expected.clone()).await;
+        let cancel = CancellationToken::new();
+        let spec = SourceSpec {
+            client: Client::new(),
+            url,
+            headers: HeaderMap::new(),
+            content_length: Some(reported_size as u64),
+            bitrate_bps: Some(160_000),
+        };
+        let mut stream = PrefetchStream::open(spec, test_buffer_config(), &cancel, 0)
+            .await
+            .unwrap();
+        assert_eq!(stream.byte_len().await, Some(BODY_LEN as u64));
+        let mut actual = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut actual))
+            .await
+            .expect("download should finish")
+            .expect("complete download");
+        assert_eq!(actual, expected);
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            if reported_size < BODY_LEN { 3 } else { 2 }
+        );
+    }
+}
+
+/// A 416 is not a clean EOF when the known total still promises more bytes.
+#[tokio::test]
+async fn rejected_range_before_known_end_is_an_error() {
+    let expected = body();
+    let (url, _) = serve_ranges_with(expected.clone(), usize::MAX, false).await;
+    let cancel = CancellationToken::new();
     let spec = SourceSpec {
         client: Client::new(),
-        url: String::new(),
+        url,
         headers: HeaderMap::new(),
-        content_length: Some(10_000),
-        bitrate_bps: None,
+        content_length: Some(BODY_LEN as u64 * 2),
+        bitrate_bps: Some(160_000),
     };
-
-    assert!(at_end(&spec, 4_096, 4_096, 8_192), "server ran out early");
-    assert!(!at_end(&spec, 8_192, 8_192, 8_192), "more file to come");
-    assert!(at_end(&spec, 10_000, 1_808, 1_808), "reached the length");
+    let mut stream = PrefetchStream::open(spec, test_buffer_config(), &cancel, 0)
+        .await
+        .unwrap();
+    let mut actual = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut actual))
+        .await
+        .expect("download should finish")
+        .expect_err("missing bytes must be an error");
+    assert_eq!(actual, expected);
 }
