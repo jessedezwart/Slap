@@ -2,6 +2,8 @@
 
 use std::{env, fmt::Display, num::ParseIntError, path::PathBuf, str::FromStr, time::Duration};
 
+use tracing::warn;
+
 use crate::error::ConfigError;
 
 /// Smallest buffer we will ever allocate, regardless of configuration.
@@ -154,6 +156,23 @@ impl Config {
             return Err(ConfigError::Missing("DISCORD_TOKEN"));
         }
 
+        let cookies_file = env::var("YTDLP_COOKIES_FILE")
+            .ok()
+            .filter(|path| !path.trim().is_empty())
+            .map(PathBuf::from);
+        let extra_args: Vec<String> = env::var("YTDLP_EXTRA_ARGS")
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect();
+
+        if cookies_file.is_none() && !extra_args.iter().any(|arg| arg.contains("cookies")) {
+            warn!(
+                "no YouTube cookies configured (YTDLP_COOKIES_FILE unset); \
+                 yt-dlp requests may be rate-limited or rejected as bot traffic"
+            );
+        }
+
         Ok(Self {
             token,
             worker_threads: parse_worker_threads()?,
@@ -166,15 +185,8 @@ impl Config {
             ytdlp: YtDlpConfig {
                 program: env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),
                 timeout: Duration::from_millis(parse_env("YTDLP_TIMEOUT_MS", 15_000u64)?),
-                extra_args: env::var("YTDLP_EXTRA_ARGS")
-                    .unwrap_or_default()
-                    .split_whitespace()
-                    .map(str::to_owned)
-                    .collect(),
-                cookies_file: env::var("YTDLP_COOKIES_FILE")
-                    .ok()
-                    .filter(|path| !path.trim().is_empty())
-                    .map(PathBuf::from),
+                extra_args,
+                cookies_file,
                 resolve_cache: ResolveCacheConfig {
                     // A value under the floor is raised to it rather than
                     // rejected: the cache is not something to turn off.
