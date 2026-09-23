@@ -65,7 +65,11 @@ impl YtDlpClient {
     }
 
     async fn run(&self, mut cmd: Command, input: &str) -> Result<Vec<u8>, AudioError> {
-        cmd.arg("--cookies").arg(&self.config.cookies_file);
+        // yt-dlp writes the jar back on exit, so pointing it at a missing file
+        // would make it create one wherever the default path lands.
+        if self.config.cookies_file.is_file() {
+            cmd.arg("--cookies").arg(&self.config.cookies_file);
+        }
         // Keep the input literal, including anything that looks like an option.
         cmd.arg("--").arg(input);
 
@@ -122,11 +126,13 @@ impl YtDlpClient {
 }
 
 /// Returns the last non-empty line of stderr, or "no output" if there is none.
+/// Skips the PyInstaller wrapper's `[PYI-…:ERROR]` trailer so the Python
+/// exception above it is what gets reported.
 fn last_line(stderr: &str) -> String {
     stderr
         .lines()
         .rev()
-        .find(|l| !l.trim().is_empty())
+        .find(|l| !l.trim().is_empty() && !l.trim_start().starts_with("[PYI-"))
         .unwrap_or("no output")
         .trim()
         .to_owned()

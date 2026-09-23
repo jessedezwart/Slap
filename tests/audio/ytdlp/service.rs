@@ -229,11 +229,17 @@ printf '%s\n' "$@" >> "$0.log"
 printf '%s\n' '{"url":"https://cdn/audio","acodec":"opus"}'
 "#,
     );
+    // Only an existing cookie file is passed on.
+    let cookie_dir = path.with_extension("cookie directory");
+    std::fs::create_dir_all(&cookie_dir).unwrap();
+    let cookie_file = cookie_dir.join(".env.cookies");
+    std::fs::write(&cookie_file, "").unwrap();
+    let cookie_arg = cookie_file.to_string_lossy().into_owned();
     ytdlp.client = YtDlpClient::new(YtDlpConfig {
         program: path.to_string_lossy().into_owned(),
         timeout: Duration::from_secs(5),
         extra_args: vec![],
-        cookies_file: "/tmp/cookie directory/.env.cookies".into(),
+        cookies_file: cookie_file.clone(),
         resolve_cache: ResolveCacheConfig::default(),
     });
     let url = Url::parse("https://youtube.com/watch?v=test").unwrap();
@@ -247,8 +253,9 @@ printf '%s\n' '{"url":"https://cdn/audio","acodec":"opus"}'
     for args in [resolve_args, list_args] {
         assert!(
             args.windows(2)
-                .any(|pair| pair == ["--cookies", "/tmp/cookie directory/.env.cookies"])
+                .any(|pair| pair == ["--cookies", cookie_arg.as_str()])
         );
     }
+    std::fs::remove_dir_all(cookie_dir).unwrap();
     std::fs::remove_file(path).unwrap();
 }
