@@ -1,5 +1,6 @@
 # Never let a real token into an image layer.
 .env
+.env.cookies
 
 target/
 .git/

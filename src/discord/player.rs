@@ -56,6 +56,10 @@ pub async fn start(
         .attach_panel(guild_id, cancel, message.id)
         .await
     else {
+        // A stop can race with Discord returning the initial /play reply.
+        if cancel.is_cancelled() {
+            delete_player(&state, message.channel_id, message.id).await;
+        }
         return;
     };
     let task_state = Arc::clone(&state);
@@ -184,6 +188,14 @@ async fn run(
             }
         }
     }
+    delete_player(&state, channel_id, message_id).await;
+}
+
+async fn delete_player(
+    state: &State,
+    channel_id: Id<ChannelMarker>,
+    message_id: Id<MessageMarker>,
+) {
     // Stopped, disconnected or superseded: a dead player is just clutter.
     match time::timeout(
         HTTP_TIMEOUT,

@@ -186,7 +186,11 @@ async fn startup(config: Config) -> Result<Running, Box<dyn std::error::Error + 
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let command_loop = tokio::spawn(run_command_loop(Arc::clone(&sessions), commands_rx));
+    let command_loop = tokio::spawn(run_command_loop(
+        Arc::clone(&sessions),
+        commands_rx,
+        Arc::clone(&http),
+    ));
 
     let dispatchers: Vec<_> = shards
         .into_iter()

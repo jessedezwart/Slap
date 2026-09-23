@@ -54,6 +54,7 @@ fn fake_ytdlp(script: &str) -> (YtDlpService, impl Fn() -> Vec<String>, std::pat
         program: path.to_string_lossy().into_owned(),
         timeout: Duration::from_secs(5),
         extra_args: Vec::new(),
+        cookies_file: None,
         resolve_cache: ResolveCacheConfig::default(),
     });
     let calls = move || {
@@ -141,6 +142,7 @@ async fn live_search_finds_the_requested_recording() {
         program: std::env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),
         timeout: Duration::from_secs(60),
         extra_args: Vec::new(),
+        cookies_file: None,
         resolve_cache: ResolveCacheConfig::default(),
     });
     for (artists, title, secs) in [
@@ -173,4 +175,80 @@ async fn live_search_finds_the_requested_recording() {
         );
         assert!(matching::matches(&query, &resolved.metadata));
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bot_challenge_stops_search_fallback_and_survives_shared_errors() {
+    let (ytdlp, calls, path) = fake_ytdlp(
+        r#"#!/bin/sh
+printf '%s\n' called >> "$0.log"
+echo "ERROR: [youtube] id: Sign in to confirm you’re not a bot. Use --cookies" >&2
+exit 1
+"#,
+    );
+    let error = ytdlp
+        .resolve(&PlaybackTarget::Search(track(&["Artist"], "Song", 180)))
+        .await
+        .unwrap_err();
+    assert!(error.cookies_required());
+    assert!(error.is_fatal());
+    assert_eq!(calls().len(), 1, "must not try another search source");
+    let shared = AudioError::Shared(Arc::new(error));
+    assert!(shared.cookies_required());
+    assert!(shared.is_fatal());
+    std::fs::remove_file(path).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ignored_playlist_error_still_reports_cookie_requirement() {
+    let (ytdlp, calls, path) = fake_ytdlp(
+        r#"#!/bin/sh
+printf '%s\n' called >> "$0.log"
+echo "ERROR: [youtube] id: Sign in to confirm you're not a bot." >&2
+printf '%s\n' '{"entries":[]}'
+exit 0
+"#,
+    );
+    let error = ytdlp
+        .list(&Url::parse("https://youtube.com/playlist?list=test").unwrap())
+        .await
+        .unwrap_err();
+    assert!(error.cookies_required());
+    assert_eq!(calls().len(), 1);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cookie_path_is_one_argument_for_listing_and_resolution() {
+    let (mut ytdlp, calls, path) = fake_ytdlp(
+        r#"#!/bin/sh
+printf '%s\n' "$@" >> "$0.log"
+printf '%s\n' '{"url":"https://cdn/audio","acodec":"opus"}'
+"#,
+    );
+    ytdlp.client = YtDlpClient::new(YtDlpConfig {
+        program: path.to_string_lossy().into_owned(),
+        timeout: Duration::from_secs(5),
+        extra_args: vec![],
+        cookies_file: Some("/tmp/cookie directory/.env.cookies".into()),
+        resolve_cache: ResolveCacheConfig::default(),
+    });
+    let url = Url::parse("https://youtube.com/watch?v=test").unwrap();
+    ytdlp
+        .resolve(&PlaybackTarget::Url(url.clone()))
+        .await
+        .unwrap();
+    let resolve_args = calls();
+    ytdlp.list(&url).await.unwrap();
+    let list_args = calls();
+    for args in [resolve_args, list_args] {
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--cookies", "/tmp/cookie directory/.env.cookies"])
+        );
+    }
+    std::fs::remove_file(path).unwrap();
 }

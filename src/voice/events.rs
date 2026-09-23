@@ -4,7 +4,7 @@
 //! `Call` they are attached to — that would re-enter a lock songbird is already
 //! holding. They post notifications and write bounded, non-blocking logs.
 
-use crate::audio::ytdlp::TrackMetadata;
+use crate::{audio::ytdlp::TrackMetadata, error::AudioError};
 use songbird::{
     events::{Event, EventContext, EventHandler, TrackEvent},
     tracks::{PlayMode, ReadyState},
@@ -14,10 +14,18 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
-use twilight_model::id::{Id, marker::GuildMarker};
+use twilight_model::id::{
+    Id,
+    marker::{ChannelMarker, GuildMarker},
+};
 
 /// Work that must happen off the driver task.
 pub enum VoiceCommand {
+    CookiesRequired {
+        guild_id: Id<GuildMarker>,
+        channel_id: Id<ChannelMarker>,
+        cancel: CancellationToken,
+    },
     Teardown {
         guild_id: Id<GuildMarker>,
         reason: String,
@@ -58,6 +66,9 @@ pub struct PlayerNotifier {
     pub guild_id: Id<GuildMarker>,
     pub event: TrackEvent,
     pub updates: Arc<Notify>,
+    pub commands: UnboundedSender<VoiceCommand>,
+    pub cancel: CancellationToken,
+    pub warning_channel_id: Id<ChannelMarker>,
 }
 
 #[async_trait::async_trait]
@@ -86,7 +97,16 @@ impl EventHandler for PlayerNotifier {
                     }
                     TrackEvent::Error => {
                         if let PlayMode::Errored(error) = &state.playing {
-                            warn!(%error, "track failed; queue will advance");
+                            if requires_cookies(error) {
+                                let _ = self.commands.send(VoiceCommand::CookiesRequired {
+                                    guild_id: self.guild_id,
+                                    channel_id: self.warning_channel_id,
+                                    cancel: self.cancel.clone(),
+                                });
+                                warn!(%error, "stopping playback; bot admin must configure YouTube cookies");
+                            } else {
+                                warn!(%error, "track failed; queue will advance");
+                            }
                         }
                     }
                     TrackEvent::Playable => debug!("upcoming track preloaded"),
@@ -97,3 +117,19 @@ impl EventHandler for PlayerNotifier {
         None
     }
 }
+
+fn requires_cookies(error: &songbird::tracks::PlayError) -> bool {
+    let songbird::tracks::PlayError::Create(error) = error else {
+        return false;
+    };
+    let songbird::input::AudioStreamError::Fail(error) = error.as_ref() else {
+        return false;
+    };
+    error
+        .downcast_ref::<AudioError>()
+        .is_some_and(AudioError::cookies_required)
+}
+
+#[cfg(test)]
+#[path = "../../tests/voice/events.rs"]
+mod tests;

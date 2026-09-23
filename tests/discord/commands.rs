@@ -50,3 +50,12 @@ fn truncates_long_titles() {
 
     assert_eq!(escape(&long).chars().count(), 200);
 }
+
+#[test]
+fn shared_cookie_errors_produce_actionable_command_response() {
+    let error = PlayError::Audio(AudioError::Shared(Arc::new(AudioError::CookiesRequired)));
+    assert_eq!(
+        user_message(&error),
+        AudioError::CookiesRequired.to_string()
+    );
+}

@@ -96,6 +96,7 @@ pub struct YtDlpConfig {
     /// Extra argv entries, e.g. `--cookies-from-browser firefox`. Split on
     /// whitespace; still argv, still no shell.
     pub extra_args: Vec<String>,
+    pub cookies_file: Option<PathBuf>,
     pub resolve_cache: ResolveCacheConfig,
 }
 
@@ -170,6 +171,10 @@ impl Config {
                     .split_whitespace()
                     .map(str::to_owned)
                     .collect(),
+                cookies_file: env::var("YTDLP_COOKIES_FILE")
+                    .ok()
+                    .filter(|path| !path.trim().is_empty())
+                    .map(PathBuf::from),
                 resolve_cache: ResolveCacheConfig {
                     // A value under the floor is raised to it rather than
                     // rejected: the cache is not something to turn off.

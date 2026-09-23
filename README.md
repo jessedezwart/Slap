@@ -65,6 +65,44 @@ cargo test
 
 All configuration settings are documented in `.env.example`. Copy that file to `.env`.
 
+## YouTube cookies
+
+If YouTube asks to sign in to confirm you are not a bot, export YouTube cookies
+in Netscape/Mozilla cookie-file format to `.env.cookies`. This is a cookie jar,
+not a second dotenv file. Follow yt-dlp's
+[YouTube cookie export instructions](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies).
+For a local run, set this in `.env` and restart the bot:
+
+```env
+YTDLP_COOKIES_FILE=.env.cookies
+```
+
+The bot passes this path to `yt-dlp --cookies` for searches, track resolution,
+and playlist listings. Paths containing spaces are supported. The existing
+`YTDLP_EXTRA_ARGS=--cookies .env.cookies` also works for paths without spaces;
+use one configuration method. Cookies may expire; replace the file if YouTube
+asks for authentication again.
+
+For Docker, create the exported file first and make it readable and writable
+by the container's bot user (UID 10001). On Linux, for example:
+
+```sh
+sudo chown 10001:10001 .env.cookies
+sudo chmod 600 .env.cookies
+docker compose -f compose.yaml -f compose.cookies.yaml up --build
+```
+
+The optional override mounts the file and sets its path inside the container.
+The mount is writable because yt-dlp saves its cookie jar. `.env.cookies` is
+excluded from Git and Docker build contexts.
+
+When this authentication error occurs, the affected guild's playback stops,
+its queue is cleared, and the bot disconnects from voice. A separate warning
+asks the bot admin to configure or refresh YouTube cookies, and the player
+message is deleted as with a normal stop.
+An error during the initial import is also reported in the command response.
+The bot process keeps running; retry `/play` after fixing the cookie setup.
+
 ## Commands
 
 Join a voice channel, then use:
@@ -108,7 +146,8 @@ another channel will not move the bot or interrupt that channel's queue.
 Playlist imports inspect at most 1000 entries and report skipped unavailable
 entries and truncation. Links containing both a video and a playlist import the
 playlist; remove the playlist parameter to request only the video. Tracks resolve
-their audio URLs when playback approaches, and failures advance to the next track.
+their audio URLs when playback approaches, and ordinary failures advance to the next track.
+YouTube bot-verification errors stop playback and ask the admin to configure cookies.
 The Opus-only source restriction still applies.
 
 The bot joins **self-deafened** and disconnects as soon as it is the only member
@@ -247,12 +286,13 @@ rests on. Point it at another video with `YTDLP_TEST_URL`.
 
 ## Invite
 
-[Invite the bot](https://discord.com/oauth2/authorize?client_id=881107137990918166&scope=bot%20applications.commands&permissions=3146752)
+[Invite the bot](https://discord.com/oauth2/authorize?client_id=881107137990918166&scope=bot%20applications.commands&permissions=3148800)
 
 Replace `client_id` with your bot's client ID. The permissions integer is the minimum needed to join a voice channel and respond to slash commands:
 
 - connect
 - speak
 - view channel
+- send messages (for playback failure warnings)
 
 The invite also includes the `applications.commands` scope for slash commands.

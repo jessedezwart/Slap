@@ -60,6 +60,7 @@ impl YtDlpService {
             info!(spotify_id = wanted.id, "reusing previously resolved upload");
             match self.resolve_input(&url).await {
                 Ok(resolved) => return Ok(resolved),
+                Err(error) if error.is_fatal() => return Err(error),
                 // The upload can have been taken down since; search again.
                 Err(error) => {
                     warn!(%error, "cached upload no longer resolves, searching again");

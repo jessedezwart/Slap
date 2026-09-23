@@ -1,0 +1,11 @@
+# Optional: docker compose -f compose.yaml -f compose.cookies.yaml up --build
+services:
+  bot:
+    environment:
+      YTDLP_COOKIES_FILE: /app/.env.cookies
+    volumes:
+      - type: bind
+        source: ./.env.cookies
+        target: /app/.env.cookies
+        bind:
+          create_host_path: false

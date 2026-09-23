@@ -323,7 +323,15 @@ async fn play(
         .map(|voice_state| voice_state.channel_id())
         .ok_or(PlayError::NotInVoice)?;
 
-    let cancel = state.sessions.join(guild_id, channel_id).await?;
+    let warning_channel_id = interaction
+        .channel
+        .as_ref()
+        .ok_or(PlayError::NotInGuild)?
+        .id;
+    let cancel = state
+        .sessions
+        .join(guild_id, channel_id, warning_channel_id)
+        .await?;
 
     // Also covers a caller leaving during the join handshake.
     crate::discord::events::reconcile_voice(Arc::clone(state), guild_id);
@@ -355,7 +363,15 @@ async fn play(
     };
     let mut listing = tokio::select! {
         () = cancel.cancelled() => return Err(AudioError::Cancelled.into()),
-        result = list => result?,
+        result = list => match result {
+            Ok(listing) => listing,
+            Err(error) => {
+                if error.cookies_required() {
+                    state.sessions.teardown_if(guild_id, "YouTube cookies required", || !cancel.is_cancelled()).await;
+                }
+                return Err(error.into());
+            }
+        },
     };
     info!(
         tracks = listing.tracks.len(),
@@ -528,6 +544,9 @@ fn user_message(error: &PlayError) -> String {
         PlayError::NotInGuild => "This command only works inside a server.".to_owned(),
         PlayError::NotInVoice => "Join a voice channel first.".to_owned(),
         PlayError::Session(error) => error.to_string(),
+        PlayError::Audio(error) if error.cookies_required() => {
+            AudioError::CookiesRequired.to_string()
+        }
         PlayError::Audio(AudioError::Cancelled) => {
             "Playback was stopped or the voice session ended.".into()
         }

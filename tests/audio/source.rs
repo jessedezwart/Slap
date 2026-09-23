@@ -27,6 +27,7 @@ async fn youtube_audio_parses_as_opus() {
         program: env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),
         timeout: Duration::from_secs(60),
         extra_args: Vec::new(),
+        cookies_file: None,
         resolve_cache: ResolveCacheConfig::default(),
     });
 

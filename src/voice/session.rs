@@ -118,6 +118,7 @@ impl SessionManager {
         &self,
         guild_id: Id<GuildMarker>,
         channel_id: Id<ChannelMarker>,
+        warning_channel_id: Id<ChannelMarker>,
     ) -> Result<CancellationToken, SessionError> {
         let _guard = self.lock(guild_id).await;
         if let Some(session) = self.sessions.get(&guild_id) {
@@ -169,6 +170,9 @@ impl SessionManager {
                         guild_id,
                         event,
                         updates: Arc::clone(&updates),
+                        commands: self.commands.clone(),
+                        cancel: cancel.clone(),
+                        warning_channel_id,
                     },
                 );
             }
@@ -405,10 +409,13 @@ impl SessionManager {
         guild_id: Id<GuildMarker>,
         reason: &str,
         condition: impl FnOnce() -> bool,
-    ) {
+    ) -> bool {
         let _guard = self.lock(guild_id).await;
         if condition() {
             self.teardown_locked(guild_id, reason).await;
+            true
+        } else {
+            false
         }
     }
 
@@ -483,9 +490,39 @@ fn restore_order<T>(queue: &mut VecDeque<T>, sequence: impl Fn(&T) -> u64) {
 pub async fn run_command_loop(
     manager: Arc<SessionManager>,
     mut commands: UnboundedReceiver<VoiceCommand>,
+    http: Arc<twilight_http::Client>,
 ) {
     while let Some(command) = commands.recv().await {
         match command {
+            VoiceCommand::CookiesRequired {
+                guild_id,
+                channel_id,
+                cancel,
+            } => {
+                let stopped = manager
+                    .teardown_if(guild_id, "YouTube cookies required", || {
+                        !cancel.is_cancelled()
+                    })
+                    .await;
+                if stopped {
+                    let message = format!(
+                        "Playback stopped. {}",
+                        crate::error::AudioError::CookiesRequired
+                    );
+                    let mentions = twilight_model::channel::message::AllowedMentions::default();
+                    let request = http
+                        .create_message(channel_id)
+                        .content(&message)
+                        .allowed_mentions(Some(&mentions));
+                    match tokio::time::timeout(Duration::from_secs(10), request).await {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => {
+                            warn!(%channel_id, %error, "failed to send cookie configuration warning")
+                        }
+                        Err(_) => warn!(%channel_id, "cookie configuration warning timed out"),
+                    }
+                }
+            }
             VoiceCommand::Teardown {
                 guild_id,
                 reason,

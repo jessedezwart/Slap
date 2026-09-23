@@ -65,8 +65,10 @@ impl YtDlpClient {
     }
 
     async fn run(&self, mut cmd: Command, input: &str) -> Result<Vec<u8>, AudioError> {
-        // `--` so a URL starting with `-` can never be read as an option.
-        // This shouldn't ever happen because the URL is validated before this, but let's not risk it.
+        if let Some(path) = &self.config.cookies_file {
+            cmd.arg("--cookies").arg(path);
+        }
+        // Keep the input literal, including anything that looks like an option.
         cmd.arg("--").arg(input);
 
         cmd.stdin(Stdio::null())
@@ -92,9 +94,16 @@ impl YtDlpClient {
                 source,
             })?;
 
+        // --ignore-errors can leave a successful exit status after an extractor
+        // failed, so inspect stderr even for playlist listings that exit zero.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let lower = stderr.to_lowercase();
+        if lower.contains("sign in to confirm")
+            && (lower.contains("not a bot") || lower.contains("not a robot"))
+        {
+            return Err(AudioError::CookiesRequired);
+        }
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-
             // yt-dlp exits non-zero when the format selector matches nothing,
             // which for us means "no Opus rendition".
             if stderr.contains("Requested format is not available") {

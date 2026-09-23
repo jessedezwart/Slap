@@ -26,6 +26,11 @@ pub enum AudioError {
     #[error("yt-dlp failed ({code}): {stderr}")]
     YtDlpFailed { code: String, stderr: String },
 
+    #[error(
+        "YouTube requires authentication. The bot admin needs to configure or refresh YouTube cookies."
+    )]
+    CookiesRequired,
+
     #[error("yt-dlp returned no metadata")]
     NoMetadata,
 
@@ -65,11 +70,19 @@ impl AudioError {
         Arc::try_unwrap(error).unwrap_or_else(Self::Shared)
     }
 
+    pub fn cookies_required(&self) -> bool {
+        match self {
+            Self::CookiesRequired => true,
+            Self::Shared(inner) => inner.cookies_required(),
+            _ => false,
+        }
+    }
+
     /// Whether yt-dlp itself is unusable, so retrying with another input would
     /// only fail the same way.
     pub fn is_fatal(&self) -> bool {
         match self {
-            Self::Spawn { .. } | Self::Timeout(_) => true,
+            Self::Spawn { .. } | Self::Timeout(_) | Self::CookiesRequired => true,
             Self::Shared(inner) => inner.is_fatal(),
             _ => false,
         }
