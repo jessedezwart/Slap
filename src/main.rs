@@ -33,10 +33,14 @@ fn main() -> ExitCode {
 
     // Start each process with a fresh operational log. `File::create` both
     // creates the file when absent and truncates the previous run when present.
-    let log_file = match File::create("debug.log") {
+    let log_path = std::env::var("LOG_PATH")
+        .ok()
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or_else(|| "debug.log".to_owned());
+    let log_file = match File::create(&log_path) {
         Ok(file) => file,
         Err(error) => {
-            eprintln!("could not create debug.log: {error}");
+            eprintln!("could not create {log_path}: {error}");
             return ExitCode::FAILURE;
         }
     };

@@ -13,17 +13,24 @@ services:
       # Optional YouTube cookies; see README. Writable because yt-dlp saves
       # its cookie jar back.
       - ./secrets:/app/secrets
+    configs:
+      - source: ytdlp
+        target: /etc/yt-dlp.conf
+    depends_on:
+      - pot-provider
 
-  # PO token provider for yt-dlp's bgutil plugin. It shares the bot's network
-  # namespace, so the plugin's default http://127.0.0.1:4416 reaches it and
-  # nothing is published on the host. Keep the tag equal to BGUTIL_VERSION.
+  # PO token provider for yt-dlp's bgutil plugin. Only reachable on the compose
+  # network; no ports are published. Keep the tag equal to BGUTIL_VERSION.
   pot-provider:
     image: brainicism/bgutil-ytdlp-pot-provider:2.0.0
     restart: unless-stopped
     init: true
-    network_mode: service:bot
-    depends_on:
-      - bot
+
+configs:
+  # yt-dlp system config: point the plugin at the provider service.
+  ytdlp:
+    content: |
+      --extractor-args youtubepot-bgutilhttp:base_url=http://pot-provider:4416
 
 volumes:
   cache:

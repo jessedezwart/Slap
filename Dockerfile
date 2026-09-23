@@ -57,6 +57,7 @@ COPY --from=build /usr/local/bin/slap /usr/local/bin/slap
 
 RUN install -d -o bot -g bot /app/data
 ENV CACHE_PATH=/app/data/cache.redb
+ENV LOG_PATH=/app/data/debug.log
 
 USER bot
 WORKDIR /app
