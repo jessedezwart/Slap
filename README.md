@@ -88,7 +88,7 @@ cargo test
 | Crate | What it is |
 | --- | --- |
 | `crates/slap-core` | The bot as a library: `Bot::start`, `Bot::guilds`, `Bot::shutdown`. |
-| `crates/slap` | The headless binary, what the Docker image runs. |
+| `crates/slap-headless` | The headless binary, what the Docker image runs. |
 | `crates/slap-gui` | A Tauri desktop window showing connected guilds. |
 
 `cargo build` and `cargo test` cover only `slap-core` and `slap`, so the
@@ -155,16 +155,13 @@ The bot process keeps running; retry `/play` after fixing the cookie setup.
 Join a voice channel, then run `/play`. Pass the link directly:
 
 ```
-/play url: https://… shuffle: Off
+/play url: https://…
 ```
 
-Both options are optional. `shuffle` defaults to **On**, and a link passed this
-way is always added to the back of the queue. Running `/play` with no options
-opens a form instead, with:
+A link passed this way is always added to the back of the queue. Imports are
+always shuffled. Running `/play` without a link opens a form instead, with:
 
 - **Track or playlist link** — an HTTP(S) track or playlist link.
-- **Shuffle** — On (the default) shuffles the import before adding it, Off keeps
-  its original order.
 - **If something is already playing** — where the import goes: *Add to the
   queue* (the default) appends it, *Play next* puts it directly after the
   current track, and *Replace the queue* stops the current track, clears
@@ -176,14 +173,10 @@ link can be queued without leaving the player.
 
 The first successful `/play` response becomes a live player message with the
 current title, thumbnail, requester, elapsed and total time, queue size, and
-those buttons. Later imports reuse that player, and it is deleted when playback
-stops. A playlist import names its playlist on the player, next to
-the track it is playing. A stopped player keeps a **Play again** button,
-the playlist's name, and the `/play` line that reproduces it, ready to copy.
-Only the newest stopped player in a server can be replayed, and only while the
-bot is running: the button is shown disabled when the bot was disconnected
-rather than stopped, when a newer player takes over, and on every stopped
-player left when the process shuts down. The `/play` line stays either way. Queue replies
+those buttons. Later imports reuse that player. A playlist import names its
+playlist on the player, next to the track it is playing. When playback ends,
+the player is left behind as a plain "Playback stopped" message with no
+buttons. Queue replies
 privately with the current track and the first five
 upcoming tracks. Skip and Stop succeed silently because the player shows the
 result; errors are private. Unknown track durations show elapsed time only.
@@ -283,28 +276,18 @@ Access tokens refresh automatically for imports. If Spotify returns a rotated
 refresh token it is retained in memory; reauthorize/update `.env` if authorization
 fails after a restart.
 
-## In-memory resolve cache
+## Stream reuse
 
 The redb cache above removes the *search*, but each track still costs a yt-dlp
-run to turn its page URL into a direct media URL. Those runs are shared:
-`RESOLVE_CACHE_ENTRIES` resolves (512 by default) are kept in memory across
-every guild, so the same track queued in two servers, or replayed a few minutes
-later, costs one yt-dlp invocation rather than two. Callers that ask for an
-input while a run for it is already in flight wait for that run instead of
-starting a second one.
+run to turn its page URL into a direct media URL. A single link is the
+exception: expanding it already returns that URL, so it plays without a second
+run.
 
-This cache has no off switch, and values below 32 are raised to it. Playing a
-single link resolves it twice over otherwise: expanding the link already
-produces everything playback needs, and the cache is how that reaches the
-player. It is the only place a resolve is held — tracks themselves keep none.
-
-An entry lives only as long as the media URL inside it. googlevideo signs its
-URLs with an expiry, which the bot reads and honours (minus a two-minute margin,
-since playback still has to start on the URL after it is handed out); anything
-without one falls back to `RESOLVE_CACHE_TTL_MS`, 10 minutes by default. Signed
-URLs are tied to the IP that requested them, and the bot is a single process
-behind a single address, so sharing them between guilds is safe. Failed
-resolves are never stored.
+Each queued track keeps the media URL it last played from and reuses it, for
+example on a seek, for as long as it works. googlevideo signs its URLs with an
+expiry, which the bot reads and honours minus a two-minute margin, since
+playback still has to start on the URL after it is handed out. Nothing is
+shared between tracks or guilds: the same song queued twice is resolved twice.
 
 ## Notes on behaviour
 

@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/slap-core", "crates/slap", "crates/slap-gui"]
-default-members = ["crates/slap-core", "crates/slap"]
+members = ["crates/slap-core", "crates/slap-headless", "crates/slap-gui"]
+default-members = ["crates/slap-core", "crates/slap-headless"]
 
 [workspace.package]
 version = "0.1.0"
@@ -21,8 +21,3 @@ opt-level = 3
 incremental = false
 debug-assertions = false
 overflow-checks = false
-
-[profile.profiling]
-inherits = "release"
-debug = true
-strip = false

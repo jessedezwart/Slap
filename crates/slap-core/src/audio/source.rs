@@ -9,41 +9,44 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use twilight_model::id::{Id, marker::GuildMarker};
 
+use super::{
+    AudioError,
+    stream::{PrefetchStream, SourceSpec},
+};
 use crate::{
-    audio::{
-        stream::{PrefetchStream, SourceSpec},
-        ytdlp::{PlaybackTarget, Resolved, YtDlpService},
-    },
     config::BufferConfig,
-    error::AudioError,
+    media::{StreamInfo, Target, ytdlp::YtDlpResolver},
 };
 
 /// Small buffer songbird needs. Value is based on the default buffer size in songbird's `AsyncAdapterStream`.
 const ADAPTER_BUFFER_BYTES: usize = 64 * 1024;
 
-pub struct OpusYtSource {
+pub struct StreamSource {
     guild_id: Option<Id<GuildMarker>>,
-    target: PlaybackTarget,
+    target: Target,
+    stream: Option<StreamInfo>,
     client: Client,
-    ytdlp: YtDlpService,
+    resolver: YtDlpResolver,
     buffer_config: BufferConfig,
     /// Cancellation token, used for the complete guild.
     cancel: CancellationToken,
 }
 
-impl OpusYtSource {
+impl StreamSource {
     pub fn new(
-        target: impl Into<PlaybackTarget>,
+        target: impl Into<Target>,
+        stream: Option<StreamInfo>,
         client: Client,
-        ytdlp: YtDlpService,
+        resolver: YtDlpResolver,
         buffer_config: BufferConfig,
         cancel: CancellationToken,
     ) -> Self {
         Self {
             guild_id: None,
             target: target.into(),
+            stream,
             client,
-            ytdlp,
+            resolver,
             buffer_config,
             cancel,
         }
@@ -55,33 +58,39 @@ impl OpusYtSource {
         self
     }
 
-    async fn resolve(&mut self) -> Result<Resolved, AudioError> {
+    async fn resolve(&mut self) -> Result<StreamInfo, AudioError> {
+        // songbird reopens the source on a seek; reuse what still works.
+        if let Some(stream) = self.stream.as_ref().filter(|stream| stream.is_fresh()) {
+            return Ok(stream.clone());
+        }
+
         // Start two async tasks:
         // - One that waits for the cancellation token to be triggered.
         // - One that runs yt-dlp to resolve the target.
         // Bias is used to ensure that if the cancellation token is triggered, we return early and don't wait for yt-dlp to finish.
         // This is done at the start of the poll and when the future is polled again after being woken up, so that we don't wait for yt-dlp to finish if the cancellation token is triggered while yt-dlp is running.
-        let resolved: Resolved = tokio::select! {
+        let resolved: StreamInfo = tokio::select! {
             biased;
             () =self.cancel.cancelled() => return Err(AudioError::Cancelled),
-            result = self.ytdlp.resolve(&self.target) => result?,
+            result = self.resolver.resolve(&self.target) => result?,
         };
 
         // Later re-resolves (expired URL, seek) must reach the same upload
         // rather than search again and maybe land on a different one.
-        if let PlaybackTarget::Search(_) = self.target
+        if let Target::Search(_) = self.target
             && let Some(url) = resolved.metadata.webpage_url.clone()
         {
             self.target = url.into();
         }
 
+        self.stream = Some(resolved.clone());
         Ok(resolved)
     }
 }
 
 #[async_trait::async_trait]
 /// Everything here is async; songbird will use `create_async`.
-impl Compose for OpusYtSource {
+impl Compose for StreamSource {
     fn create(&mut self) -> Result<AudioStream<Box<dyn MediaSource>>, AudioStreamError> {
         Err(AudioStreamError::Unsupported)
     }
@@ -137,9 +146,9 @@ impl Compose for OpusYtSource {
     }
 }
 
-/// Convert an `OpusYtSource` into a songbird `Input`. This is the type songbird expects to be returned from the `Compose` trait.
-impl From<OpusYtSource> for Input {
-    fn from(source: OpusYtSource) -> Self {
+/// Convert a `StreamSource` into a songbird `Input`. This is the type songbird expects to be returned from the `Compose` trait.
+impl From<StreamSource> for Input {
+    fn from(source: StreamSource) -> Self {
         Input::Lazy(Box::new(source))
     }
 }

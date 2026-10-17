@@ -21,8 +21,8 @@ COPY crates ./crates
 # Only the headless binary
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p slap \
- && cp target/release/slap /usr/local/bin/slap
+    cargo build --release --locked -p slap-headless \
+ && cp target/release/slap-headless /usr/local/bin/slap
 
 ARG YTDLP_VERSION
 RUN set -eux; \
@@ -58,12 +58,9 @@ COPY --from=build /usr/local/bin/slap /usr/local/bin/slap
 
 RUN install -d -o bot -g bot /app/data
 ENV CACHE_PATH=/app/data/cache.redb
-ENV LOG_PATH=/app/data/debug.log
 
 USER bot
 WORKDIR /app
-
-ENV RUST_LOG=slap=info,warn
 
 STOPSIGNAL SIGINT
 

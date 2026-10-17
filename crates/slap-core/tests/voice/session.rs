@@ -1,7 +1,5 @@
 use super::*;
 
-use std::sync::atomic::AtomicBool;
-
 fn test_manager() -> Arc<SessionManager> {
     // No gateway or voice connection is opened in these lifecycle tests.
     let songbird = Songbird::twilight_from_config(
@@ -25,18 +23,18 @@ async fn stop_rejects_other_channels_and_cancels_pending_work() {
             channel_id: channel,
             cancel: cancel.clone(),
             updates: Arc::new(Notify::new()),
-            panel_message: None,
-            disconnected: Arc::new(AtomicBool::new(false)),
         },
     );
     assert!(matches!(
-        manager.control(guild, Id::new(20), "stop", 1, None).await,
+        manager
+            .control(guild, Id::new(20), None, Control::Stop)
+            .await,
         Err(SessionError::WrongChannel)
     ));
     assert!(!child.is_cancelled());
     assert!(
         manager
-            .control(guild, channel, "stop", 1, None)
+            .control(guild, channel, None, Control::Stop)
             .await
             .is_ok()
     );
@@ -51,8 +49,6 @@ async fn stop_rejects_other_channels_and_cancels_pending_work() {
             channel_id: channel,
             cancel: replacement.clone(),
             updates: Arc::new(Notify::new()),
-            panel_message: None,
-            disconnected: Arc::new(AtomicBool::new(false)),
         },
     );
     assert!(matches!(
@@ -89,7 +85,7 @@ fn playing_next_keeps_the_current_track_and_the_import_order() {
 }
 
 #[tokio::test]
-async fn panel_ownership_is_unique_and_old_buttons_cannot_stop_replacements() {
+async fn controls_from_an_ended_session_cannot_stop_its_replacement() {
     let manager = test_manager();
     let guild = Id::new(1);
     let channel = Id::new(10);
@@ -100,29 +96,18 @@ async fn panel_ownership_is_unique_and_old_buttons_cannot_stop_replacements() {
             channel_id: channel,
             cancel: cancel.clone(),
             updates: Arc::new(Notify::new()),
-            panel_message: None,
-            disconnected: Arc::new(AtomicBool::new(false)),
         },
     );
-    let (first, second) = tokio::join!(
-        manager.attach_panel(guild, &cancel, Id::new(100)),
-        manager.attach_panel(guild, &cancel, Id::new(200)),
-    );
-    assert_ne!(
-        first.is_some(),
-        second.is_some(),
-        "exactly one updater wins"
-    );
-    let message = first.or(second).unwrap().panel_message.unwrap();
+    assert!(manager.session(guild, &cancel).await.is_some());
     assert!(matches!(
         manager
-            .control(guild, Id::new(20), "stop", 1, Some(message))
+            .control(guild, Id::new(20), Some(&cancel), Control::Stop)
             .await,
         Err(SessionError::WrongChannel)
     ));
     assert!(!cancel.is_cancelled());
     manager
-        .control(guild, channel, "stop", 1, Some(message))
+        .control(guild, channel, Some(&cancel), Control::Stop)
         .await
         .unwrap();
     assert!(cancel.is_cancelled());
@@ -134,43 +119,16 @@ async fn panel_ownership_is_unique_and_old_buttons_cannot_stop_replacements() {
             channel_id: channel,
             cancel: replacement.clone(),
             updates: Arc::new(Notify::new()),
-            panel_message: None,
-            disconnected: Arc::new(AtomicBool::new(false)),
         },
     );
-    assert!(
-        manager
-            .attach_panel(guild, &cancel, Id::new(300))
-            .await
-            .is_none()
-    );
-    assert!(
-        manager
-            .attach_panel(guild, &replacement, Id::new(400))
-            .await
-            .is_some()
-    );
-    // Cleanup by the previous worker must not release the new panel.
-    manager.release_panel(guild, message);
-    assert_eq!(
-        manager.sessions.get(&guild).unwrap().panel_message,
-        Some(Id::new(400))
-    );
+    assert!(manager.session(guild, &cancel).await.is_none());
+    assert!(manager.player_snapshot(guild, &cancel).await.is_none());
     assert!(matches!(
         manager
-            .control(guild, channel, "stop", 1, Some(message))
+            .control(guild, channel, Some(&cancel), Control::Stop)
             .await,
-        Err(SessionError::StalePanel)
+        Err(SessionError::Ended)
     ));
     assert!(!replacement.is_cancelled());
-
-    // Deleting a panel permits a fresh /play response to take ownership.
-    manager.release_panel(guild, Id::new(400));
-    assert!(
-        manager
-            .attach_panel(guild, &replacement, Id::new(500))
-            .await
-            .is_some()
-    );
     manager.teardown(guild, "test cleanup").await;
 }

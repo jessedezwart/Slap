@@ -4,7 +4,7 @@
 //! `Call` they are attached to — that would re-enter a lock songbird is already
 //! holding. They post notifications and write bounded, non-blocking logs.
 
-use crate::{audio::ytdlp::TrackMetadata, error::AudioError};
+use crate::voice::queue::QueueEntry;
 use songbird::{
     events::{Event, EventContext, EventHandler, TrackEvent},
     tracks::{PlayMode, ReadyState},
@@ -14,18 +14,10 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
-use twilight_model::id::{
-    Id,
-    marker::{ChannelMarker, GuildMarker},
-};
+use twilight_model::id::{Id, marker::GuildMarker};
 
 /// Work that must happen off the driver task.
 pub enum VoiceCommand {
-    CookiesRequired {
-        guild_id: Id<GuildMarker>,
-        channel_id: Id<ChannelMarker>,
-        cancel: CancellationToken,
-    },
     Teardown {
         guild_id: Id<GuildMarker>,
         reason: String,
@@ -60,15 +52,12 @@ impl EventHandler for DriverDisconnectNotifier {
     }
 }
 
-/// Wake the panel and log transitions. The bounded tracing writer keeps console
-/// I/O off the driver; no queue locks, HTTP requests, or per-frame logs here.
+/// Wake the panel and log transitions. No queue locks, HTTP requests, or
+/// per-frame logs here.
 pub struct PlayerNotifier {
     pub guild_id: Id<GuildMarker>,
     pub event: TrackEvent,
     pub updates: Arc<Notify>,
-    pub commands: UnboundedSender<VoiceCommand>,
-    pub cancel: CancellationToken,
-    pub warning_channel_id: Id<ChannelMarker>,
 }
 
 #[async_trait::async_trait]
@@ -77,7 +66,8 @@ impl EventHandler for PlayerNotifier {
         self.updates.notify_one();
         if let EventContext::Track(states) = ctx {
             for (state, handle) in *states {
-                let metadata = handle.data::<TrackMetadata>();
+                let entry = handle.data::<QueueEntry>();
+                let metadata = &entry.metadata;
                 let span = tracing::info_span!("track", guild_id = %self.guild_id,
                     track_id = %handle.uuid(), title = ?metadata.title.as_deref().unwrap_or("Unknown track"));
                 // No awaits inside the span guard on this driver callback.
@@ -87,47 +77,17 @@ impl EventHandler for PlayerNotifier {
                         if state.playing == PlayMode::Play
                             && state.ready == ReadyState::Playable =>
                     {
-                        info!(
-                            "{}",
-                            crate::logging::track(
-                                metadata.title.as_deref().unwrap_or("Unknown track"),
-                                "now playing",
-                            )
-                        );
-                        debug!(position_secs = state.position.as_secs(), "playback started");
+                        info!(position_secs = state.position.as_secs(), "now playing");
                     }
                     TrackEvent::Pause if state.ready == ReadyState::Playable => {
-                        info!(
-                            "{}",
-                            crate::logging::track(
-                                metadata.title.as_deref().unwrap_or("Unknown track"),
-                                "paused",
-                            )
-                        );
-                        debug!(position_secs = state.position.as_secs(), "playback paused");
+                        info!(position_secs = state.position.as_secs(), "paused");
                     }
                     TrackEvent::End => {
-                        info!(
-                            "{}",
-                            crate::logging::track(
-                                metadata.title.as_deref().unwrap_or("Unknown track"),
-                                "ended",
-                            )
-                        );
-                        debug!(reason = ?state.playing, position_secs = state.position.as_secs(), "track ended");
+                        info!(reason = ?state.playing, position_secs = state.position.as_secs(), "ended");
                     }
                     TrackEvent::Error => {
                         if let PlayMode::Errored(error) = &state.playing {
-                            if requires_cookies(error) {
-                                let _ = self.commands.send(VoiceCommand::CookiesRequired {
-                                    guild_id: self.guild_id,
-                                    channel_id: self.warning_channel_id,
-                                    cancel: self.cancel.clone(),
-                                });
-                                warn!(%error, "stopping playback; bot admin must configure YouTube cookies");
-                            } else {
-                                warn!(%error, "track failed; queue will advance");
-                            }
+                            warn!(%error, "track failed; queue will advance");
                         }
                     }
                     TrackEvent::Playable => debug!("upcoming track preloaded"),
@@ -138,19 +98,3 @@ impl EventHandler for PlayerNotifier {
         None
     }
 }
-
-fn requires_cookies(error: &songbird::tracks::PlayError) -> bool {
-    let songbird::tracks::PlayError::Create(error) = error else {
-        return false;
-    };
-    let songbird::input::AudioStreamError::Fail(error) = error.as_ref() else {
-        return false;
-    };
-    error
-        .downcast_ref::<AudioError>()
-        .is_some_and(AudioError::cookies_required)
-}
-
-#[cfg(test)]
-#[path = "../../tests/voice/events.rs"]
-mod tests;

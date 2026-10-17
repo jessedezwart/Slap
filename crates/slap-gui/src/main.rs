@@ -15,6 +15,7 @@ use serde::Serialize;
 use slap_core::{Bot, Config, GuildSummary};
 use tauri::{Manager as _, RunEvent};
 use tracing::{error, info, warn};
+use tracing_subscriber::EnvFilter;
 
 enum Status {
     Starting,
@@ -52,13 +53,12 @@ fn snapshot(status: tauri::State<'_, Shared>) -> Snapshot {
 fn main() -> ExitCode {
     let dotenv = dotenvy::dotenv();
 
-    let _log_guard = match slap_core::logging::init() {
-        Ok(guard) => guard,
-        Err(error) => {
-            eprintln!("{error}");
-            return ExitCode::FAILURE;
-        }
-    };
+    // After `.env`, so a `RUST_LOG` set there applies.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
 
     if let Err(error) = dotenv
         && !error.not_found()

@@ -1,5 +1,5 @@
-pub mod cache;
-pub mod matching;
+pub mod error;
 pub mod source;
 pub mod stream;
-pub mod ytdlp;
+
+pub use error::AudioError;

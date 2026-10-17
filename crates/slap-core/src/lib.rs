@@ -7,8 +7,7 @@ mod audio;
 mod config;
 mod discord;
 mod error;
-pub mod logging;
-mod spotify;
+mod media;
 mod voice;
 
 use std::{collections::HashMap, num::NonZeroUsize, sync::Arc, thread};
@@ -21,12 +20,17 @@ use twilight_cache_inmemory::{DefaultInMemoryCache, ResourceType};
 use twilight_gateway::{Config as GatewayConfig, Intents};
 use twilight_http::Client as HttpClient;
 
+pub use crate::{config::Config, error::ConfigError};
 use crate::{
-    audio::ytdlp::YtDlpService,
-    discord::{commands, events::dispatcher, player, state::State},
+    discord::{commands, events::dispatcher, player::Panels, state::State},
+    media::{
+        catalog::Importer,
+        search_cache::SearchResultCache,
+        spotify::{SpotifyCatalog, SpotifyService},
+        ytdlp::{self, PLAYLIST_LIMIT},
+    },
     voice::session::{SessionManager, run_command_loop},
 };
-pub use crate::{config::Config, error::ConfigError};
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -105,7 +109,7 @@ impl Bot {
         let (sessions, commands_rx) = SessionManager::new(Arc::clone(&songbird));
 
         let track_cache = config.cache_path.as_deref().and_then(|path| {
-            match crate::audio::cache::SpotifyTrackCache::open(path) {
+            match SearchResultCache::open(path) {
                 Ok(cache) => {
                     info!(path = %path.display(), "track cache opened");
                     Some(Arc::new(cache))
@@ -123,6 +127,14 @@ impl Bot {
                 .build(),
         );
 
+        let (ytdlp_catalog, resolver) = ytdlp::build(config.ytdlp.clone());
+        let spotify = SpotifyService::new(config.spotify.clone(), PLAYLIST_LIMIT)?;
+        // Spotify first: yt-dlp takes any link that is left.
+        let importer = Importer::new(vec![
+            Box::new(SpotifyCatalog::new(spotify)),
+            Box::new(ytdlp_catalog),
+        ]);
+
         let state = Arc::new(State {
             player_tasks: tokio_util::task::TaskTracker::new(),
             config: Arc::clone(&config),
@@ -130,12 +142,9 @@ impl Bot {
             cache,
             songbird,
             sessions: Arc::clone(&sessions),
-            replays: dashmap::DashMap::new(),
-            ytdlp: YtDlpService::new(config.ytdlp.clone()).with_track_cache(track_cache),
-            spotify: crate::spotify::SpotifyService::new(
-                config.spotify.clone(),
-                crate::audio::ytdlp::PLAYLIST_LIMIT,
-            )?,
+            panels: Panels::default(),
+            importer,
+            resolver: resolver.with_track_cache(track_cache),
             client: reqwest::Client::builder().user_agent("slap").build()?,
             application_id,
             user_id,
@@ -143,11 +152,7 @@ impl Bot {
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let command_loop = tokio::spawn(run_command_loop(
-            Arc::clone(&sessions),
-            commands_rx,
-            Arc::clone(&http),
-        ));
+        let command_loop = tokio::spawn(run_command_loop(Arc::clone(&sessions), commands_rx));
 
         let dispatchers: Vec<_> = shards
             .into_iter()
@@ -207,19 +212,6 @@ impl Bot {
             state.player_tasks.wait(),
         )
         .await;
-
-        // Players stopped earlier in this run still offer a replay, and nothing
-        // will be here to answer it. Their buttons go with the process.
-        let offered: Vec<_> = state.replays.iter().map(|entry| *entry.key()).collect();
-        if !offered.is_empty() {
-            info!(players = offered.len(), "retiring stopped players");
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(12), async {
-                for guild_id in offered {
-                    player::revoke(&state, guild_id).await;
-                }
-            })
-            .await;
-        }
 
         command_loop.abort();
     }

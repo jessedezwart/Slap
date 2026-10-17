@@ -4,7 +4,10 @@ use songbird::input::codecs::{get_codec_registry, get_probe};
 use symphonia_core::codecs::CODEC_TYPE_OPUS;
 
 use super::*;
-use crate::config::{ResolveCacheConfig, YtDlpConfig};
+use crate::{
+    config::{BufferConfig, YtDlpConfig},
+    media::Metadata,
+};
 
 /// The whole design rests on songbird seeing an Opus track it can pass
 /// through untouched. This proves the chain end to end — yt-dlp resolve,
@@ -21,14 +24,13 @@ async fn youtube_audio_parses_as_opus() {
         .unwrap_or_else(|_| "https://www.youtube.com/watch?v=dQw4w9WgXcQ".to_owned());
 
     let url =
-        crate::audio::ytdlp::validate_url(&raw_url).expect("test URL should be a YouTube link");
+        crate::media::ytdlp::validate_url(&raw_url).expect("test URL should be a YouTube link");
 
-    let ytdlp = YtDlpService::new(YtDlpConfig {
+    let (_, resolver) = crate::media::ytdlp::build(YtDlpConfig {
         program: env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),
         timeout: Duration::from_secs(60),
         extra_args: Vec::new(),
         cookies_file: "secrets/cookies.txt".into(),
-        resolve_cache: ResolveCacheConfig::default(),
     });
 
     let buffer = crate::config::BufferConfig {
@@ -38,7 +40,14 @@ async fn youtube_audio_parses_as_opus() {
     };
 
     let cancel = CancellationToken::new();
-    let mut source = OpusYtSource::new(url, reqwest::Client::new(), ytdlp, buffer, cancel.clone());
+    let mut source = StreamSource::new(
+        url,
+        None,
+        reqwest::Client::new(),
+        resolver,
+        buffer,
+        cancel.clone(),
+    );
 
     let metadata = source
         .resolve()
@@ -76,4 +85,60 @@ async fn youtube_audio_parses_as_opus() {
     );
 
     cancel.cancel();
+}
+
+/// A source whose resolver cannot run: any attempt to resolve fails to spawn.
+fn source_without_ytdlp(stream: Option<StreamInfo>) -> StreamSource {
+    let (_, resolver) = crate::media::ytdlp::build(YtDlpConfig {
+        program: "slap-test-no-such-program".to_owned(),
+        timeout: Duration::from_secs(5),
+        extra_args: Vec::new(),
+        cookies_file: "secrets/cookies.txt".into(),
+    });
+    let buffer = BufferConfig {
+        target: Duration::from_millis(5_000),
+        prefill_ratio: 0.5,
+        assumed_bitrate_bps: 160_000,
+    };
+    let url: url::Url = "https://www.youtube.com/watch?v=song".parse().unwrap();
+    StreamSource::new(
+        url,
+        stream,
+        reqwest::Client::new(),
+        resolver,
+        buffer,
+        CancellationToken::new(),
+    )
+}
+
+fn listed_stream(expires_at: Option<std::time::SystemTime>) -> StreamInfo {
+    StreamInfo {
+        media_url: "https://cdn/song".to_owned(),
+        headers: reqwest::header::HeaderMap::new(),
+        content_length: None,
+        bitrate_bps: None,
+        expires_at,
+        metadata: Metadata::default(),
+    }
+}
+
+#[tokio::test]
+async fn a_listed_stream_plays_without_the_resolver() {
+    let mut source = source_without_ytdlp(Some(listed_stream(None)));
+
+    let stream = source.resolve().await.expect("the listed stream is used");
+    assert_eq!(stream.media_url, "https://cdn/song");
+
+    // Reopening the source (a seek) reuses it while it still works.
+    let again = source.resolve().await.expect("the stream is kept");
+    assert_eq!(again.media_url, "https://cdn/song");
+}
+
+#[tokio::test]
+async fn an_expired_listed_stream_is_resolved_again() {
+    let expired = std::time::SystemTime::now() - Duration::from_secs(60);
+    let mut source = source_without_ytdlp(Some(listed_stream(Some(expired))));
+
+    // The resolver was asked, and it cannot run here.
+    assert!(source.resolve().await.is_err());
 }
