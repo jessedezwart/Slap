@@ -16,11 +16,12 @@ RUN apt-get update \
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
-COPY src ./src
+COPY crates ./crates
 
+# Only the headless binary
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked \
+    cargo build --release --locked -p slap \
  && cp target/release/slap /usr/local/bin/slap
 
 ARG YTDLP_VERSION

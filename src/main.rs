@@ -1,75 +1,47 @@
+//! A Discord music bot that streams YouTube's Opus audio straight through to
+//! Discord: yt-dlp resolves the link, we fetch the WebM/Opus bytes ourselves,
+//! and songbird passes the Opus packets to the voice socket without ever
+//! decoding or re-encoding them.
+
 mod audio;
 mod config;
 mod discord;
 mod error;
-mod logging;
-mod spotify;
 mod voice;
 
-use std::{
-    collections::HashMap, fs::File, num::NonZeroUsize, process::ExitCode, sync::Arc, thread,
-};
+use std::{collections::HashMap, num::NonZeroUsize, process::ExitCode, sync::Arc, thread};
 
 use songbird::{Config as SongbirdConfig, Songbird, shards::TwilightMap};
-use tokio::{signal, sync::watch, task::JoinHandle};
-use tracing::{Level, error, info, warn};
+use tokio::{signal, sync::watch};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt::writer::MakeWriterExt as _;
 use twilight_cache_inmemory::{DefaultInMemoryCache, ResourceType};
 use twilight_gateway::{Config as GatewayConfig, Intents};
 use twilight_http::Client as HttpClient;
 
 use crate::{
-    audio::ytdlp::YtDlpService,
+    audio::ytdlp::YtDlp,
     config::Config,
-    discord::{commands, events::dispatcher, player, state::State},
+    discord::{commands, events::dispatcher, state::State},
     voice::session::{SessionManager, run_command_loop},
 };
 
+/// We only need to see guilds and who is in which voice channel. Nothing here
+/// is privileged, so the bot works without any gateway intent approval.
 const INTENTS: Intents = Intents::GUILDS.union(Intents::GUILD_VOICE_STATES);
 
 fn main() -> ExitCode {
+    // Before the subscriber is built, so a `RUST_LOG` set in `.env` still
+    // applies. Existing environment variables win over the file, which keeps
+    // `DISCORD_TOKEN=... cargo run` working with a stale `.env` on disk.
     let dotenv = dotenvy::dotenv();
 
-    // Start each process with a fresh operational log. `File::create` both
-    // creates the file when absent and truncates the previous run when present.
-    let log_path = std::env::var("LOG_PATH")
-        .ok()
-        .filter(|path| !path.trim().is_empty())
-        .unwrap_or_else(|| "debug.log".to_owned());
-    let log_file = match File::create(&log_path) {
-        Ok(file) => file,
-        Err(error) => {
-            eprintln!("could not create {log_path}: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    // A slow terminal/container log sink must not block the audio driver or
-    // Tokio workers. Bound memory and drop excess logs under sustained pressure.
-    // Keep the guard alive through runtime shutdown to flush remaining lines.
-    let (log_writer, _log_guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
-        .buffered_lines_limit(1024)
-        .lossy(true)
-        .thread_name("log-writer")
-        .finish(log_file);
-    let (stdout_writer, _stdout_guard) =
-        tracing_appender::non_blocking::NonBlockingBuilder::default()
-            .buffered_lines_limit(1024)
-            .lossy(true)
-            .thread_name("stdout-log-writer")
-            .finish(std::io::stdout());
     tracing_subscriber::fmt()
-        .with_writer(
-            stdout_writer
-                .with_max_level(Level::INFO)
-                .and(log_writer.with_max_level(Level::DEBUG)),
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("rust_music_bot=info,warn")),
         )
-        .event_format(crate::logging::HumanEvent)
-        .with_env_filter(EnvFilter::new("slap=debug,warn"))
         .init();
-
-    info!("starting...");
 
     match dotenv {
         Ok(path) => info!(path = %path.display(), "loaded .env"),
@@ -116,27 +88,9 @@ fn main() -> ExitCode {
     }
 }
 
-/// Everything `startup` built that `shutdown` needs to take down again.
-struct Running {
-    state: Arc<State>,
-    shutdown_tx: watch::Sender<bool>,
-    dispatchers: Vec<JoinHandle<()>>,
-    command_loop: JoinHandle<()>,
-}
-
 async fn run(config: Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let running = startup(config).await?;
-    info!("ready");
-
-    signal::ctrl_c().await?;
-    info!("shutting down");
-
-    shutdown(running).await;
-
-    Ok(())
-}
-
-async fn startup(config: Config) -> Result<Running, Box<dyn std::error::Error + Send + Sync>> {
+    // Installed explicitly so the choice of provider does not depend on which
+    // crate in the graph happened to enable which feature.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let config = Arc::new(config);
@@ -167,81 +121,45 @@ async fn startup(config: Config) -> Result<Running, Box<dyn std::error::Error + 
     let songbird = Arc::new(Songbird::twilight_from_config(
         Arc::new(TwilightMap::new(senders)),
         user_id,
+        // Two tracks: the one playing plus the one the queue preloads ahead of
+        // it. Beyond that songbird reallocates, which we would rather avoid on
+        // the audio thread.
         SongbirdConfig::default().preallocated_tracks(2),
     ));
 
     let (sessions, commands_rx) = SessionManager::new(Arc::clone(&songbird));
 
-    let track_cache = config.cache_path.as_deref().and_then(|path| {
-        match crate::audio::cache::SpotifyTrackCache::open(path) {
-            Ok(cache) => {
-                info!(path = %path.display(), "track cache opened");
-                Some(Arc::new(cache))
-            }
-            Err(error) => {
-                warn!(path = %path.display(), %error, "could not open track cache; continuing without it");
-                None
-            }
-        }
-    });
-
     let cache = Arc::new(
         DefaultInMemoryCache::builder()
-            .resource_types(ResourceType::GUILD | ResourceType::VOICE_STATE)
+            .resource_types(ResourceType::VOICE_STATE)
             .build(),
     );
 
     let state = Arc::new(State {
-        player_tasks: tokio_util::task::TaskTracker::new(),
         config: Arc::clone(&config),
         http: Arc::clone(&http),
         cache,
         songbird,
         sessions: Arc::clone(&sessions),
-        replays: dashmap::DashMap::new(),
-        ytdlp: YtDlpService::new(config.ytdlp.clone()).with_track_cache(track_cache),
-        spotify: crate::spotify::SpotifyService::new(
-            config.spotify.clone(),
-            crate::audio::ytdlp::PLAYLIST_LIMIT,
-        )?,
-        client: reqwest::Client::builder().user_agent("slap").build()?,
+        ytdlp: YtDlp::new(config.ytdlp.clone()),
+        client: reqwest::Client::builder()
+            .user_agent("rust-music-bot")
+            .build()?,
         application_id,
         user_id,
     });
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let command_loop = tokio::spawn(run_command_loop(
-        Arc::clone(&sessions),
-        commands_rx,
-        Arc::clone(&http),
-    ));
+    let command_loop = tokio::spawn(run_command_loop(Arc::clone(&sessions), commands_rx));
 
     let dispatchers: Vec<_> = shards
         .into_iter()
         .map(|shard| tokio::spawn(dispatcher(Arc::clone(&state), shard, shutdown_rx.clone())))
         .collect();
 
-    Ok(Running {
-        state,
-        shutdown_tx,
-        dispatchers,
-        command_loop,
-    })
-}
-
-/// Leave every voice channel, stop the dispatchers and let the players clean up.
-async fn shutdown(running: Running) {
-    let Running {
-        state,
-        shutdown_tx,
-        dispatchers,
-        command_loop,
-    } = running;
-    info!("leaving voice channels");
-    for guild_id in state.sessions.active_guilds() {
-        state.sessions.teardown(guild_id, "shutdown").await;
-    }
+    signal::ctrl_c().await?;
+    info!("shutting down");
 
     let _ = shutdown_tx.send(true);
 
@@ -249,27 +167,13 @@ async fn shutdown(running: Running) {
         let _ = dispatcher.await;
     }
 
-    state.player_tasks.close();
-    // Let cancelled players disable their controls; a slow Discord request
-    // must not hold shutdown indefinitely.
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(12),
-        state.player_tasks.wait(),
-    )
-    .await;
-
-    // Players stopped earlier in this run still offer a replay, and nothing
-    // will be here to answer it. Their buttons go with the process.
-    let offered: Vec<_> = state.replays.iter().map(|entry| *entry.key()).collect();
-    if !offered.is_empty() {
-        info!(players = offered.len(), "retiring stopped players");
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(12), async {
-            for guild_id in offered {
-                player::revoke(&state, guild_id).await;
-            }
-        })
-        .await;
+    // Tear every guild down explicitly so children processes and sockets go
+    // away rather than waiting on process exit.
+    for guild_id in state.sessions.active_guilds() {
+        state.sessions.teardown(guild_id, "shutdown").await;
     }
 
     command_loop.abort();
+
+    Ok(())
 }

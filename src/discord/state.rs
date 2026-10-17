@@ -2,22 +2,17 @@
 
 use std::sync::Arc;
 
-use dashmap::DashMap;
 use songbird::Songbird;
 use twilight_cache_inmemory::DefaultInMemoryCache;
 use twilight_http::Client as HttpClient;
 use twilight_model::id::{
     Id,
-    marker::{ApplicationMarker, GuildMarker, UserMarker},
+    marker::{ApplicationMarker, UserMarker},
 };
 
-use crate::{
-    audio::ytdlp::YtDlpService, config::Config, discord::player::Offer,
-    voice::session::SessionManager,
-};
+use crate::{audio::ytdlp::YtDlp, config::Config, voice::session::SessionManager};
 
 pub struct State {
-    pub player_tasks: tokio_util::task::TaskTracker,
     pub config: Arc<Config>,
     pub http: Arc<HttpClient>,
     /// Only voice states are cached; that is all we need to find the caller's
@@ -25,10 +20,7 @@ pub struct State {
     pub cache: Arc<DefaultInMemoryCache>,
     pub songbird: Arc<Songbird>,
     pub sessions: Arc<SessionManager>,
-    /// The stopped player each guild may still replay, at most one per guild.
-    pub replays: DashMap<Id<GuildMarker>, Offer>,
-    pub ytdlp: YtDlpService,
-    pub spotify: crate::spotify::SpotifyService,
+    pub ytdlp: YtDlp,
     /// Shared connection pool for every audio fetch.
     pub client: reqwest::Client,
     pub application_id: Id<ApplicationMarker>,

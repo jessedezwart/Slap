@@ -3,19 +3,70 @@
 //! `INFO` is intended for people reading `debug.log`; structured spans and
 //! event fields remain available at `DEBUG` and `TRACE` for diagnosis.
 
-use std::fmt;
+use std::{fmt, fs::File};
 
 use chrono::{Local, Offset as _};
 use tracing::{
-    Event, Subscriber,
+    Event, Level, Subscriber,
     field::{Field, Visit},
 };
+use tracing_appender::non_blocking::{NonBlockingBuilder, WorkerGuard};
 use tracing_subscriber::{
+    EnvFilter,
+    fmt::writer::MakeWriterExt as _,
     fmt::{FmtContext, FormatEvent, FormatFields, FormattedFields, format::Writer},
     registry::LookupSpan,
 };
 
 pub struct HumanEvent;
+
+/// Keeps the background log writers alive; drop it last to flush them.
+pub struct LogGuard {
+    _file: WorkerGuard,
+    _stdout: WorkerGuard,
+}
+
+/// Log `INFO` to stdout and `DEBUG` to a fresh `LOG_PATH` (`debug.log` by default).
+pub fn init() -> Result<LogGuard, String> {
+    let log_path = std::env::var("LOG_PATH")
+        .ok()
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or_else(|| "debug.log".to_owned());
+    // Start each process with a fresh operational log. `File::create` both
+    // creates the file when absent and truncates the previous run when present.
+    let log_file =
+        File::create(&log_path).map_err(|error| format!("could not create {log_path}: {error}"))?;
+
+    // A slow terminal/container log sink must not block the audio driver or
+    // Tokio workers. Bound memory and drop excess logs under sustained pressure.
+    // Keep the guard alive through runtime shutdown to flush remaining lines.
+    let (log_writer, file_guard) = NonBlockingBuilder::default()
+        .buffered_lines_limit(1024)
+        .lossy(true)
+        .thread_name("log-writer")
+        .finish(log_file);
+    let (stdout_writer, stdout_guard) = NonBlockingBuilder::default()
+        .buffered_lines_limit(1024)
+        .lossy(true)
+        .thread_name("stdout-log-writer")
+        .finish(std::io::stdout());
+    tracing_subscriber::fmt()
+        .with_writer(
+            stdout_writer
+                .with_max_level(Level::INFO)
+                .and(log_writer.with_max_level(Level::DEBUG)),
+        )
+        .event_format(HumanEvent)
+        .with_env_filter(EnvFilter::new(
+            "slap=debug,slap_core=debug,slap_gui=debug,warn",
+        ))
+        .init();
+
+    Ok(LogGuard {
+        _file: file_guard,
+        _stdout: stdout_guard,
+    })
+}
 
 /// A coloured, compact line for a command issued in a guild.
 pub fn interaction(guild: &str, player: &str, track: Option<&str>, action: &str) -> String {

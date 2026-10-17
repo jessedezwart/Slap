@@ -1,8 +1,6 @@
 //! Runtime configuration, read once from the environment at start-up.
 
-use std::{env, fmt::Display, num::ParseIntError, path::PathBuf, str::FromStr, time::Duration};
-
-use tracing::warn;
+use std::{env, fmt::Display, num::ParseIntError, str::FromStr, time::Duration};
 
 use crate::error::ConfigError;
 
@@ -11,83 +9,13 @@ const MIN_BUFFER_BYTES: usize = 64 * 1024;
 /// Upper bound, so a silly `BUFFER_MS` cannot exhaust memory across many guilds.
 const MAX_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
+#[derive(Debug, Clone)]
 pub struct Config {
     pub token: String,
     /// Tokio worker threads, or `None` for one per available core.
     pub worker_threads: Option<usize>,
     pub ytdlp: YtDlpConfig,
-    pub spotify: Option<SpotifyConfig>,
     pub buffer: BufferConfig,
-    /// Where the resolved-track cache lives. `CACHE_PATH=` disables it.
-    pub cache_path: Option<PathBuf>,
-}
-
-/// In-memory reuse of yt-dlp resolves, shared by every guild.
-///
-/// This one has no off switch. A listing already resolves a single-track URL,
-/// and the cache is how that resolve reaches playback; turning it off would
-/// only buy a second yt-dlp run for the same track.
-#[derive(Debug, Clone, Copy)]
-pub struct ResolveCacheConfig {
-    /// How many resolves to keep, never below [`MIN_RESOLVE_CACHE_ENTRIES`].
-    pub entries: u64,
-    /// Ceiling on how long one is reused. A media URL that carries its own
-    /// expiry is dropped before this.
-    pub max_ttl: Duration,
-}
-
-const DEFAULT_RESOLVE_CACHE_ENTRIES: u64 = 512;
-const DEFAULT_RESOLVE_CACHE_TTL_MS: u64 = 600_000;
-
-/// Floor under `RESOLVE_CACHE_ENTRIES`, low enough to be no real memory and
-/// high enough that an import cannot evict its own tracks before they play.
-const MIN_RESOLVE_CACHE_ENTRIES: u64 = 32;
-
-impl Default for ResolveCacheConfig {
-    fn default() -> Self {
-        Self {
-            entries: DEFAULT_RESOLVE_CACHE_ENTRIES,
-            max_ttl: Duration::from_millis(DEFAULT_RESOLVE_CACHE_TTL_MS),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct SpotifyConfig {
-    pub client_id: String,
-    pub client_secret: String,
-    /// Optional. Client credentials can read a public playlist, but only a
-    /// user token can page past its first 100 tracks.
-    pub refresh_token: Option<String>,
-}
-
-impl std::fmt::Debug for SpotifyConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("SpotifyConfig { credentials: [redacted] }")
-    }
-}
-
-impl SpotifyConfig {
-    fn from_env() -> Result<Option<Self>, ConfigError> {
-        let read = |name| env::var(name).unwrap_or_default().trim().to_owned();
-        let refresh_token = read("SPOTIFY_REFRESH_TOKEN");
-        let names = ["SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET"];
-        let values = names.map(read);
-        if values.iter().all(String::is_empty) && refresh_token.is_empty() {
-            return Ok(None);
-        }
-        for (name, value) in names.iter().zip(&values) {
-            if value.is_empty() {
-                return Err(ConfigError::Missing(name));
-            }
-        }
-        let [client_id, client_secret] = values;
-        Ok(Some(Self {
-            client_id,
-            client_secret,
-            refresh_token: Some(refresh_token).filter(|t| !t.is_empty()),
-        }))
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -98,12 +26,10 @@ pub struct YtDlpConfig {
     /// Extra argv entries, e.g. `--cookies-from-browser firefox`. Split on
     /// whitespace; still argv, still no shell.
     pub extra_args: Vec<String>,
-    pub cookies_file: PathBuf,
-    pub resolve_cache: ResolveCacheConfig,
 }
 
 /// How much audio we hold ahead of songbird's mixer.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct BufferConfig {
     /// Target depth, in playback time.
     pub target: Duration,
@@ -156,48 +82,17 @@ impl Config {
             return Err(ConfigError::Missing("DISCORD_TOKEN"));
         }
 
-        let cookies_file = match env::var("YTDLP_COOKIES_FILE") {
-            Ok(path) if !path.trim().is_empty() => PathBuf::from(path.trim()),
-            _ => PathBuf::from("secrets/cookies.txt"),
-        };
-        let extra_args: Vec<String> = env::var("YTDLP_EXTRA_ARGS")
-            .unwrap_or_default()
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect();
-
-        if !cookies_file.exists() && !extra_args.iter().any(|arg| arg.contains("cookies")) {
-            warn!(
-                path = %cookies_file.display(),
-                "no YouTube cookies file found; \
-                 yt-dlp requests may be rate-limited or rejected as bot traffic"
-            );
-        }
-
         Ok(Self {
             token,
             worker_threads: parse_worker_threads()?,
-            spotify: SpotifyConfig::from_env()?,
-            cache_path: match env::var("CACHE_PATH") {
-                Ok(path) if path.trim().is_empty() => None,
-                Ok(path) => Some(PathBuf::from(path.trim())),
-                Err(_) => Some(PathBuf::from("cache.redb")),
-            },
             ytdlp: YtDlpConfig {
                 program: env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),
                 timeout: Duration::from_millis(parse_env("YTDLP_TIMEOUT_MS", 15_000u64)?),
-                extra_args,
-                cookies_file,
-                resolve_cache: ResolveCacheConfig {
-                    // A value under the floor is raised to it rather than
-                    // rejected: the cache is not something to turn off.
-                    entries: parse_env("RESOLVE_CACHE_ENTRIES", DEFAULT_RESOLVE_CACHE_ENTRIES)?
-                        .max(MIN_RESOLVE_CACHE_ENTRIES),
-                    max_ttl: Duration::from_millis(parse_env(
-                        "RESOLVE_CACHE_TTL_MS",
-                        DEFAULT_RESOLVE_CACHE_TTL_MS,
-                    )?),
-                },
+                extra_args: env::var("YTDLP_EXTRA_ARGS")
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .map(str::to_owned)
+                    .collect(),
             },
             buffer: BufferConfig {
                 target: Duration::from_millis(parse_env("BUFFER_MS", 5_000u64)?),

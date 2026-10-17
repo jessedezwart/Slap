@@ -1,109 +1,109 @@
-//! The audio source that songbird uses.
+//! The lazy audio source handed to songbird.
+//!
+//! This is a [`Compose`], so nothing happens until songbird actually needs the
+//! track: a queued song spawns no yt-dlp process and opens no socket until the
+//! queue's preloader readies it, a few seconds before it is due. Deep queues
+//! therefore cost nothing, and a resolved googlevideo URL cannot go stale while
+//! it waits its turn.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use reqwest::Client;
-use songbird::input::{AsyncAdapterStream, AudioStream, AudioStreamError, Compose, Input};
+use songbird::input::{
+    AsyncAdapterStream, AudioStream, AudioStreamError, AuxMetadata, Compose, Input,
+};
 use symphonia_core::io::MediaSource;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
-use twilight_model::id::{Id, marker::GuildMarker};
+use url::Url;
 
 use crate::{
     audio::{
         stream::{PrefetchStream, SourceSpec},
-        ytdlp::{PlaybackTarget, Resolved, YtDlpService},
+        ytdlp::{Resolved, TrackMetadata, YtDlp},
     },
     config::BufferConfig,
     error::AudioError,
 };
 
-/// Small buffer songbird needs. Value is based on the default buffer size in songbird's `AsyncAdapterStream`.
+/// Ring buffer songbird uses to bridge our async stream to symphonia's
+/// synchronous reads. Small on purpose: the deep buffer is ours.
 const ADAPTER_BUFFER_BYTES: usize = 64 * 1024;
 
+/// How long a resolved media URL is reused before yt-dlp is run again.
+const RESOLVE_TTL: Duration = Duration::from_secs(60);
+
 pub struct OpusYtSource {
-    guild_id: Option<Id<GuildMarker>>,
-    target: PlaybackTarget,
+    url: Url,
     client: Client,
-    ytdlp: YtDlpService,
-    buffer_config: BufferConfig,
-    /// Cancellation token, used for the complete guild.
+    ytdlp: YtDlp,
+    buffer: BufferConfig,
+    /// The guild's token. Cancelling it tears down every stream this source
+    /// has produced.
     cancel: CancellationToken,
+    cached: Option<(Resolved, Instant)>,
 }
 
 impl OpusYtSource {
     pub fn new(
-        target: impl Into<PlaybackTarget>,
+        url: Url,
         client: Client,
-        ytdlp: YtDlpService,
-        buffer_config: BufferConfig,
+        ytdlp: YtDlp,
+        buffer: BufferConfig,
         cancel: CancellationToken,
     ) -> Self {
         Self {
-            guild_id: None,
-            target: target.into(),
+            url,
             client,
             ytdlp,
-            buffer_config,
+            buffer,
             cancel,
+            cached: None,
         }
     }
 
-    /// Set the guild ID for this source.
-    pub fn in_guild(mut self, guild_id: Id<GuildMarker>) -> Self {
-        self.guild_id = Some(guild_id);
-        self
-    }
-
+    /// Resolve the video, reusing a recent result if there is one.
     async fn resolve(&mut self) -> Result<Resolved, AudioError> {
-        // Start two async tasks:
-        // - One that waits for the cancellation token to be triggered.
-        // - One that runs yt-dlp to resolve the target.
-        // Bias is used to ensure that if the cancellation token is triggered, we return early and don't wait for yt-dlp to finish.
-        // This is done at the start of the poll and when the future is polled again after being woken up, so that we don't wait for yt-dlp to finish if the cancellation token is triggered while yt-dlp is running.
-        let resolved: Resolved = tokio::select! {
-            biased;
-            () =self.cancel.cancelled() => return Err(AudioError::Cancelled),
-            result = self.ytdlp.resolve(&self.target) => result?,
+        if let Some((resolved, at)) = &self.cached
+            && at.elapsed() < RESOLVE_TTL
+        {
+            return Ok(resolved.clone());
+        }
+
+        if self.cancel.is_cancelled() {
+            return Err(AudioError::Cancelled);
+        }
+
+        let resolved = tokio::select! {
+            () = self.cancel.cancelled() => return Err(AudioError::Cancelled),
+            result = self.ytdlp.resolve(&self.url) => result?,
         };
 
-        // Later re-resolves (expired URL, seek) must reach the same upload
-        // rather than search again and maybe land on a different one.
-        if let PlaybackTarget::Search(_) = self.target
-            && let Some(url) = resolved.metadata.webpage_url.clone()
-        {
-            self.target = url.into();
-        }
+        self.cached = Some((resolved.clone(), Instant::now()));
 
         Ok(resolved)
+    }
+
+    /// Fetch just the metadata needed to answer the user's `/play`.
+    pub async fn metadata(&mut self) -> Result<TrackMetadata, AudioError> {
+        self.resolve().await.map(|resolved| resolved.metadata)
     }
 }
 
 #[async_trait::async_trait]
-/// Everything here is async; songbird will use `create_async`.
 impl Compose for OpusYtSource {
     fn create(&mut self) -> Result<AudioStream<Box<dyn MediaSource>>, AudioStreamError> {
+        // Everything here is async; songbird will use `create_async`.
         Err(AudioStreamError::Unsupported)
     }
 
-    // Don't log all arguments
-    #[tracing::instrument(skip_all, fields(guild_id = self.guild_id.map(|id| id.get()), title = tracing::field::Empty))]
     async fn create_async(
         &mut self,
     ) -> Result<AudioStream<Box<dyn MediaSource>>, AudioStreamError> {
         let resolved = self.resolve().await.map_err(fail)?;
-        tracing::Span::current().record(
-            "title",
-            resolved
-                .metadata
-                .title
-                .as_deref()
-                .unwrap_or("Unknown track"),
-        );
 
-        let started = Instant::now();
         debug!(
-            title = ?resolved.metadata.title,
+            title = resolved.metadata.title.as_deref().unwrap_or("?"),
             bitrate_bps = resolved.bitrate_bps,
             "opening audio stream"
         );
@@ -116,13 +116,12 @@ impl Compose for OpusYtSource {
             bitrate_bps: resolved.bitrate_bps,
         };
 
-        let mut stream = PrefetchStream::open(spec, self.buffer_config, &self.cancel, 0)
+        let mut stream = PrefetchStream::open(spec, self.buffer, &self.cancel, 0)
             .await
             .map_err(fail)?;
 
         // Never hand songbird a track whose buffer is still empty.
         stream.prefill().await.map_err(fail)?;
-        debug!(title = ?resolved.metadata.title, elapsed_ms = started.elapsed().as_millis(), "audio buffer ready");
 
         Ok(AudioStream {
             input: Box::new(AsyncAdapterStream::new(
@@ -135,9 +134,24 @@ impl Compose for OpusYtSource {
     fn should_create_async(&self) -> bool {
         true
     }
+
+    async fn aux_metadata(&mut self) -> Result<AuxMetadata, AudioStreamError> {
+        let resolved = self.resolve().await.map_err(fail)?;
+        let metadata = resolved.metadata;
+
+        Ok(AuxMetadata {
+            title: metadata.title.clone(),
+            track: metadata.title,
+            artist: metadata.uploader.clone(),
+            channel: metadata.uploader,
+            duration: metadata.duration,
+            source_url: metadata.webpage_url,
+            thumbnail: metadata.thumbnail,
+            ..AuxMetadata::default()
+        })
+    }
 }
 
-/// Convert an `OpusYtSource` into a songbird `Input`. This is the type songbird expects to be returned from the `Compose` trait.
 impl From<OpusYtSource> for Input {
     fn from(source: OpusYtSource) -> Self {
         Input::Lazy(Box::new(source))
@@ -149,5 +163,78 @@ fn fail(error: AudioError) -> AudioStreamError {
 }
 
 #[cfg(test)]
-#[path = "../../tests/audio/source.rs"]
-mod tests;
+mod tests {
+    use std::env;
+
+    use songbird::input::codecs::{get_codec_registry, get_probe};
+    use symphonia_core::codecs::CODEC_TYPE_OPUS;
+
+    use super::*;
+    use crate::config::YtDlpConfig;
+
+    /// The whole design rests on songbird seeing an Opus track it can pass
+    /// through untouched. This proves the chain end to end — yt-dlp resolve,
+    /// ranged fetch, prefetch buffer, async adapter, WebM demux — and asserts
+    /// the codec songbird ends up with, all without a Discord connection.
+    ///
+    /// Needs yt-dlp on PATH and network access, so it is opt-in:
+    ///   cargo test -- --ignored --nocapture
+    /// Override the video with `YTDLP_TEST_URL`.
+    #[tokio::test]
+    #[ignore = "requires yt-dlp and network access"]
+    async fn youtube_audio_parses_as_opus() {
+        let raw_url = env::var("YTDLP_TEST_URL")
+            .unwrap_or_else(|_| "https://www.youtube.com/watch?v=dQw4w9WgXcQ".to_owned());
+
+        let url = YtDlp::validate_url(&raw_url).expect("test URL should be a YouTube link");
+
+        let ytdlp = YtDlp::new(YtDlpConfig {
+            program: env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),
+            timeout: Duration::from_secs(60),
+            extra_args: Vec::new(),
+        });
+
+        let buffer = crate::config::BufferConfig {
+            target: Duration::from_millis(5_000),
+            prefill_ratio: 0.5,
+            assumed_bitrate_bps: 160_000,
+        };
+
+        let cancel = CancellationToken::new();
+        let mut source =
+            OpusYtSource::new(url, reqwest::Client::new(), ytdlp, buffer, cancel.clone());
+
+        let metadata = source.metadata().await.expect("yt-dlp should resolve");
+        println!("resolved: {:?}", metadata.title);
+
+        let input: Input = source.into();
+        let input = input
+            .make_playable_async(get_codec_registry(), get_probe())
+            .await
+            .expect("input should parse");
+
+        let Input::Live(live, _) = input else {
+            panic!("input should be live after make_playable_async");
+        };
+
+        let parsed = live.parsed().expect("stream should be parsed");
+        let track = parsed
+            .format
+            .default_track()
+            .or_else(|| parsed.format.tracks().first())
+            .expect("container should expose a track");
+
+        println!(
+            "container track codec: {:?}, rate: {:?}",
+            track.codec_params.codec, track.codec_params.sample_rate
+        );
+
+        // This is the passthrough precondition: Opus in, Opus out, no transcode.
+        assert_eq!(
+            track.codec_params.codec, CODEC_TYPE_OPUS,
+            "songbird must see an Opus track or it would decode and re-encode"
+        );
+
+        cancel.cancel();
+    }
+}

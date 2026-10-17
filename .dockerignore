@@ -9,4 +9,5 @@ target/
 Dockerfile
 .dockerignore
 README.md
-debug.log
+debug.logcrates/slap-gui/ui/
+crates/slap-gui/icons/

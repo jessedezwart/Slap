@@ -43,7 +43,7 @@ use tokio::{
     time::{self, Instant},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, Level, debug, enabled, warn};
+use tracing::{Level, debug, enabled, warn};
 
 use crate::{config::BufferConfig, error::AudioError};
 
@@ -67,7 +67,7 @@ const STALL_LOG_THRESHOLD: Duration = Duration::from_millis(50);
 const DEPTH_LOG_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Everything needed to open — or reopen — the byte stream.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct SourceSpec {
     pub client: Client,
     pub url: String,
@@ -100,7 +100,6 @@ pub struct PrefetchStream {
     len: Option<u64>,
     /// Set when a read finds the queue empty: the mixer is being starved.
     starved_since: Option<Instant>,
-    span: tracing::Span,
 }
 
 impl PrefetchStream {
@@ -109,7 +108,7 @@ impl PrefetchStream {
     /// The initial request happens here rather than in the background task so
     /// that a dead URL surfaces as an error before songbird is handed a track.
     pub async fn open(
-        mut spec: SourceSpec,
+        spec: SourceSpec,
         buffer: BufferConfig,
         parent: &CancellationToken,
         offset: u64,
@@ -124,13 +123,15 @@ impl PrefetchStream {
 
         // With a *windowed* request `Content-Length` describes the window, not
         // the file, so the total has to come from `Content-Range` or from
-        // yt-dlp. The bare `Content-Length` is only meaningful
+        // yt-dlp. The bare `Content-Length` is only meaningful as a last resort,
         // when the server ignored the range and sent the whole body.
-        let len = response_total(&response).or(spec.content_length);
-        // The pump and subsequent ranges must use the same authoritative size.
-        debug!(metadata_bytes = ?spec.content_length, http_bytes = ?response_total(&response),
-            effective_bytes = ?len, "selected audio file length");
-        spec.content_length = len;
+        let len = total_from_content_range(response.headers())
+            .or(spec.content_length)
+            .or_else(|| {
+                response
+                    .content_length()
+                    .map(|remaining| offset.saturating_add(remaining))
+            });
 
         let budget = Arc::new(Semaphore::new(budget_bytes));
         let ready = Arc::new(Notify::new());
@@ -140,34 +141,28 @@ impl PrefetchStream {
         let channel_capacity = (budget_bytes / MAX_CHUNK_BYTES).max(4) + 4;
         let (tx, rx) = mpsc::channel(channel_capacity);
 
-        let task = tokio::spawn(
-            pump(
-                spec.clone(),
-                response,
-                offset,
-                requested,
-                window,
-                tx,
-                Arc::clone(&budget),
-                prefill_bytes,
-                Arc::clone(&ready),
-                cancel.clone(),
-            )
-            .in_current_span(),
-        );
+        let task = tokio::spawn(pump(
+            spec.clone(),
+            response,
+            offset,
+            requested,
+            window,
+            tx,
+            Arc::clone(&budget),
+            prefill_bytes,
+            Arc::clone(&ready),
+            cancel.clone(),
+        ));
 
         // Sampling the semaphore costs an atomic load, but a task per stream is
         // not worth paying for when nobody is listening.
         if enabled!(Level::DEBUG) {
-            tokio::spawn(
-                log_depth(
-                    budget,
-                    budget_bytes,
-                    buffer.bytes_per_second(spec.bitrate_bps),
-                    cancel.clone(),
-                )
-                .in_current_span(),
-            );
+            tokio::spawn(log_depth(
+                budget,
+                budget_bytes,
+                buffer.bytes_per_second(spec.bitrate_bps),
+                cancel.clone(),
+            ));
         }
 
         debug!(
@@ -192,7 +187,6 @@ impl PrefetchStream {
             pos: offset,
             len,
             starved_since: None,
-            span: tracing::Span::current(),
         })
     }
 
@@ -311,22 +305,17 @@ impl AsyncMediaSource for PrefetchStream {
         &mut self,
         offset: u64,
     ) -> Result<Box<dyn AsyncMediaSource>, AudioStreamError> {
-        debug!(parent: &self.span, offset, expected_bytes = ?self.len, "resuming audio stream after error");
+        debug!(offset, "resuming audio stream after error");
 
         let mut stream = Self::open(self.spec.clone(), self.buffer, &self.parent, offset)
-            .instrument(self.span.clone())
             .await
-            .map_err(|error| {
-                debug!(parent: &self.span, offset, %error, "audio stream resume failed");
-                AudioStreamError::Fail(Box::new(error))
-            })?;
+            .map_err(|error| AudioStreamError::Fail(Box::new(error)))?;
 
-        stream.prefill().await.map_err(|error| {
-            debug!(parent: &self.span, offset, %error, "audio stream resume prefill failed");
-            AudioStreamError::Fail(Box::new(error))
-        })?;
+        stream
+            .prefill()
+            .await
+            .map_err(|error| AudioStreamError::Fail(Box::new(error)))?;
 
-        debug!(parent: &self.span, offset, "audio stream resumed");
         Ok(Box::new(stream))
     }
 }
@@ -338,7 +327,7 @@ impl AsyncMediaSource for PrefetchStream {
 /// after it is requested here.
 #[allow(clippy::too_many_arguments)]
 async fn pump(
-    mut spec: SourceSpec,
+    spec: SourceSpec,
     response: Response,
     offset: u64,
     requested: u64,
@@ -355,30 +344,18 @@ async fn pump(
     let mut announced = false;
 
     while let Some((response, requested)) = next.take() {
-        let started = Instant::now();
-        let partial = response.status() == StatusCode::PARTIAL_CONTENT;
-        let total = response_total(&response).or(spec.content_length);
-        if total != spec.content_length {
-            debug!(offset, previous_bytes = ?spec.content_length, effective_bytes = ?total,
-                "audio file length changed");
-        }
-        spec.content_length = total;
         let mut body = Box::pin(response.bytes_stream());
         let mut received = 0u64;
 
         let completed = loop {
             let next = tokio::select! {
-                () = cancel.cancelled() => {
-                    debug!(offset, received, buffered, reason = "cancelled", "audio download stopped");
-                    return;
-                },
+                () = cancel.cancelled() => return,
                 next = body.next() => next,
             };
 
             let mut bytes = match next {
                 Some(Ok(bytes)) => bytes,
                 Some(Err(error)) => {
-                    debug!(offset, received, requested, %error, "audio response body failed");
                     let _ = tx.send(Err(io::Error::other(error))).await;
 
                     break false;
@@ -398,10 +375,7 @@ async fn pump(
                 // once the configured buffer is full this parks until the mixer
                 // catches up.
                 let permit = tokio::select! {
-                    () = cancel.cancelled() => {
-                        debug!(offset, received, buffered, reason = "cancelled", "audio download stopped");
-                        return;
-                    },
+                    () = cancel.cancelled() => return,
                     permit = Arc::clone(&budget).acquire_many_owned(take as u32) => match permit {
                         Ok(permit) => permit,
                         Err(_) => return,
@@ -414,13 +388,7 @@ async fn pump(
                 };
 
                 if tx.send(Ok(chunk)).await.is_err() {
-                    debug!(
-                        offset,
-                        received,
-                        buffered,
-                        reason = "reader_dropped",
-                        "audio download stopped"
-                    );
+                    // Reader went away.
                     return;
                 }
 
@@ -433,65 +401,21 @@ async fn pump(
             }
         };
 
-        debug!(offset, received, requested, completed, partial,
-            expected_bytes = ?spec.content_length, elapsed_ms = started.elapsed().as_millis(),
-            "audio window finished");
         offset = offset.saturating_add(received);
 
-        let stop_reason = if !completed {
-            Some("body_error")
-        } else if !partial {
-            Some("full_response_consumed")
-        } else if spec.content_length.is_some_and(|length| offset >= length) {
-            Some("known_length_reached")
-        } else {
-            None
-        };
-        if let Some(reason) = stop_reason {
-            debug!(offset, buffered, expected_bytes = ?spec.content_length, reason, "audio download stopped");
+        if !completed || at_end(&spec, offset, received, requested) {
             break;
-        }
-        if received > 0 && received < requested {
-            debug!(offset, received, requested, expected_bytes = ?spec.content_length,
-                "short audio window; continuing download");
         }
 
-        if received == 0 {
-            warn!(offset, expected_bytes = ?spec.content_length, "audio response made no progress");
-            let _ = tx
-                .send(Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "empty partial audio response before end of file",
-                )))
-                .await;
-            break;
-        }
+        debug!(offset, "requesting next window");
 
         next = match request_window(&spec, offset, window, &cancel).await {
             Ok(next) => Some(next),
-            Err(AudioError::Cancelled) => {
-                debug!(
-                    offset,
-                    buffered,
-                    reason = "cancelled",
-                    "audio download stopped"
-                );
-                return;
-            }
-            // For an unknown total, probing past the last byte establishes EOF.
-            Err(AudioError::HttpStatus(StatusCode::RANGE_NOT_SATISFIABLE))
-                if spec.content_length.is_none() =>
-            {
-                debug!(
-                    offset,
-                    buffered,
-                    reason = "range_exhausted",
-                    "audio download stopped"
-                );
-                break;
-            }
+            Err(AudioError::Cancelled) => return,
+            // We asked past the last byte: the length we were working from was
+            // a little short, and the file is simply over.
+            Err(AudioError::HttpStatus(StatusCode::RANGE_NOT_SATISFIABLE)) => break,
             Err(error) => {
-                warn!(offset, expected_bytes = ?spec.content_length, %error, "audio download interrupted");
                 let _ = tx.send(Err(io::Error::other(error))).await;
 
                 break;
@@ -504,13 +428,12 @@ async fn pump(
     ready.notify_one();
 }
 
-/// A partial response's Content-Length is only its window size.
-fn response_total(response: &Response) -> Option<u64> {
-    if response.status() == StatusCode::PARTIAL_CONTENT {
-        total_from_content_range(response.headers())
-    } else {
-        response.content_length()
-    }
+/// Whether the window that just finished was the last one.
+///
+/// A window that came up short is the end of the file whatever any header
+/// claimed, which is also how a source of unknown length terminates.
+fn at_end(spec: &SourceSpec, offset: u64, received: u64, requested: u64) -> bool {
+    received < requested || spec.content_length.is_some_and(|length| offset >= length)
 }
 
 /// How much one request asks for.
@@ -533,8 +456,6 @@ async fn request_window(
 ) -> Result<(Response, u64), AudioError> {
     let (range, requested) = window_range(offset, spec.content_length, window);
 
-    let started = Instant::now();
-    debug!(offset, requested, %range, expected_bytes = ?spec.content_length, "requesting audio window");
     let request = spec
         .client
         .get(&spec.url)
@@ -547,12 +468,8 @@ async fn request_window(
     };
 
     // 206 when the range was served, 200 if the server ignored it and sent the
-    // whole body — the pump finishes after consuming that response.
+    // whole body — which the pump copes with, since it counts what arrives.
     let status = response.status();
-    debug!(offset, requested, %status,
-        content_range = ?response.headers().get(CONTENT_RANGE).and_then(|v| v.to_str().ok()),
-        response_bytes = ?response.content_length(), total_bytes = ?response_total(&response),
-        elapsed_ms = started.elapsed().as_millis(), "audio window response");
     if !status.is_success() {
         return Err(AudioError::HttpStatus(status));
     }
@@ -587,7 +504,7 @@ fn total_from_content_range(headers: &HeaderMap) -> Option<u64> {
         .ok()
 }
 
-/// Log how full the buffer is, so `slap=debug` shows depth over time.
+/// Log how full the buffer is, so `rust_music_bot=debug` shows depth over time.
 ///
 /// Free permits are bytes the buffer has room for, so the difference is what it
 /// is holding: everything queued plus the chunk the reader has in hand. Bytes
@@ -619,5 +536,401 @@ async fn log_depth(
 }
 
 #[cfg(test)]
-#[path = "../../tests/audio/stream.rs"]
-mod tests;
+mod tests {
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
+
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        sync::oneshot,
+    };
+
+    use super::*;
+
+    /// A body comfortably larger than the smallest buffer we will allocate, so
+    /// the reader has to cycle permits to get through it.
+    const BODY_LEN: usize = 512 * 1024;
+
+    fn test_buffer_config() -> BufferConfig {
+        BufferConfig {
+            // Clamped up to the 64 KiB floor, which is well under BODY_LEN.
+            target: Duration::from_millis(1),
+            prefill_ratio: 0.5,
+            assumed_bitrate_bps: 160_000,
+        }
+    }
+
+    /// The window the test config produces, so the fixtures track the real
+    /// sizing rather than a hard-coded constant.
+    fn test_window() -> u64 {
+        window_bytes(test_buffer_config().bytes_for(Some(160_000)))
+    }
+
+    fn body() -> Vec<u8> {
+        (0..BODY_LEN).map(|i| (i % 251) as u8).collect()
+    }
+
+    /// Serve one request: headers, then `first` bytes, then the rest once
+    /// `release` fires. Returns the address to point the stream at.
+    async fn serve(body: Vec<u8>, first: usize, release: oneshot::Receiver<()>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+
+            // Read the request head; we do not care what it says.
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while let Ok(1) = socket.read(&mut byte).await {
+                request.push(byte[0]);
+
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+
+            let head = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes 0-{}/{}\r\nConnection: close\r\n\r\n",
+                body.len(),
+                body.len() - 1,
+                body.len()
+            );
+
+            if socket.write_all(head.as_bytes()).await.is_err() {
+                return;
+            }
+
+            let split = first.min(body.len());
+
+            if socket.write_all(&body[..split]).await.is_err() {
+                return;
+            }
+            let _ = socket.flush().await;
+
+            let _ = release.await;
+
+            let _ = socket.write_all(&body[split..]).await;
+            let _ = socket.shutdown().await;
+        });
+
+        format!("http://{addr}/audio")
+    }
+
+    async fn open_stream(url: String, cancel: &CancellationToken) -> PrefetchStream {
+        let spec = SourceSpec {
+            client: Client::new(),
+            url,
+            headers: HeaderMap::new(),
+            content_length: Some(BODY_LEN as u64),
+            bitrate_bps: Some(160_000),
+        };
+
+        PrefetchStream::open(spec, test_buffer_config(), cancel, 0)
+            .await
+            .expect("stream should open")
+    }
+
+    /// Every byte arrives, in order, exactly once.
+    ///
+    /// The body is many times the buffer budget, so this only completes if
+    /// permits are released as chunks are consumed — a stuck budget would hang
+    /// here rather than return short.
+    #[tokio::test]
+    async fn streams_a_body_larger_than_the_buffer() {
+        let expected = body();
+        let (release, released) = oneshot::channel();
+        let url = serve(expected.clone(), 40 * 1024, released).await;
+
+        let cancel = CancellationToken::new();
+        let mut stream = open_stream(url, &cancel).await;
+
+        stream.prefill().await.expect("prefill");
+        let _ = release.send(());
+
+        let mut actual = Vec::new();
+        tokio::time::timeout(Duration::from_secs(30), stream.read_to_end(&mut actual))
+            .await
+            .expect("read should not stall")
+            .expect("read should succeed");
+
+        assert_eq!(actual.len(), expected.len());
+        assert_eq!(actual, expected);
+    }
+
+    /// Prefill returns once the target depth is buffered, without waiting for
+    /// the rest of the body.
+    #[tokio::test]
+    async fn prefill_returns_before_the_body_is_complete() {
+        let (release, released) = oneshot::channel();
+        // 40 KiB covers the 32 KiB prefill target for a 64 KiB budget.
+        let url = serve(body(), 40 * 1024, released).await;
+
+        let cancel = CancellationToken::new();
+        let mut stream = open_stream(url, &cancel).await;
+
+        tokio::time::timeout(Duration::from_secs(5), stream.prefill())
+            .await
+            .expect("prefill should complete without the rest of the body")
+            .expect("prefill should succeed");
+
+        let _ = release.send(());
+    }
+
+    /// Cancelling the guild token stops the fetch task.
+    #[tokio::test]
+    async fn cancelling_the_parent_token_stops_the_pump() {
+        let (release, released) = oneshot::channel();
+        let url = serve(body(), 40 * 1024, released).await;
+
+        let cancel = CancellationToken::new();
+        let mut stream = open_stream(url, &cancel).await;
+
+        stream.prefill().await.expect("prefill");
+
+        // The guild is torn down while the body is still arriving.
+        cancel.cancel();
+
+        let task = stream.task.take().expect("task handle");
+        let _ = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("pump task should finish promptly after cancellation");
+
+        assert!(stream.cancel.is_cancelled());
+
+        let _ = release.send(());
+    }
+
+    /// Dropping the stream cancels its token, so nothing outlives it.
+    #[tokio::test]
+    async fn dropping_the_stream_cancels_its_token() {
+        let (release, released) = oneshot::channel();
+        let url = serve(body(), 40 * 1024, released).await;
+
+        let cancel = CancellationToken::new();
+        let stream = open_stream(url, &cancel).await;
+        let child = stream.cancel.clone();
+
+        drop(stream);
+
+        assert!(child.is_cancelled());
+        assert!(!cancel.is_cancelled(), "parent must be left alone");
+
+        let _ = release.send(());
+    }
+
+    /// Serve ranged requests out of `body`, one connection per request, until
+    /// the test finishes. Honours the range exactly, so what the client asks
+    /// for is what it gets — and the counter makes the windowing observable.
+    async fn serve_ranges(body: Vec<u8>) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&requests);
+
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let body = body.clone();
+                let counter = Arc::clone(&counter);
+
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while let Ok(1) = socket.read(&mut byte).await {
+                        request.push(byte[0]);
+
+                        if request.ends_with(b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+
+                    let Some((start, asked)) = parse_range(&String::from_utf8_lossy(&request))
+                    else {
+                        return;
+                    };
+
+                    counter.fetch_add(1, Ordering::SeqCst);
+
+                    if start >= body.len() {
+                        let _ = socket
+                            .write_all(
+                                b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await;
+
+                        return;
+                    }
+
+                    let end = asked.min(body.len() - 1);
+                    let slice = &body[start..=end];
+
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{end}/{}\r\nConnection: close\r\n\r\n",
+                        slice.len(),
+                        body.len()
+                    );
+
+                    if socket.write_all(head.as_bytes()).await.is_err() {
+                        return;
+                    }
+
+                    let _ = socket.write_all(slice).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        (format!("http://{addr}/audio"), requests)
+    }
+
+    /// Pull the inclusive `bytes=<start>-<end>` pair out of a request head.
+    fn parse_range(request: &str) -> Option<(usize, usize)> {
+        let line = request
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("range:"))?;
+        let (start, end) = line.split('=').nth(1)?.trim().split_once('-')?;
+
+        Some((start.trim().parse().ok()?, end.trim().parse().ok()?))
+    }
+
+    /// A body longer than one window arrives whole, in order, over several
+    /// ranged requests.
+    ///
+    /// The request count is the point: a single request for the whole file is
+    /// what googlevideo paces down to playback rate, so the windowing is the
+    /// behaviour under test, not an implementation detail.
+    #[tokio::test]
+    async fn fetches_a_long_body_in_windows() {
+        let len = test_window() as usize * 2 + 1024;
+        let expected: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+        let (url, requests) = serve_ranges(expected.clone()).await;
+
+        let cancel = CancellationToken::new();
+        let spec = SourceSpec {
+            client: Client::new(),
+            url,
+            headers: HeaderMap::new(),
+            content_length: Some(len as u64),
+            bitrate_bps: Some(160_000),
+        };
+
+        let mut stream = PrefetchStream::open(spec, test_buffer_config(), &cancel, 0)
+            .await
+            .expect("stream should open");
+
+        let mut actual = Vec::new();
+        tokio::time::timeout(Duration::from_secs(60), stream.read_to_end(&mut actual))
+            .await
+            .expect("read should not stall")
+            .expect("read should succeed");
+
+        assert_eq!(actual.len(), expected.len());
+        assert_eq!(actual, expected);
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            3,
+            "two full windows plus the tail"
+        );
+    }
+
+    /// The total comes from `Content-Range`, not from the window's own
+    /// `Content-Length` — otherwise every long track would look 2 MiB long.
+    #[tokio::test]
+    async fn byte_len_reports_the_whole_file_not_the_window() {
+        let len = test_window() as usize + 4096;
+        let (url, _) = serve_ranges(vec![0u8; len]).await;
+
+        let cancel = CancellationToken::new();
+        let spec = SourceSpec {
+            client: Client::new(),
+            url,
+            headers: HeaderMap::new(),
+            // Deliberately absent, so `Content-Range` is the only source.
+            content_length: None,
+            bitrate_bps: Some(160_000),
+        };
+
+        let stream = PrefetchStream::open(spec, test_buffer_config(), &cancel, 0)
+            .await
+            .expect("stream should open");
+
+        assert_eq!(stream.byte_len().await, Some(len as u64));
+    }
+
+    #[test]
+    fn windows_are_bounded_and_clamped_to_the_file() {
+        let window = MIN_WINDOW_BYTES;
+
+        // Short file: one window covering all of it.
+        assert_eq!(
+            window_range(0, Some(1024), window),
+            ("bytes=0-1023".into(), 1024)
+        );
+        assert_eq!(
+            window_range(512, Some(1024), window),
+            ("bytes=512-1023".into(), 512)
+        );
+
+        // Long file: a bounded window, never the whole thing.
+        let (range, requested) = window_range(0, Some(window * 4), window);
+        assert_eq!(range, format!("bytes=0-{}", window - 1));
+        assert_eq!(requested, window);
+    }
+
+    #[test]
+    fn windows_stay_bounded_without_a_length() {
+        let window = MIN_WINDOW_BYTES;
+
+        assert_eq!(
+            window_range(0, None, window),
+            (format!("bytes=0-{}", window - 1), window)
+        );
+        assert_eq!(
+            window_range(64, Some(0), window),
+            (format!("bytes=64-{}", 64 + window - 1), window)
+        );
+    }
+
+    /// A window never falls below the floor, and grows with a deep buffer so a
+    /// window is still drained in about one buffer's worth of playback.
+    #[test]
+    fn window_is_sized_from_the_buffer() {
+        assert_eq!(window_bytes(1024), MIN_WINDOW_BYTES);
+        assert_eq!(window_bytes(MIN_WINDOW_BYTES as usize), MIN_WINDOW_BYTES);
+        assert_eq!(window_bytes(4 * 1024 * 1024), 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn total_is_read_from_content_range() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_RANGE, "bytes 0-1023/146800640".parse().unwrap());
+        assert_eq!(total_from_content_range(&headers), Some(146_800_640));
+
+        // An unknown total must not be mistaken for a real one.
+        headers.insert(CONTENT_RANGE, "bytes 0-1023/*".parse().unwrap());
+        assert_eq!(total_from_content_range(&headers), None);
+
+        assert_eq!(total_from_content_range(&HeaderMap::new()), None);
+    }
+
+    /// A window that comes up short ends the stream, whatever the length said.
+    #[test]
+    fn a_short_window_ends_the_stream() {
+        let spec = SourceSpec {
+            client: Client::new(),
+            url: String::new(),
+            headers: HeaderMap::new(),
+            content_length: Some(10_000),
+            bitrate_bps: None,
+        };
+
+        assert!(at_end(&spec, 4_096, 4_096, 8_192), "server ran out early");
+        assert!(!at_end(&spec, 8_192, 8_192, 8_192), "more file to come");
+        assert!(at_end(&spec, 10_000, 1_808, 1_808), "reached the length");
+    }
+}

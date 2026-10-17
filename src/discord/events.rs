@@ -4,12 +4,7 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 use tracing::{debug, warn};
-use twilight_cache_inmemory::DefaultInMemoryCache;
 use twilight_gateway::{Event, EventTypeFlags, Shard, StreamExt as _};
-use twilight_model::id::{
-    Id,
-    marker::{ChannelMarker, GuildMarker, UserMarker},
-};
 
 use crate::discord::{commands, state::State};
 
@@ -56,10 +51,30 @@ fn handle_event(state: &Arc<State>, event: Event) {
             ));
         }
         Event::VoiceStateUpdate(update) => {
+            if update.user_id != state.user_id {
+                return;
+            }
+
             let Some(guild_id) = update.guild_id else {
                 return;
             };
-            reconcile_voice(Arc::clone(state), guild_id);
+
+            // We were disconnected or dragged into another channel: the
+            // pipeline that was feeding the old connection must go.
+            let moved_away = update
+                .channel_id
+                .is_none_or(|channel_id| state.sessions.channel_of(guild_id) != Some(channel_id));
+
+            if moved_away {
+                let state = Arc::clone(state);
+
+                tokio::spawn(async move {
+                    state
+                        .sessions
+                        .teardown(guild_id, "voice state changed")
+                        .await;
+                });
+            }
         }
         Event::GatewayClose(frame) => {
             warn!(?frame, "gateway connection closed");
@@ -67,41 +82,3 @@ fn handle_event(state: &Arc<State>, event: Event) {
         _ => {}
     }
 }
-
-/// Recheck the cache under the session lock, so queued gateway work cannot
-/// disconnect a replacement session or race a join still in progress.
-pub fn reconcile_voice(state: Arc<State>, guild_id: Id<GuildMarker>) {
-    if state.sessions.channel_of(guild_id).is_none() {
-        return;
-    }
-    tokio::spawn(async move {
-        state
-            .sessions
-            .teardown_if(guild_id, "channel empty or bot disconnected/moved", || {
-                let Some(channel_id) = state.sessions.channel_of(guild_id) else {
-                    return false;
-                };
-                should_disconnect(&state.cache, guild_id, channel_id, state.user_id)
-            })
-            .await;
-    });
-}
-
-fn should_disconnect(
-    cache: &DefaultInMemoryCache,
-    guild_id: Id<GuildMarker>,
-    channel_id: Id<ChannelMarker>,
-    bot_id: Id<UserMarker>,
-) -> bool {
-    let bot_channel = cache
-        .voice_state(bot_id, guild_id)
-        .map(|voice| voice.channel_id());
-    bot_channel != Some(channel_id)
-        || !cache
-            .voice_channel_states(channel_id)
-            .is_some_and(|mut voices| voices.any(|voice| voice.user_id() != bot_id))
-}
-
-#[cfg(test)]
-#[path = "../../tests/discord/events.rs"]
-mod tests;

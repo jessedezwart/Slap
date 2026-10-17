@@ -5,14 +5,7 @@
 //! tearing a guild down is a single `cancel()` rather than a walk over
 //! per-track state.
 
-use std::{
-    collections::VecDeque,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use dashmap::DashMap;
 use songbird::{
@@ -20,41 +13,26 @@ use songbird::{
     error::JoinError,
     events::{CoreEvent, TrackEvent},
     input::Input,
-    tracks::{Track, TrackHandle},
+    tracks::TrackHandle,
 };
-use tokio::sync::{
-    Mutex, Notify, OwnedMutexGuard,
-    mpsc::{self, UnboundedReceiver, UnboundedSender},
-};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{info, warn};
 use twilight_model::id::{
     Id,
-    marker::{ChannelMarker, GuildMarker, MessageMarker},
+    marker::{ChannelMarker, GuildMarker},
 };
 
-use crate::audio::ytdlp::TrackMetadata;
-use crate::voice::events::{DriverDisconnectNotifier, PlayerNotifier, VoiceCommand};
+use crate::voice::events::{DriverDisconnectNotifier, TrackErrorNotifier, VoiceCommand};
 
 /// How far into a track the next one starts loading, matching the lead
 /// songbird's own `enqueue` would have picked.
 const PRELOAD_LEAD: Duration = Duration::from_secs(5);
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct GuildSession {
     pub channel_id: Id<ChannelMarker>,
     pub cancel: CancellationToken,
-    pub updates: Arc<Notify>,
-    pub panel_message: Option<Id<MessageMarker>>,
-    /// Set when the session ends for any reason other than the Stop button, so
-    /// a player left behind does not offer a replay nobody is there to serve.
-    pub disconnected: Arc<AtomicBool>,
-}
-
-/// What the player message shows, taken under the lifecycle lock.
-pub struct PlayerSnapshot {
-    pub track: Option<TrackHandle>,
-    pub upcoming: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -64,25 +42,12 @@ pub enum SessionError {
 
     #[error("not connected to a voice channel in this guild")]
     NotConnected,
-
-    #[error("join my voice channel to control playback")]
-    WrongChannel,
-
-    #[error("nothing is playing")]
-    EmptyQueue,
-
-    #[error("the track finished before the command could be applied")]
-    TrackFinished,
-
-    #[error("this player has expired; use the current player or a slash command")]
-    StalePanel,
 }
 
 pub struct SessionManager {
     songbird: Arc<Songbird>,
     sessions: DashMap<Id<GuildMarker>, GuildSession>,
     commands: UnboundedSender<VoiceCommand>,
-    locks: DashMap<Id<GuildMarker>, Arc<Mutex<()>>>,
 }
 
 impl SessionManager {
@@ -93,15 +58,9 @@ impl SessionManager {
             songbird,
             sessions: DashMap::new(),
             commands,
-            locks: DashMap::new(),
         });
 
         (manager, receiver)
-    }
-
-    async fn lock(&self, guild_id: Id<GuildMarker>) -> OwnedMutexGuard<()> {
-        let lock = self.locks.entry(guild_id).or_default().clone();
-        lock.lock_owned().await
     }
 
     /// Join `channel_id`, reusing the existing connection when it is already
@@ -113,9 +72,7 @@ impl SessionManager {
         &self,
         guild_id: Id<GuildMarker>,
         channel_id: Id<ChannelMarker>,
-        warning_channel_id: Id<ChannelMarker>,
     ) -> Result<CancellationToken, SessionError> {
-        let _guard = self.lock(guild_id).await;
         if let Some(session) = self.sessions.get(&guild_id) {
             let reusable = session.channel_id == channel_id
                 && !session.cancel.is_cancelled()
@@ -126,52 +83,25 @@ impl SessionManager {
             }
         }
 
-        // Reject requests from another channel; recover stale sessions in place.
-        if self
-            .channel_of(guild_id)
-            .is_some_and(|current| current != channel_id)
-        {
-            return Err(SessionError::WrongChannel);
-        }
-        self.teardown_locked(guild_id, "reconnecting", Ending::Disconnected)
-            .await;
+        // Moving channels or recovering from a stale entry: start clean, so the
+        // old pipeline is never left running against the new connection.
+        self.teardown(guild_id, "reconnecting").await;
 
+        let call = self.songbird.join(guild_id, channel_id).await?;
         let cancel = CancellationToken::new();
-        let updates = Arc::new(Notify::new());
-        let call = self.songbird.get_or_insert(guild_id);
 
         {
             let mut call = call.lock().await;
 
-            call.deafen(true).await?;
             call.remove_all_global_events();
             call.add_global_event(
                 CoreEvent::DriverDisconnect.into(),
                 DriverDisconnectNotifier {
                     guild_id,
                     commands: self.commands.clone(),
-                    cancel: cancel.clone(),
                 },
             );
-            for event in [
-                TrackEvent::Play,
-                TrackEvent::Pause,
-                TrackEvent::End,
-                TrackEvent::Error,
-                TrackEvent::Playable,
-            ] {
-                call.add_global_event(
-                    event.into(),
-                    PlayerNotifier {
-                        guild_id,
-                        event,
-                        updates: Arc::clone(&updates),
-                        commands: self.commands.clone(),
-                        cancel: cancel.clone(),
-                        warning_channel_id,
-                    },
-                );
-            }
+            call.add_global_event(TrackEvent::Error.into(), TrackErrorNotifier);
         }
 
         self.sessions.insert(
@@ -179,230 +109,38 @@ impl SessionManager {
             GuildSession {
                 channel_id,
                 cancel: cancel.clone(),
-                updates,
-                panel_message: None,
-                disconnected: Arc::new(AtomicBool::new(false)),
             },
         );
 
-        if let Err(error) = self.songbird.join(guild_id, channel_id).await {
-            self.teardown_locked(guild_id, "join failed", Ending::Disconnected)
-                .await;
-            return Err(error.into());
-        }
-
-        debug!(%guild_id, %channel_id, "joined voice channel");
+        info!(%guild_id, %channel_id, "joined voice channel");
 
         Ok(cancel)
     }
 
-    /// Add a complete import atomically, rejecting work cancelled by stop/leave.
+    /// Add a track to the guild's queue, returning its position.
     ///
-    /// Returns the first track's queue position, counting the playing track as
-    /// position 1.
+    /// Position 1 means it started playing immediately.
+    ///
+    /// `duration` is passed in rather than resolved here: songbird's own
+    /// `enqueue` awaits the track's metadata while holding the `Call` lock,
+    /// and a shard's `Songbird::process` would queue behind that.
     pub async fn enqueue(
         &self,
         guild_id: Id<GuildMarker>,
-        cancel: &CancellationToken,
-        tracks: Vec<(Input, TrackMetadata)>,
-        mode: QueueMode,
-    ) -> Result<usize, SessionError> {
-        let _guard = self.lock(guild_id).await;
-        if cancel.is_cancelled() {
-            return Err(SessionError::NotConnected);
-        }
-        if !self.sessions.contains_key(&guild_id) {
-            return Err(SessionError::NotConnected);
-        }
+        input: Input,
+        duration: Option<Duration>,
+    ) -> Result<(TrackHandle, usize), SessionError> {
         let call = self
             .songbird
             .get(guild_id)
             .ok_or(SessionError::NotConnected)?;
+
+        let preload = duration.map(|duration| duration.saturating_sub(PRELOAD_LEAD));
+
         let mut call = call.lock().await;
-        if mode == QueueMode::Replace {
-            // Stops the current track and drops the rest, freeing their buffers.
-            call.queue().stop();
-        }
-        let count = tracks.len();
-        let appended_at = call.queue().len() + 1;
-        for (input, metadata) in tracks {
-            let preload = metadata
-                .duration
-                .map(|duration| duration.saturating_sub(PRELOAD_LEAD));
-            let track = Track::new_with_data(input, Arc::new(metadata));
-            call.enqueue_with_preload(track, preload);
-        }
-        let position = if mode == QueueMode::Next && appended_at > 1 {
-            call.queue().modify_queue(|queue| play_next(queue, count));
-            2
-        } else {
-            appended_at
-        };
-        self.notify_player(guild_id);
-        Ok(position)
-    }
+        let handle = call.enqueue_with_preload(input.into(), preload);
 
-    /// Voice controls share the lifecycle lock with joins, enqueues and teardown.
-    pub async fn control(
-        &self,
-        guild_id: Id<GuildMarker>,
-        channel_id: Id<ChannelMarker>,
-        command: &str,
-        page: usize,
-        panel_message: Option<Id<MessageMarker>>,
-    ) -> Result<ControlResult, SessionError> {
-        let _guard = self.lock(guild_id).await;
-        // Check the message identity inside the same lock as the action. An old
-        // button must never stop a replacement session, even after a reconnect.
-        if let Some(message_id) = panel_message
-            && !self.sessions.get(&guild_id).is_some_and(|session| {
-                session.panel_message == Some(message_id) && !session.cancel.is_cancelled()
-            })
-        {
-            return Err(SessionError::StalePanel);
-        }
-        let current = self
-            .channel_of(guild_id)
-            .ok_or(SessionError::NotConnected)?;
-        if current != channel_id {
-            return Err(SessionError::WrongChannel);
-        }
-        if command == "stop" {
-            self.teardown_locked(guild_id, "stop command", Ending::Stopped)
-                .await;
-            return Ok(ControlResult::Message(
-                "Stopped playback, cleared the queue, and disconnected.".into(),
-            ));
-        }
-        let call = self
-            .songbird
-            .get(guild_id)
-            .ok_or(SessionError::NotConnected)?;
-        let call = call.lock().await;
-        let queue = call.queue();
-        if command == "queue" {
-            return Ok(queue.modify_queue(|queue| {
-                let total = queue.len();
-                let pages = total.saturating_sub(1).div_ceil(5).max(1);
-                if page == 0 || page > pages {
-                    return ControlResult::Message(format!(
-                        "That page does not exist. Choose a page from 1 to {pages}."
-                    ));
-                }
-                // Clone only the visible page, regardless of playlist size.
-                let tracks = queue
-                    .front()
-                    .into_iter()
-                    .chain(queue.range((1 + (page - 1) * 5).min(total)..).take(5))
-                    .map(|track| track.handle())
-                    .collect();
-                ControlResult::Queue {
-                    tracks,
-                    total,
-                    page,
-                }
-            }));
-        }
-        if queue.is_empty() {
-            return Err(SessionError::EmptyQueue);
-        }
-        let message = match command {
-            "pause" => {
-                queue.pause().map_err(|_| SessionError::TrackFinished)?;
-                "Paused. Press Resume to continue.".into()
-            }
-            "resume" => {
-                queue.resume().map_err(|_| SessionError::TrackFinished)?;
-                "Resumed playback.".into()
-            }
-            "skip" => {
-                queue.skip().map_err(|_| SessionError::TrackFinished)?;
-                "Skipped the current track.".into()
-            }
-            _ => unreachable!("only registered controls reach this method"),
-        };
-        debug!(%guild_id, %channel_id, command, remaining = queue.len(), result = %message, "playback control applied");
-        self.notify_player(guild_id);
-        Ok(ControlResult::Message(message))
-    }
-
-    /// Title of the current track, for human-facing control activity logs.
-    pub async fn current_track_title(&self, guild_id: Id<GuildMarker>) -> Option<String> {
-        let _guard = self.lock(guild_id).await;
-        let call = self.songbird.get(guild_id)?;
-        let call = call.lock().await;
-        call.queue()
-            .current()
-            .and_then(|track| track.data::<TrackMetadata>().title.clone())
-    }
-
-    fn notify_player(&self, guild_id: Id<GuildMarker>) {
-        if let Some(session) = self.sessions.get(&guild_id) {
-            session.updates.notify_one();
-        }
-    }
-
-    /// First successful /play response owns the panel for this session.
-    pub async fn attach_panel(
-        &self,
-        guild_id: Id<GuildMarker>,
-        cancel: &CancellationToken,
-        message_id: Id<MessageMarker>,
-    ) -> Option<GuildSession> {
-        let _guard = self.lock(guild_id).await;
-        if cancel.is_cancelled() {
-            return None;
-        }
-        let mut session = self.sessions.get_mut(&guild_id)?;
-        if session.panel_message.is_some() || session.cancel.is_cancelled() {
-            return None;
-        }
-        session.panel_message = Some(message_id);
-        Some(session.clone())
-    }
-
-    pub fn release_panel(&self, guild_id: Id<GuildMarker>, message_id: Id<MessageMarker>) {
-        if let Some(mut session) = self.sessions.get_mut(&guild_id)
-            && session.panel_message == Some(message_id)
-        {
-            session.panel_message = None;
-        }
-    }
-
-    /// Constant-size snapshot; all locks are released before querying the driver
-    /// or making a Discord request.
-    pub async fn player_snapshot(
-        &self,
-        guild_id: Id<GuildMarker>,
-        message_id: Id<MessageMarker>,
-    ) -> Option<PlayerSnapshot> {
-        let _guard = self.lock(guild_id).await;
-        self.sessions.get(&guild_id).filter(|session| {
-            session.panel_message == Some(message_id) && !session.cancel.is_cancelled()
-        })?;
-        let call = self.songbird.get(guild_id)?;
-        let call = call.lock().await;
-        Some(call.queue().modify_queue(|queue| PlayerSnapshot {
-            track: queue.front().map(|track| track.handle()),
-            upcoming: queue.len().saturating_sub(1),
-        }))
-    }
-
-    /// Evaluate against current state after acquiring the lifecycle lock.
-    pub async fn teardown_if(
-        &self,
-        guild_id: Id<GuildMarker>,
-        reason: &str,
-        condition: impl FnOnce() -> bool,
-    ) -> bool {
-        let _guard = self.lock(guild_id).await;
-        if condition() {
-            self.teardown_locked(guild_id, reason, Ending::Disconnected)
-                .await;
-            true
-        } else {
-            false
-        }
+        Ok((handle, call.queue().len()))
     }
 
     /// Drop everything belonging to `guild_id`.
@@ -410,21 +148,10 @@ impl SessionManager {
     /// Idempotent: the session is removed from the map first, so the
     /// disconnect our own `leave` provokes does not recurse.
     pub async fn teardown(&self, guild_id: Id<GuildMarker>, reason: &str) {
-        let _guard = self.lock(guild_id).await;
-        self.teardown_locked(guild_id, reason, Ending::Disconnected)
-            .await;
-    }
-
-    async fn teardown_locked(&self, guild_id: Id<GuildMarker>, reason: &str, ending: Ending) {
         let Some((_, session)) = self.sessions.remove(&guild_id) else {
             return;
         };
 
-        // Published before the cancel the player is waiting on, so the player
-        // always reads the reason it woke up for.
-        session
-            .disconnected
-            .store(ending == Ending::Disconnected, Ordering::Release);
         // One cancel aborts every fetch task, closes every connection and frees
         // every buffer for this guild.
         session.cancel.cancel();
@@ -440,7 +167,7 @@ impl SessionManager {
             warn!(%guild_id, %error, "failed to remove voice connection");
         }
 
-        debug!(%guild_id, reason, "tore down voice pipeline");
+        info!(%guild_id, reason, "tore down voice pipeline");
     }
 
     /// Channel we believe we are connected to, if any.
@@ -456,102 +183,16 @@ impl SessionManager {
     }
 }
 
-/// How a session ended. Only the Stop button leaves a player worth replaying;
-/// a disconnect or a shutdown means nothing will answer the button.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Ending {
-    Stopped,
-    Disconnected,
-}
-
-/// Where a fresh import lands relative to what is already queued.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum QueueMode {
-    /// Append after everything already queued.
-    #[default]
-    Append,
-    /// Insert directly after the current track.
-    Next,
-    /// Clear the queue and the current track, then play this import.
-    Replace,
-}
-
-pub enum ControlResult {
-    Message(String),
-    Queue {
-        tracks: Vec<TrackHandle>,
-        total: usize,
-        page: usize,
-    },
-}
-
-/// Move the `count` tracks just appended to the front of the upcoming ones,
-/// leaving the playing track at the head of the queue.
-fn play_next<T>(queue: &mut VecDeque<T>, count: usize) {
-    let start = queue.len().saturating_sub(count);
-    if start <= 1 {
-        return;
-    }
-    // Each removal shifts the remaining import down by one and the insertion
-    // shifts it back, so the next track to move stays at `start + offset`.
-    for offset in 0..count {
-        let Some(track) = queue.remove(start + offset) else {
-            break;
-        };
-        queue.insert(1 + offset, track);
-    }
-}
-
 /// Drains [`VoiceCommand`]s off songbird's driver task.
 pub async fn run_command_loop(
     manager: Arc<SessionManager>,
     mut commands: UnboundedReceiver<VoiceCommand>,
-    http: Arc<twilight_http::Client>,
 ) {
     while let Some(command) = commands.recv().await {
         match command {
-            VoiceCommand::CookiesRequired {
-                guild_id,
-                channel_id,
-                cancel,
-            } => {
-                let stopped = manager
-                    .teardown_if(guild_id, "YouTube cookies required", || {
-                        !cancel.is_cancelled()
-                    })
-                    .await;
-                if stopped {
-                    let message = format!(
-                        "Playback stopped. {}",
-                        crate::error::AudioError::CookiesRequired
-                    );
-                    let mentions = twilight_model::channel::message::AllowedMentions::default();
-                    let request = http
-                        .create_message(channel_id)
-                        .content(&message)
-                        .allowed_mentions(Some(&mentions));
-                    match tokio::time::timeout(Duration::from_secs(10), request).await {
-                        Ok(Ok(_)) => {}
-                        Ok(Err(error)) => {
-                            warn!(%channel_id, %error, "failed to send cookie configuration warning")
-                        }
-                        Err(_) => warn!(%channel_id, "cookie configuration warning timed out"),
-                    }
-                }
-            }
-            VoiceCommand::Teardown {
-                guild_id,
-                reason,
-                cancel,
-            } => {
-                manager
-                    .teardown_if(guild_id, &reason, || !cancel.is_cancelled())
-                    .await;
+            VoiceCommand::Teardown { guild_id, reason } => {
+                manager.teardown(guild_id, &reason).await;
             }
         }
     }
 }
-
-#[cfg(test)]
-#[path = "../../tests/voice/session.rs"]
-mod tests;
