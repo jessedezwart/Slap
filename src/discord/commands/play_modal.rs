@@ -129,6 +129,7 @@ fn play_modal() -> InteractionResponse {
 }
 
 /// What the user typed into the modal.
+#[derive(Debug)]
 pub(super) struct PlayInput {
     pub url: String,
     pub mode: QueueMode,

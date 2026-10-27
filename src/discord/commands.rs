@@ -5,7 +5,7 @@ mod error;
 mod play;
 mod play_modal;
 
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 use tracing::{Span, debug, info, warn};
@@ -26,81 +26,61 @@ use self::{
 };
 use crate::{discord::player, session::Control, state::State};
 
-/// What a player button asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
-    /// Open the play form.
     OpenForm,
     Control(Control),
 }
 
-/// What an interaction asks for.
+#[derive(Debug)]
 enum Request {
-    /// A `/play` link, or a submitted play form.
     Play(PlayInput),
-    /// A player button, or `/play` without a link, which opens the form.
     Button(Action),
 }
 
 impl Request {
     fn read(interaction: &Interaction) -> Option<Self> {
         match interaction.data.as_ref()? {
-            // Without a link the command only opens the form; the
-            // submission does the work.
+            // /play command
             InteractionData::ApplicationCommand(data) if data.name == "play" => {
+                // If no URL was given, open modal, otherwise handle directly.
                 Some(command_input(data).map_or(Self::Button(Action::OpenForm), Self::Play))
             }
+            // Play modal submitted
             InteractionData::ModalSubmit(data) if data.custom_id == PLAY_MODAL => {
                 Some(Self::Play(play_input(data)))
             }
+            // Button clicked
             InteractionData::MessageComponent(data) => {
                 player::button_action(&data.custom_id).map(Self::Button)
             }
             _ => None,
         }
     }
-
-    /// The name logs record for it.
-    fn name(&self) -> &'static str {
-        match self {
-            Self::Play(_) => "play",
-            Self::Button(Action::OpenForm) => "open_form",
-            Self::Button(Action::Control(Control::Pause)) => "pause",
-            Self::Button(Action::Control(Control::Resume)) => "resume",
-            Self::Button(Action::Control(Control::Skip)) => "skip",
-            Self::Button(Action::Control(Control::Stop)) => "stop",
-        }
-    }
 }
 
-/// How an interaction is answered.
 #[derive(Clone, Copy, PartialEq)]
 enum ReplyMode {
-    /// A reply everyone in the channel sees.
     Public,
-    /// No reply on success: the player shows the change. Errors go to the
-    /// caller privately.
     Silent,
 }
 
-/// Buttons and slash commands share authorization, execution, and logging.
 #[tracing::instrument(skip_all, fields(
     guild_id = interaction.guild_id.map(|id| id.get()), user_id = interaction.author_id().map(|id| id.get()),
     interaction_id = %interaction.id, command = tracing::field::Empty,
 ))]
 pub async fn handle_interaction(state: Arc<State>, interaction: Interaction) {
     let Some(request) = Request::read(&interaction) else {
+        warn!(%interaction.id, "unhandled interaction");
         return;
     };
-    Span::current().record("command", request.name());
+    Span::current().record("command", tracing::field::debug(&request));
     let (state, interaction) = (&state, &interaction);
-    // Each future is only built here; it starts once `run` has deferred.
     match request {
         Request::Play(input) => {
             let work = play::play(state, interaction, &input.url, input.mode);
             run(state, interaction, ReplyMode::Public, work).await;
         }
-        // The player reflects every control, so these do not reply.
         Request::Button(Action::Control(control)) => {
             let work = async {
                 controls::apply_control(state, interaction, control).await?;
@@ -108,7 +88,6 @@ pub async fn handle_interaction(state: Arc<State>, interaction: Interaction) {
             };
             run(state, interaction, ReplyMode::Silent, work).await;
         }
-        // The form is the answer; its submission does the work.
         Request::Button(Action::OpenForm) => {
             if let Err(error) = open_modal(state, interaction).await {
                 warn!(%error, "failed to open the play modal");
@@ -124,17 +103,15 @@ async fn run(
     mode: ReplyMode,
     work: impl Future<Output = Result<Reply, CommandError>>,
 ) {
-    let started = Instant::now();
     debug!("interaction received");
     if let Err(error) = defer(state, interaction, mode).await {
         warn!(%error, "failed to acknowledge interaction");
         return;
     }
     let result = work.await;
-    let elapsed_ms = started.elapsed().as_millis();
     match &result {
-        Ok(_) => info!(elapsed_ms, "interaction completed"),
-        Err(error) => warn!(%error, elapsed_ms, "interaction rejected or failed"),
+        Ok(_) => info!("interaction completed"),
+        Err(error) => warn!(%error, "interaction rejected or failed"),
     }
     if let Err(error) = respond(state, interaction, mode, result).await {
         warn!(%error, "failed to send interaction response");
@@ -151,8 +128,7 @@ async fn respond(
     let mentions = AllowedMentions::default();
     match (mode, result) {
         (ReplyMode::Silent, Ok(_)) => {}
-        // A deferred button update targets the player itself: errors must be
-        // separate private follow-ups, never overwrite the live player.
+        // Errors in silent mode are sent as ephemeral messages.
         (ReplyMode::Silent, Err(error)) => {
             http.create_followup(&interaction.token)
                 .content(&error.to_string())
@@ -180,8 +156,7 @@ async fn respond(
 #[derive(Default)]
 struct Reply {
     message: String,
-    /// The session's token, set when the reply should become that session's
-    /// player. The bid loses when the session already has one.
+    // Player identified by cancellation token.
     player: Option<CancellationToken>,
 }
 
@@ -209,6 +184,7 @@ fn caller_channel(
     Ok((guild_id, channel_id))
 }
 
+// Acknowledge interaction to Discord
 async fn defer(
     state: &Arc<State>,
     interaction: &Interaction,
