@@ -187,9 +187,6 @@ fn push_notice(components: &mut Vec<Component>, notice: &str) {
     }
 }
 
-/// How far the track is. While it plays this is a relative timestamp
-/// (`<t:…:R>`) that Discord keeps counting by itself, so the message needs no
-/// edits to stay current; otherwise the position stands still anyway.
 fn progress(
     status: Status,
     position: Duration,

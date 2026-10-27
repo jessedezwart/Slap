@@ -18,15 +18,14 @@ use crate::{
     media::Metadata,
     voice::{
         queue::QueueEntry,
-        session::{Control, QueuePage},
+        session::{Control, QueueHead},
     },
 };
 
-/// Upcoming tracks listed per queue page.
-const QUEUE_PAGE: usize = 5;
+/// Upcoming tracks listed by the queue command.
+const QUEUE_LEN: usize = 10;
 
-/// The voice session a player button belongs to; `None` for anything that
-/// did not come from a player.
+/// The voice session a player button belongs to
 fn panel_session(
     state: &State,
     interaction: &Interaction,
@@ -69,30 +68,19 @@ pub(super) async fn queue(
 ) -> Result<String, PlayError> {
     let (guild_id, channel_id) = caller_channel(state, interaction)?;
     let session = panel_session(state, interaction, guild_id)?;
-    let page = 1;
-    let QueuePage { tracks, total } = state
+    let QueueHead { tracks, total } = state
         .sessions
-        .queue_page(
-            guild_id,
-            channel_id,
-            session.as_ref(),
-            (page - 1) * QUEUE_PAGE,
-            QUEUE_PAGE,
-        )
+        .queue_head(guild_id, channel_id, session.as_ref(), QUEUE_LEN)
         .await?;
     let entries: Vec<_> = tracks.iter().map(TrackHandle::data::<QueueEntry>).collect();
     let metadata: Vec<_> = entries.iter().map(|entry| &entry.metadata).collect();
-    Ok(format_queue(&metadata, total, page))
+    Ok(format_queue(&metadata, total))
 }
 
-fn format_queue(tracks: &[&Metadata], total: usize, page: usize) -> String {
+fn format_queue(tracks: &[&Metadata], total: usize) -> String {
     let Some(current) = tracks.first() else {
         return "The queue is empty.".into();
     };
-    let pages = total.saturating_sub(1).div_ceil(QUEUE_PAGE).max(1);
-    if page == 0 || page > pages {
-        return format!("That page does not exist. Choose a page from 1 to {pages}.");
-    }
     let label = |metadata: &Metadata| {
         let title: String = metadata
             .title
@@ -109,16 +97,14 @@ fn format_queue(tracks: &[&Metadata], total: usize, page: usize) -> String {
         label
     };
     let mut message = format!(
-        "**Current track:** {}\n**Queue:** {} upcoming • page {page}/{pages}",
+        "**Current track:** {}
+**Queue:** {} upcoming",
         label(current),
         total.saturating_sub(1)
     );
-    for (offset, track) in tracks.iter().skip(1).take(QUEUE_PAGE).enumerate() {
-        let index = 1 + (page - 1) * QUEUE_PAGE + offset;
-        let _ = write!(message, "\n{index}. {}", label(track));
-    }
-    if pages > 1 {
-        message.push_str("\nOnly the first five upcoming tracks are shown.");
+    for (index, track) in tracks.iter().skip(1).take(QUEUE_LEN).enumerate() {
+        let _ = write!(message, "
+{}. {}", index + 1, label(track));
     }
     message
 }

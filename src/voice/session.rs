@@ -267,16 +267,14 @@ impl SessionManager {
         Ok(())
     }
 
-    /// The playing track, then up to `len` upcoming ones starting `start`
-    /// tracks after it.
-    pub async fn queue_page(
+    /// The playing track, then up to `len` upcoming ones.
+    pub async fn queue_head(
         &self,
         guild_id: Id<GuildMarker>,
         channel_id: Id<ChannelMarker>,
         session: Option<&CancellationToken>,
-        start: usize,
         len: usize,
-    ) -> Result<QueuePage, SessionError> {
+    ) -> Result<QueueHead, SessionError> {
         let _guard = self.lock(guild_id).await;
         self.check_caller(guild_id, channel_id, session)?;
         let call = self
@@ -286,14 +284,13 @@ impl SessionManager {
         let call = call.lock().await;
         Ok(call.queue().modify_queue(|queue| {
             let total = queue.len();
-            // Clone only the requested page, regardless of playlist size.
+            // Clone only the listed tracks, regardless of playlist size.
             let tracks = queue
-                .front()
-                .into_iter()
-                .chain(queue.range((1 + start).min(total)..).take(len))
+                .iter()
+                .take(1 + len)
                 .map(|track| track.handle())
                 .collect();
-            QueuePage { tracks, total }
+            QueueHead { tracks, total }
         }))
     }
 
@@ -452,8 +449,8 @@ pub enum Control {
     Stop,
 }
 
-/// Part of the queue, from [`SessionManager::queue_page`].
-pub struct QueuePage {
+/// The front of the queue, from [`SessionManager::queue_head`].
+pub struct QueueHead {
     /// The playing track first, then the requested upcoming ones.
     pub tracks: Vec<TrackHandle>,
     /// Every queued track, the playing one included.

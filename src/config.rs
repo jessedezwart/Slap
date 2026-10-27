@@ -2,14 +2,27 @@
 
 use std::{env, fmt::Display, num::ParseIntError, path::PathBuf, str::FromStr, time::Duration};
 
+use thiserror::Error;
 use tracing::warn;
-
-use crate::error::ConfigError;
 
 /// Smallest buffer we will ever allocate, regardless of configuration.
 const MIN_BUFFER_BYTES: usize = 64 * 1024;
 /// Upper bound, so a silly `BUFFER_MS` cannot exhaust memory across many guilds.
 const MAX_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+
+/// Failures while reading configuration out of the environment.
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("required environment variable `{0}` is not set")]
+    Missing(&'static str),
+
+    #[error("environment variable `{name}` has an invalid value `{value}`: {reason}")]
+    Invalid {
+        name: &'static str,
+        value: String,
+        reason: String,
+    },
+}
 
 pub struct Config {
     pub token: String,

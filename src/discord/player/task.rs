@@ -1,8 +1,4 @@
 //! The task that keeps a player message current until its session ends.
-//!
-//! It redraws only when something changes. The play position needs no
-//! redraws: while a track plays, the view shows a relative timestamp that
-//! Discord counts down by itself.
 
 use std::{
     sync::Arc,
@@ -31,6 +27,7 @@ use crate::{
     },
 };
 
+/// How long the task gets to update the message.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the driver gets to report a track's state.
 const INFO_TIMEOUT: Duration = Duration::from_secs(1);
@@ -71,7 +68,6 @@ impl PlayerTask {
         }
     }
 
-    /// Draw straight away, then again on every change until the session ends.
     pub async fn run(self) {
         loop {
             match self.redraw().await {
@@ -91,9 +87,6 @@ impl PlayerTask {
     }
 
     /// Rewrite the message from the current state.
-    ///
-    /// A failed edit is not retried: every redraw sends the whole view, so
-    /// the next change puts it right.
     async fn redraw(&self) -> Result<(), Stop> {
         let Some(view) = self.render().await? else {
             return Ok(());
@@ -101,16 +94,12 @@ impl PlayerTask {
         if self.session.cancel.is_cancelled() {
             return Err(Stop::Ended);
         }
-        // No lock is held during HTTP, and the timeout keeps a slow request
-        // from stranding the task.
         match edit(&self.state, self.channel_id, self.message_id, &view).await {
             Err(EditError::Gone) => Err(Stop::Gone),
             Ok(()) | Err(EditError::Failed) => Ok(()),
         }
     }
 
-    /// What the message should show now; `None` if the driver did not answer
-    /// in time, so this round is skipped.
     async fn render(&self) -> Result<Option<View>, Stop> {
         let cancel = &self.session.cancel;
         let snapshot = tokio::select! {
@@ -142,10 +131,7 @@ impl PlayerTask {
         )))
     }
 
-    /// Leave the player behind as a stopped one.
     async fn stopped(&self) {
-        // One attempt: nothing updates this message again, and a player that
-        // cannot be rewritten is better deleted than left claiming to play.
         if edit(
             &self.state,
             self.channel_id,
@@ -165,7 +151,6 @@ pub(super) async fn delete_player(
     channel_id: Id<ChannelMarker>,
     message_id: Id<MessageMarker>,
 ) {
-    // Stopped, disconnected or superseded: a dead player is just clutter.
     match time::timeout(
         HTTP_TIMEOUT,
         state.http.delete_message(channel_id, message_id),
@@ -179,7 +164,6 @@ pub(super) async fn delete_player(
 }
 
 enum EditError {
-    /// Deleted, or we lost access to it.
     Gone,
     Failed,
 }
@@ -191,8 +175,7 @@ async fn edit(
     view: &View,
 ) -> Result<(), EditError> {
     let mentions = AllowedMentions::default();
-    // The first edit converts the plain /play reply into a V2 message, which
-    // requires dropping its text content. Discord never converts it back.
+    // The first edit converts the plain /play reply into a V2 message, which requires dropping its text content.
     let request = state
         .http
         .update_message(channel_id, message_id)

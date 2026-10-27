@@ -29,10 +29,6 @@ use crate::{discord::state::State, voice::session::QueueMode};
 /// Identifies both the modal `/play` opens and the submission it sends back.
 pub(super) const PLAY_MODAL: &str = "play:modal";
 
-/// The only command registered with Discord; everything else is a button.
-///
-/// The link is optional: `/play` on its own opens the same form the player's
-/// Add button does, so neither entry point needs the other.
 pub fn play_command() -> Command {
     CommandBuilder::new(
         "play",
@@ -47,7 +43,7 @@ pub fn play_command() -> Command {
     .build()
 }
 
-/// What the user passed to `/play` directly, if they passed a link at all.
+/// What the user passed to `/play` directly.
 pub(super) fn command_input(data: &CommandData) -> Option<PlayInput> {
     let value = |name: &str| {
         data.options
@@ -138,8 +134,7 @@ fn play_modal() -> InteractionResponse {
     }
 }
 
-/// What the user typed into the modal. An import defaults to the back of the
-/// queue.
+/// What the user typed into the modal.
 pub(super) struct PlayInput {
     pub url: String,
     pub mode: QueueMode,
