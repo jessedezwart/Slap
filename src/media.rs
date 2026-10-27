@@ -50,7 +50,6 @@ impl StreamInfo {
     }
 }
 
-/// Describes the media itself: what it is, not who asked for it.
 #[derive(Debug, Clone, Default)]
 pub struct Metadata {
     pub title: Option<String>,

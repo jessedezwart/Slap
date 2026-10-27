@@ -150,8 +150,9 @@ The first successful `/play` response becomes a live player message with the
 current title, thumbnail, requester, elapsed and total time, the next five
 queued tracks with the queue size, and those buttons. Later imports reuse that
 player. A playlist import names its playlist on the player, next to the track it is playing. When playback ends,
-the player is left behind as a plain "Playback stopped" message with no
-buttons. Skip and Stop succeed silently because the player shows the
+the player is left behind as a "Playback stopped" message with no buttons,
+showing the `/play` command (and playlist) that started it so it can be run
+again. Skip and Stop succeed silently because the player shows the
 result; errors are private. Unknown track durations show elapsed time only.
 
 The player edits one message per voice session. Progress refreshes every

@@ -36,11 +36,13 @@ const INTENTS: Intents = Intents::GUILDS.union(Intents::GUILD_VOICE_STATES);
 
 fn main() -> ExitCode {
     let dotenv = dotenvy::dotenv();
-    // After `.env`, so a `RUST_LOG` set there applies.
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new(
+                "info,songbird::tracks::queue=warn,songbird::driver::tasks::events=warn,\
+                 songbird::events::store=warn",
+            )
+        }))
         .init();
 
     info!("starting...");
