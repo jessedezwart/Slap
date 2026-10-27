@@ -83,15 +83,9 @@ pub struct BufferConfig {
 }
 
 impl BufferConfig {
-    /// Playback rate in bytes per second, for turning a byte count into the
-    /// playback time it represents.
-    pub fn bytes_per_second(&self, bitrate_bps: Option<u32>) -> u64 {
-        u64::from(bitrate_bps.unwrap_or(self.assumed_bitrate_bps).max(8_000)) / 8
-    }
-
     /// Convert the configured playback time into a byte budget for this track.
-    pub fn bytes_for(&self, bitrate_bps: Option<u32>) -> usize {
-        let per_second = self.bytes_per_second(bitrate_bps);
+    pub fn bytes_for(&self, bitrate_bps: u32) -> usize {
+        let per_second = u64::from(bitrate_bps.max(8_000)) / 8;
         let millis = u64::try_from(self.target.as_millis()).unwrap_or(u64::MAX);
         let bytes = per_second * millis / 1000;
 

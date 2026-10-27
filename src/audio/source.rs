@@ -114,13 +114,11 @@ impl Compose for StreamSource {
             "opening audio stream"
         );
 
-        let spec = SourceSpec {
-            client: self.client.clone(),
-            url: resolved.media_url,
-            headers: resolved.headers,
-            content_length: resolved.content_length,
-            bitrate_bps: resolved.bitrate_bps,
-        };
+        let spec = SourceSpec::new(
+            self.client.clone(),
+            &resolved,
+            self.buffer_config.assumed_bitrate_bps,
+        );
 
         // Returns once the prefill is buffered.
         let stream = PrefetchStream::open(spec, self.buffer_config, &self.cancel, 0)

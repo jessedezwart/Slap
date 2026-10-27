@@ -1,4 +1,4 @@
-//! Ranged HTTP windows: what to ask for, and how big the file really is.
+//! Ranged requests for audio streams.
 
 use reqwest::{
     Response, StatusCode,
@@ -11,13 +11,7 @@ use tracing::debug;
 use super::SourceSpec;
 use crate::audio::AudioError;
 
-/// Smallest window one ranged request will ask for.
-///
-/// Measured against googlevideo, every bounded range — 128 KiB through 2 MiB —
-/// came back in the same ~40 ms, so window size buys nothing but fewer round
-/// trips. Past this floor a *smaller* window is better: the window is what the
-/// server holds open while the buffer drains, and a window far larger than the
-/// buffer leaves a connection stalled for minutes waiting on the mixer.
+/// Smallest window one request will ask for.
 const MIN_WINDOW_BYTES: u64 = 256 * 1024;
 
 /// A partial response's Content-Length is only its window size.
@@ -30,17 +24,11 @@ pub(super) fn response_total(response: &Response) -> Option<u64> {
 }
 
 /// How much one request asks for.
-///
-/// Sized from the buffer so that a window is drained in roughly one buffer's
-/// worth of playback. That keeps the request bounded — which is all
-/// googlevideo needs to serve it at link speed instead of pacing it — without
-/// leaving a connection open and stalled long after the buffer has filled.
 pub(super) fn window_bytes(budget_bytes: usize) -> u64 {
     (budget_bytes as u64).max(MIN_WINDOW_BYTES)
 }
 
-/// Issue one ranged request, returning the response and how many bytes it
-/// should carry.
+/// Issue one ranged request
 pub(super) async fn request_window(
     spec: &SourceSpec,
     offset: u64,

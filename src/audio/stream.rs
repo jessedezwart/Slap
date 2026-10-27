@@ -1,25 +1,3 @@
-//! The prefetch buffer that stands between the network and songbird's mixer.
-//!
-//! songbird's mixer thread reads a packet every 20 ms, synchronously. If that
-//! read ever reaches the socket the thread blocks and *every* guild sharing
-//! that mixer thread stutters. So a background task pulls bytes as fast as the
-//! network allows into a byte-bounded queue, and the mixer only ever reads from
-//! that queue.
-//!
-//! That background task and queue are songbird's own `AsyncAdapterStream`: it
-//! pulls from our `AsyncRead` into a ring buffer sized to the configured
-//! budget, and stops pulling while the ring is full. That is the backpressure
-//! that stops a long track from being downloaded into memory all at once.
-//!
-//! "As fast as the network allows" needs one thing from the request shape:
-//! googlevideo paces a request for a whole file down to roughly playback rate,
-//! so a long track arrives in real time and the buffer can never rebuild after
-//! a hiccup. A *bounded* range gets the fast path instead — measured on a 229
-//! MiB track, one request for the lot ran at 36 KB/s while a 2 MiB window ran
-//! at 45 MB/s — so the body is fetched as a series of ranged windows rather
-//! than one open request. This is the same trick as yt-dlp's
-//! `--http-chunk-size`.
-
 mod range;
 mod reader;
 mod windows;
@@ -28,14 +6,31 @@ use reqwest::{Client, header::HeaderMap};
 
 pub use reader::PrefetchStream;
 
-/// Everything needed to open — or reopen — the byte stream.
+use crate::media::StreamInfo;
+
 #[derive(Clone)]
 pub struct SourceSpec {
+    // The shared HTTP client
     pub client: Client,
+    // The URL to request from
     pub url: String,
+    // The headers to send with the request
     pub headers: HeaderMap,
-    /// googlevideo wants an explicit upper bound (`bytes=0-1023`) rather than
-    /// an open-ended range, so we pass yt-dlp's reported filesize through.
+    /// Length of complete file. Optional since not always provided.
     pub content_length: Option<u64>,
-    pub bitrate_bps: Option<u32>,
+    // Bitrate of the audio stream in bits per second. Falls back to the configured assumed bitrate when yt-dlp reports none.
+    pub bitrate_bps: u32,
+}
+
+impl SourceSpec {
+    /// `assumed_bitrate_bps` is used when the resolver reported no bitrate.
+    pub fn new(client: Client, stream: &StreamInfo, assumed_bitrate_bps: u32) -> Self {
+        Self {
+            client,
+            url: stream.media_url.clone(),
+            headers: stream.headers.clone(),
+            content_length: stream.content_length,
+            bitrate_bps: stream.bitrate_bps.unwrap_or(assumed_bitrate_bps),
+        }
+    }
 }

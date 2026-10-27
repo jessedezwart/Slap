@@ -32,7 +32,7 @@ fn test_buffer_config() -> BufferConfig {
 /// The window the test config produces, so the fixtures track the real
 /// sizing rather than a hard-coded constant.
 fn test_window() -> u64 {
-    window_bytes(test_buffer_config().bytes_for(Some(160_000)))
+    window_bytes(test_buffer_config().bytes_for(160_000))
 }
 
 fn body() -> Vec<u8> {
@@ -94,7 +94,7 @@ async fn open_stream(url: String, cancel: &CancellationToken) -> PrefetchStream 
         url,
         headers: HeaderMap::new(),
         content_length: Some(BODY_LEN as u64),
-        bitrate_bps: Some(160_000),
+        bitrate_bps: 160_000,
     };
 
     PrefetchStream::open(spec, test_buffer_config(), cancel, 0)
@@ -269,7 +269,7 @@ async fn fetches_a_long_body_in_windows() {
         url,
         headers: HeaderMap::new(),
         content_length: Some(len as u64),
-        bitrate_bps: Some(160_000),
+        bitrate_bps: 160_000,
     };
 
     let mut stream = PrefetchStream::open(spec, test_buffer_config(), &cancel, 0)
@@ -305,7 +305,7 @@ async fn byte_len_reports_the_whole_file_not_the_window() {
         headers: HeaderMap::new(),
         // Deliberately absent, so `Content-Range` is the only source.
         content_length: None,
-        bitrate_bps: Some(160_000),
+        bitrate_bps: 160_000,
     };
 
     let stream = PrefetchStream::open(spec, test_buffer_config(), &cancel, 0)
@@ -329,7 +329,7 @@ async fn short_partial_responses_do_not_end_the_file() {
             url,
             headers: HeaderMap::new(),
             content_length: None,
-            bitrate_bps: Some(160_000),
+            bitrate_bps: 160_000,
         };
         let mut stream = PrefetchStream::open(spec, test_buffer_config(), &cancel, 0)
             .await
@@ -364,7 +364,7 @@ async fn http_total_overrides_metadata_for_all_windows() {
             url,
             headers: HeaderMap::new(),
             content_length: Some(reported_size as u64),
-            bitrate_bps: Some(160_000),
+            bitrate_bps: 160_000,
         };
         let mut stream = PrefetchStream::open(spec, test_buffer_config(), &cancel, 0)
             .await
@@ -394,7 +394,7 @@ async fn rejected_range_before_known_end_is_an_error() {
         url,
         headers: HeaderMap::new(),
         content_length: Some(BODY_LEN as u64 * 2),
-        bitrate_bps: Some(160_000),
+        bitrate_bps: 160_000,
     };
     let mut stream = PrefetchStream::open(spec, test_buffer_config(), &cancel, 0)
         .await
