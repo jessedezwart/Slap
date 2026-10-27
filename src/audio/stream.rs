@@ -16,19 +16,16 @@ use songbird::input::{AsyncMediaSource, AudioStreamError};
 use sync_wrapper::SyncWrapper;
 use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 use tokio_util::{io::StreamReader, sync::CancellationToken};
-use tracing::debug;
 
 use super::{
     AudioError,
     download::{RangedDownload, RemoteFile},
 };
 
-/// Smallest buffer we will ever allocate, regardless of configuration.
 const MIN_BUFFER_BYTES: usize = 64 * 1024;
-/// Upper bound, so a silly `BUFFER_MS` cannot exhaust memory across many guilds.
 const MAX_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
-/// Used when yt-dlp reports no bitrate. YouTube's itag 251 is ~160 kbps.
+/// Used when yt-dlp reports no bitrate. YouTube's itag 251 (best Opus audio stream) is ~160 kbps.
 const ASSUMED_BITRATE_BPS: u32 = 160_000;
 
 /// Convert `buffer` worth of playback into a byte budget for a track.
@@ -46,10 +43,8 @@ pub fn budget_bytes(buffer: Duration, bitrate_bps: Option<u32>) -> usize {
 pub struct HttpStream {
     file: RemoteFile,
     cancel: CancellationToken,
-    /// The downloaded bytes, readable by songbird:
-    /// - `BoxStream` because the stream is named by Rust.
-    /// - `StreamReader`, because songbird reads with `AsyncRead`, not `Stream`.
-    /// - `SyncWrapper`, because songbird requires `Sync`.
+    /// The stream reader that songbird reads from. 
+    /// It is a wrapper around a `StreamReader` that reads from a `BoxStream` of `Bytes`.
     reader: SyncWrapper<StreamReader<BoxStream<'static, io::Result<Bytes>>, Bytes>>,
     /// How much songbird's adapter should buffer ahead of the mixer.
     budget_bytes: usize,
@@ -107,10 +102,14 @@ impl AsyncRead for HttpStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        // Self gets passed as a Pin as directed by the trait, it needs to be mutable to update the position after reading.
         let me = self.get_mut();
-        let before = buf.filled().len();
+        // How many bytes were filled before the read
+        let before: usize = buf.filled().len();
+        // Read from the stream reader into the buffer. To make the sync wrapper work, pass the inner reader as a mutex.
         let result = Pin::new(me.reader.get_mut()).poll_read(cx, buf);
 
+        // Update the position based on how many bytes were filled during the read.
         me.pos += (buf.filled().len() - before) as u64;
 
         result
@@ -160,16 +159,11 @@ impl AsyncMediaSource for HttpStream {
         &mut self,
         offset: u64,
     ) -> Result<Box<dyn AsyncMediaSource>, AudioStreamError> {
-        debug!(offset, expected_bytes = ?self.file.content_length, "resuming audio stream after error");
-
         let stream = Self::open(self.file.clone(), self.budget_bytes, &self.cancel, offset)
             .await
             .map_err(|error| {
-                debug!(offset, %error, "audio stream resume failed");
                 AudioStreamError::Fail(Box::new(error))
             })?;
-
-        debug!(offset, "audio stream resumed");
         Ok(Box::new(stream))
     }
 }

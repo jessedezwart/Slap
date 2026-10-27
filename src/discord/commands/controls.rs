@@ -7,28 +7,28 @@ use twilight_model::{
     id::{Id, marker::MessageMarker},
 };
 
-use super::{CommandError, Reply, caller_channel};
+use super::{CommandError, caller_channel};
 use crate::{
     session::{Control, SessionError},
     state::State,
 };
 
-/// The player message a button was pressed on.
-fn player_message(interaction: &Interaction) -> Result<Id<MessageMarker>, CommandError> {
+/// The component a button was pressed on.
+fn component_message_id(interaction: &Interaction) -> Result<Id<MessageMarker>, CommandError> {
     let message = interaction.message.as_ref().ok_or(SessionError::Ended)?;
     Ok(message.id)
 }
 
-/// Nothing to say on success: the player shows the change.
-pub(super) async fn control_playback(
+pub(super) async fn apply_control(
     state: &Arc<State>,
     interaction: &Interaction,
     control: Control,
-) -> Result<Reply, CommandError> {
+) -> Result<(), CommandError> {
     let (guild_id, channel_id) = caller_channel(state, interaction)?;
+    // Send the control to the session
     state
         .sessions
-        .control(guild_id, channel_id, player_message(interaction)?, control)
+        .control(guild_id, channel_id, component_message_id(interaction)?, control)
         .await?;
-    Ok(Reply::default())
+    Ok(())
 }

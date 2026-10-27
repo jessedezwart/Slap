@@ -36,7 +36,7 @@ pub fn play_command() -> Command {
         CommandType::ChatInput,
     )
     .option(
-        StringBuilder::new("url", "An HTTP(S) track or playlist link")
+        StringBuilder::new("url", "A track or playlist link")
             .required(false)
             .max_length(1024),
     )
@@ -44,33 +44,26 @@ pub fn play_command() -> Command {
 }
 
 /// What the user passed to `/play` directly.
-/// `None` without a link, so the form opens instead.
 pub(super) fn command_input(data: &CommandData) -> Option<PlayInput> {
-    let value = |name: &str| {
-        data.options
-            .iter()
-            .find(|option| option.name == name)
-            .map(|option| &option.value)
-    };
-    let url = match value("url") {
-        Some(CommandOptionValue::String(url)) if !url.trim().is_empty() => url.trim().to_owned(),
+    let option = data.options.iter().find(|option| option.name == "url");
+    let url = match option.map(|option| &option.value) {
+        // Open the form when no link supplied.
+        Some(CommandOptionValue::String(url)) if !url.trim().is_empty() => url.clone(),
         _ => return None,
     };
     Some(PlayInput {
         url,
-        // The placement only matters next to an existing queue, which is what
-        // the form and the Add button are for.
         mode: QueueMode::Append,
     })
 }
 
-/// The form `/play` opens: the link, plus where it goes in the queue.
-#[allow(deprecated)] // TextInput::label is superseded by the Label component.
+/// The form `/play` opens
+#[allow(deprecated)] // The `SelectMenu` component is deprecated, but has no replacement yet.
 fn play_modal() -> InteractionResponse {
     let url = Component::Label(Label {
         id: None,
         label: "Track or playlist link".into(),
-        description: Some("An HTTP(S) track or playlist link".into()),
+        description: Some("Can be Spotify, YouTube, SoundCloud etc.".into()),
         component: Box::new(Component::TextInput(TextInput {
             id: None,
             custom_id: "url".into(),
@@ -146,15 +139,18 @@ pub(super) fn play_input(data: &ModalInteractionData) -> PlayInput {
         url: String::new(),
         mode: QueueMode::Append,
     };
-    // `play_modal` wraps every field in a label of its own.
+    // Loop over the components to find the user inputs.
     for component in &data.components {
+        // The fields are wrapped in a label
         let ModalInteractionComponent::Label(label) = component else {
             continue;
         };
         match &*label.component {
+            // URL field
             ModalInteractionComponent::TextInput(text) if text.custom_id == "url" => {
-                input.url = text.value.trim().to_owned();
+                input.url.clone_from(&text.value);
             }
+            // Queue mode field
             ModalInteractionComponent::StringSelect(select) if select.custom_id == "mode" => {
                 input.mode = match select.values.first().map(String::as_str) {
                     Some("next") => QueueMode::Next,
@@ -182,5 +178,5 @@ pub(super) async fn open_modal(
 }
 
 #[cfg(test)]
-#[path = "../../../tests/discord/commands/form.rs"]
+#[path = "../../../tests/discord/commands/play_modal.rs"]
 mod tests;

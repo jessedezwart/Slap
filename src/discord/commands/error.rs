@@ -2,12 +2,11 @@
 
 use crate::{media::MediaError, session::SessionError};
 
-/// Everything that can go wrong in a way the user should hear about.
-/// Messages are written for the person who typed the command.
+/// These errors are user facing.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum CommandError {
     #[error("This command only works inside a server.")]
-    NotInGuild,
+    NotRanFromGuild,
 
     #[error("Join a voice channel first.")]
     NotInVoice,

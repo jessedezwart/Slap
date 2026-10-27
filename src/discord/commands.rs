@@ -2,8 +2,8 @@
 
 mod controls;
 mod error;
-mod form;
 mod play;
+mod play_modal;
 
 use std::{sync::Arc, time::Instant};
 
@@ -19,10 +19,10 @@ use twilight_model::{
     },
 };
 
-pub use self::form::play_command;
+pub use self::play_modal::play_command;
 use self::{
     error::CommandError,
-    form::{PLAY_MODAL, PlayInput, command_input, open_modal, play_input},
+    play_modal::{PLAY_MODAL, PlayInput, command_input, open_modal, play_input},
 };
 use crate::{discord::player, session::Control, state::State};
 
@@ -102,7 +102,10 @@ pub async fn handle_interaction(state: Arc<State>, interaction: Interaction) {
         }
         // The player reflects every control, so these do not reply.
         Request::Button(Action::Control(control)) => {
-            let work = controls::control_playback(state, interaction, control);
+            let work = async {
+                controls::apply_control(state, interaction, control).await?;
+                Ok(Reply::default())
+            };
             run(state, interaction, ReplyMode::Silent, work).await;
         }
         // The form is the answer; its submission does the work.
@@ -196,8 +199,8 @@ fn caller_channel(
     state: &State,
     interaction: &Interaction,
 ) -> Result<(Id<GuildMarker>, Id<ChannelMarker>), CommandError> {
-    let guild_id = interaction.guild_id.ok_or(CommandError::NotInGuild)?;
-    let user_id = interaction.author_id().ok_or(CommandError::NotInGuild)?;
+    let guild_id = interaction.guild_id.ok_or(CommandError::NotRanFromGuild)?;
+    let user_id = interaction.author_id().ok_or(CommandError::NotRanFromGuild)?;
     let channel_id = state
         .discord_cache
         .voice_state(user_id, guild_id)

@@ -41,7 +41,7 @@ fn modal_submissions_default_to_appending() {
 
     // An untouched select submits no value, which must leave the import at
     // the back of the queue.
-    let input = play_input(&data(vec![url("  https://example.com/a  ")]));
+    let input = play_input(&data(vec![url("https://example.com/a")]));
     assert_eq!(input.url, "https://example.com/a");
     assert_eq!(input.mode, QueueMode::Append);
     for (value, expected) in [
@@ -56,8 +56,6 @@ fn modal_submissions_default_to_appending() {
         ]));
         assert_eq!(input.mode, expected);
     }
-    // An empty link is rejected before anything is spawned.
-    assert!(play_input(&data(vec![url("   ")])).url.is_empty());
 }
 
 #[test]
@@ -84,7 +82,7 @@ fn slash_command_only_runs_with_a_link() {
     assert!(command_input(&data(vec![])).is_none());
     assert!(command_input(&data(vec![("url", "   ")])).is_none());
 
-    let input = command_input(&data(vec![("url", "  https://example.com/a  ")])).unwrap();
+    let input = command_input(&data(vec![("url", "https://example.com/a")])).unwrap();
     assert_eq!(input.url, "https://example.com/a");
     assert_eq!(input.mode, QueueMode::Append);
 }

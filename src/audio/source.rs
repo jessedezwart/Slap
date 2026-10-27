@@ -2,14 +2,13 @@
 
 use std::{
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration},
 };
 
 use reqwest::Client;
 use songbird::input::{AsyncAdapterStream, AudioStream, AudioStreamError, Compose, Input};
 use symphonia_core::io::MediaSource;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
 
 use super::{
     AudioError,
@@ -82,10 +81,12 @@ impl TrackSource {
 
 #[async_trait::async_trait]
 impl Compose for TrackSource {
+    // This is never called, because async is set.
     fn create(&mut self) -> Result<AudioStream<Box<dyn MediaSource>>, AudioStreamError> {
         Err(AudioStreamError::Unsupported)
     }
 
+    /// Called when songbird starts playing a track.
     async fn create_async(
         &mut self,
     ) -> Result<AudioStream<Box<dyn MediaSource>>, AudioStreamError> {
@@ -110,7 +111,7 @@ impl Compose for TrackSource {
     }
 }
 
-/// Convert a `TrackSource` into a songbird `Input`. This is the type songbird expects to be returned from the `Compose` trait.
+/// Convert `TrackSource` into a songbird `Input`.
 impl From<TrackSource> for Input {
     fn from(source: TrackSource) -> Self {
         Input::Lazy(Box::new(source))
