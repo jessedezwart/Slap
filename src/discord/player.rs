@@ -67,8 +67,6 @@ pub fn button_action(custom_id: &str) -> Option<Action> {
         .map(|button| button.action)
 }
 
-/// Turn a /play reply into the guild's player, unless the session already
-/// has one.
 pub async fn start(
     state: Arc<State>,
     guild_id: Id<GuildMarker>,

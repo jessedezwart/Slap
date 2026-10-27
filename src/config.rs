@@ -1,5 +1,3 @@
-//! Runtime configuration, read once from the environment at start-up.
-
 use std::{env, fmt::Display, path::PathBuf, str::FromStr, time::Duration};
 
 use thiserror::Error;

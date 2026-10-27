@@ -1,19 +1,14 @@
 //! songbird event handlers.
-//!
-//! These run on songbird's driver task, so they must never reach back into the
-//! `Call` they are attached to — that would re-enter a lock songbird is already
-//! holding. They post notifications, spawn work and write bounded,
-//! non-blocking logs.
 
 use std::sync::{Arc, Weak};
 
 use songbird::{
-    events::{Event, EventContext, EventHandler, TrackEvent},
+    events::{Event, EventContext, EventHandler},
     tracks::PlayMode,
 };
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::warn;
 use twilight_model::id::{Id, marker::GuildMarker};
 
 use super::{QueueEntry, SessionManager};
@@ -21,7 +16,7 @@ use super::{QueueEntry, SessionManager};
 /// Turns any voice disconnect into a full teardown of the guild's pipeline.
 pub struct DisconnectHandler {
     pub guild_id: Id<GuildMarker>,
-    /// Weak, because the manager owns songbird, which owns this handler.
+    /// Weak reference (non-owning) so the handler does not keep the session manager alive.
     pub sessions: Weak<SessionManager>,
     /// The session this handler was attached for.
     pub cancel: CancellationToken,
@@ -30,7 +25,9 @@ pub struct DisconnectHandler {
 #[async_trait::async_trait]
 impl EventHandler for DisconnectHandler {
     async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
+        // On disconnect, teardown the session.
         if let EventContext::DriverDisconnect(data) = ctx
+            // Take control of the session manager if it is still alive. 
             && let Some(sessions) = self.sessions.upgrade()
         {
             let reason = match data.reason {
@@ -40,9 +37,10 @@ impl EventHandler for DisconnectHandler {
             let guild_id = self.guild_id;
             let cancel = self.cancel.clone();
 
-            // Off the driver task: teardown locks the `Call`.
+            // Don't block the event handler to prevent a deadlock.
             tokio::spawn(async move {
-                // A stale disconnect must not end a newer session.
+                // Teardown is by guild, so a new session might be created after the disconnect.
+                // Only teardown if the session is still the same one that was disconnected.
                 sessions
                     .teardown_if(guild_id, &reason, |_| !cancel.is_cancelled())
                     .await;
@@ -53,27 +51,23 @@ impl EventHandler for DisconnectHandler {
     }
 }
 
-/// Wake the panel and log transitions. No queue locks, HTTP requests, or
-/// per-frame logs here.
 pub struct TrackEventHandler {
     pub guild_id: Id<GuildMarker>,
-    pub event: TrackEvent,
     pub redraw: Arc<Notify>,
 }
 
 #[async_trait::async_trait]
 impl EventHandler for TrackEventHandler {
     async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
+        // Notify the player task to redraw the view on every track event.
         self.redraw.notify_one();
+        // Log errored tracks
         if let EventContext::Track(states) = ctx {
             for (state, handle) in *states {
-                let entry = handle.data::<QueueEntry>();
-                let title = entry.metadata.display_title();
                 if let PlayMode::Errored(error) = &state.playing {
+                    let entry = handle.data::<QueueEntry>();
+                    let title = entry.metadata.display_title();
                     warn!(guild_id = %self.guild_id, title, %error, "track failed; queue will advance");
-                } else {
-                    debug!(guild_id = %self.guild_id, title, event = ?self.event,
-                        position_secs = state.position.as_secs(), "track event");
                 }
             }
         }

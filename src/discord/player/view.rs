@@ -22,7 +22,7 @@ use super::{BUTTONS, PlayerButton};
 use crate::{
     discord::{
         commands::Action,
-        text::{escape, format_duration, link, playlist_link},
+        text::{code_line, format_duration, link},
     },
     media::PLAYLIST_LIMIT,
     session::{Control, Origin, QueueEntry},
@@ -92,11 +92,10 @@ impl View {
     ) -> Self {
         let metadata = &entry.metadata;
         let status = Status::of(info);
-        let title = escape(metadata.display_title());
-        let mut details = link(&title, metadata.webpage_url.as_ref());
+        let mut details = link(metadata.display_title(), metadata.webpage_url.as_ref());
         let origin = &entry.origin;
         if let Some(name) = origin.playlist_name.as_deref() {
-            let _ = write!(details, "\n- From {}", playlist_link(name, &origin.url));
+            let _ = write!(details, "\n- From {}", link(name, Some(&origin.url)));
         }
         let _ = write!(details, "\n- Added by <@{}>", origin.requester);
         let _ = write!(details, "\n- <#{voice_channel}>");
@@ -197,7 +196,7 @@ fn up_next(next: &[Arc<QueueEntry>], upcoming: usize) -> String {
             entry.origin.requester_name,
             entry.metadata.display_title()
         );
-        let _ = write!(content, "\n{}", code_line(&line));
+        let _ = write!(content, "\n{}", code_line(&line, Some(UP_NEXT_LINE_LEN)));
     }
     content.push_str("\n```");
     content
@@ -215,19 +214,6 @@ fn import_notice(origin: &Origin) -> Option<String> {
         ));
     }
     (!notice.is_empty()).then(|| notice.join(" "))
-}
-
-fn code_line(text: &str) -> String {
-    text.chars()
-        // Limit the  amount of chars so the code block doesn't get too long
-        .take(UP_NEXT_LINE_LEN)
-        // Replace newlines and backticks with safe characters
-        .map(|c| match c {
-            '\n' | '\r' => ' ',
-            '`' => '\'',
-            _ => c,
-        })
-        .collect()
 }
 
 fn progress(

@@ -174,7 +174,6 @@ impl SessionManager {
                     event.into(),
                     TrackEventHandler {
                         guild_id,
-                        event,
                         redraw: Arc::clone(&redraw),
                     },
                 );

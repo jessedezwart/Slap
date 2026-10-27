@@ -24,5 +24,5 @@ fn truncates_long_titles() {
 fn playlist_names_are_labels_and_only_https_links_are_embedded() {
     let url = "http://example.com/list".parse().unwrap();
     // The name is a label, not markup.
-    assert_eq!(playlist_link("*Road* Trip", &url), "**\\*Road\\* Trip**");
+    assert_eq!(link("*Road* Trip", Some(&url)), "**\\*Road\\* Trip**");
 }

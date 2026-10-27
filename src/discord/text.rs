@@ -21,6 +21,21 @@ pub(super) fn escape(text: &str) -> String {
     escaped
 }
 
+/// Keep `text` on one line inside a code block, at most `max_chars` long
+/// when given. Markdown does not render there, so only a newline or a
+/// backtick could break out of it.
+pub(super) fn code_line(text: &str, max_chars: Option<usize>) -> String {
+    text.chars()
+        .take(max_chars.unwrap_or(usize::MAX))
+        // Replace newlines and backticks with safe characters
+        .map(|c| match c {
+            '\n' | '\r' => ' ',
+            '`' => '\'',
+            _ => c,
+        })
+        .collect()
+}
+
 pub(super) fn format_duration(duration: Duration) -> String {
     let total = duration.as_secs();
     let (hours, minutes, seconds) = (total / 3600, (total % 3600) / 60, total % 60);
@@ -32,9 +47,10 @@ pub(super) fn format_duration(duration: Duration) -> String {
     }
 }
 
-/// Bold `label`, linked when `url` is safe to embed: HTTPS only, and no `>`,
-/// which would end the suppressed-embed `<…>` early.
+/// Bold, escaped `label`, linked when `url` is safe to embed: HTTPS only, and
+/// no `>`, which would end the suppressed-embed `<…>` early.
 pub(super) fn link(label: &str, url: Option<&Url>) -> String {
+    let label = escape(label);
     match url
         .map(Url::as_str)
         .filter(|url| url.starts_with("https://") && !url.contains('>'))
@@ -42,11 +58,6 @@ pub(super) fn link(label: &str, url: Option<&Url>) -> String {
         Some(url) => format!("**[{label}](<{url}>)**"),
         None => format!("**{label}**"),
     }
-}
-
-/// A playlist's name, linked to the playlist it was imported from.
-pub(super) fn playlist_link(name: &str, url: &Url) -> String {
-    link(&escape(name), Some(url))
 }
 
 #[cfg(test)]
