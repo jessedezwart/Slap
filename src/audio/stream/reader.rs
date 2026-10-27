@@ -16,11 +16,11 @@ use tokio::{
     time::Instant,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, Level, debug, enabled, warn};
+use tracing::{Instrument, debug, warn};
 
 use super::{
     Chunk, MAX_CHUNK_BYTES, SourceSpec,
-    pump::{Pump, log_depth},
+    pump::Pump,
     range::{request_window, response_total, window_bytes},
 };
 use crate::{audio::AudioError, config::BufferConfig};
@@ -87,27 +87,13 @@ impl PrefetchStream {
         let pump = Pump {
             spec: spec.clone(),
             tx,
-            budget: Arc::clone(&budget),
+            budget,
             ready: Arc::clone(&ready),
             cancel: cancel.clone(),
             window,
             prefill_bytes,
         };
         let task = tokio::spawn(pump.run(response, requested, offset).in_current_span());
-
-        // Sampling the semaphore costs an atomic load, but a task per stream is
-        // not worth paying for when nobody is listening.
-        if enabled!(Level::DEBUG) {
-            tokio::spawn(
-                log_depth(
-                    budget,
-                    budget_bytes,
-                    buffer.bytes_per_second(spec.bitrate_bps),
-                    cancel.clone(),
-                )
-                .in_current_span(),
-            );
-        }
 
         debug!(
             budget_bytes,

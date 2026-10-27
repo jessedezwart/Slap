@@ -1,13 +1,13 @@
-//! The producer side: downloads windows into the byte-bounded queue.
+//! Reads from queue and writes to the mixer.
 
-use std::{io, sync::Arc, time::Duration};
+use std::{io, sync::Arc};
 
 use bytes::Bytes;
 use futures_util::StreamExt;
 use reqwest::{Response, StatusCode};
 use tokio::{
     sync::{Notify, Semaphore, mpsc},
-    time::{self, Instant},
+    time::Instant,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -17,9 +17,6 @@ use super::{
     range::{request_window, response_total},
 };
 use crate::audio::AudioError;
-
-/// How often the depth gauge samples the buffer, when debug logging is on.
-const DEPTH_LOG_INTERVAL: Duration = Duration::from_secs(2);
 
 /// What the download needs; built by [`super::PrefetchStream::open`].
 pub(super) struct Pump {
@@ -293,36 +290,5 @@ impl Download {
             "audio download stopped"
         );
         Abandoned
-    }
-}
-
-/// Log how full the buffer is, so `RUST_LOG=debug` shows depth over time.
-///
-/// Free permits are bytes the buffer has room for, so the difference is what it
-/// is holding: everything queued plus the chunk the reader has in hand. Bytes
-/// already handed to songbird's adapter are not counted — they are past us.
-pub(super) async fn log_depth(
-    budget: Arc<Semaphore>,
-    budget_bytes: usize,
-    bytes_per_second: u64,
-    cancel: CancellationToken,
-) {
-    let mut ticker = time::interval(DEPTH_LOG_INTERVAL);
-    ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
-
-    loop {
-        tokio::select! {
-            () = cancel.cancelled() => return,
-            _ = ticker.tick() => {}
-        }
-
-        let buffered = budget_bytes.saturating_sub(budget.available_permits());
-
-        debug!(
-            buffered_bytes = buffered,
-            budget_bytes,
-            buffered_ms = buffered as u64 * 1000 / bytes_per_second.max(1),
-            "buffer depth"
-        );
     }
 }
