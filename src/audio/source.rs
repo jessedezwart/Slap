@@ -11,7 +11,7 @@ use twilight_model::id::{Id, marker::GuildMarker};
 
 use super::{
     AudioError,
-    stream::{PrefetchStream, SourceSpec},
+    stream::{HttpSource, RemoteFile},
 };
 use crate::{
     config::BufferConfig,
@@ -66,7 +66,7 @@ impl StreamSource {
         // - One that runs yt-dlp to resolve the target.
         // Bias is used to ensure that if the cancellation token is triggered, we return early and don't wait for yt-dlp to finish.
         // This is done at the start of the poll and when the future is polled again after being woken up, so that we don't wait for yt-dlp to finish if the cancellation token is triggered while yt-dlp is running.
-        let resolved: StreamInfo = tokio::select! {
+        let resolved = tokio::select! {
             biased;
             () =self.cancel.cancelled() => return Err(AudioError::Cancelled),
             result = self.resolver.resolve(&self.target) => result?,
@@ -114,14 +114,14 @@ impl Compose for StreamSource {
             "opening audio stream"
         );
 
-        let spec = SourceSpec::new(
+        let file = RemoteFile::new(
             self.client.clone(),
             &resolved,
             self.buffer_config.assumed_bitrate_bps,
         );
 
         // Returns once the prefill is buffered.
-        let stream = PrefetchStream::open(spec, self.buffer_config, &self.cancel, 0)
+        let stream = HttpSource::open(file, self.buffer_config, &self.cancel, 0)
             .await
             .map_err(fail)?;
         debug!(title = ?resolved.metadata.title, elapsed_ms = started.elapsed().as_millis(), "audio buffer ready");

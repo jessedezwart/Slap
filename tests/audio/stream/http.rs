@@ -88,8 +88,8 @@ async fn serve(body: Vec<u8>, first: usize, release: oneshot::Receiver<()>) -> S
     format!("http://{addr}/audio")
 }
 
-async fn open_stream(url: String, cancel: &CancellationToken) -> PrefetchStream {
-    let spec = SourceSpec {
+async fn open_stream(url: String, cancel: &CancellationToken) -> HttpSource {
+    let file = RemoteFile {
         client: Client::new(),
         url,
         headers: HeaderMap::new(),
@@ -97,7 +97,7 @@ async fn open_stream(url: String, cancel: &CancellationToken) -> PrefetchStream 
         bitrate_bps: 160_000,
     };
 
-    PrefetchStream::open(spec, test_buffer_config(), cancel, 0)
+    HttpSource::open(file, test_buffer_config(), cancel, 0)
         .await
         .expect("stream should open")
 }
@@ -264,7 +264,7 @@ async fn fetches_a_long_body_in_windows() {
     let (url, requests) = serve_ranges(expected.clone()).await;
 
     let cancel = CancellationToken::new();
-    let spec = SourceSpec {
+    let file = RemoteFile {
         client: Client::new(),
         url,
         headers: HeaderMap::new(),
@@ -272,7 +272,7 @@ async fn fetches_a_long_body_in_windows() {
         bitrate_bps: 160_000,
     };
 
-    let mut stream = PrefetchStream::open(spec, test_buffer_config(), &cancel, 0)
+    let mut stream = HttpSource::open(file, test_buffer_config(), &cancel, 0)
         .await
         .expect("stream should open");
 
@@ -299,7 +299,7 @@ async fn byte_len_reports_the_whole_file_not_the_window() {
     let (url, _) = serve_ranges(vec![0u8; len]).await;
 
     let cancel = CancellationToken::new();
-    let spec = SourceSpec {
+    let file = RemoteFile {
         client: Client::new(),
         url,
         headers: HeaderMap::new(),
@@ -308,7 +308,7 @@ async fn byte_len_reports_the_whole_file_not_the_window() {
         bitrate_bps: 160_000,
     };
 
-    let stream = PrefetchStream::open(spec, test_buffer_config(), &cancel, 0)
+    let stream = HttpSource::open(file, test_buffer_config(), &cancel, 0)
         .await
         .expect("stream should open");
 
@@ -324,14 +324,14 @@ async fn short_partial_responses_do_not_end_the_file() {
         let cap = 128 * 1024;
         let (url, requests) = serve_ranges_with(expected.clone(), cap, report_total).await;
         let cancel = CancellationToken::new();
-        let spec = SourceSpec {
+        let file = RemoteFile {
             client: Client::new(),
             url,
             headers: HeaderMap::new(),
             content_length: None,
             bitrate_bps: 160_000,
         };
-        let mut stream = PrefetchStream::open(spec, test_buffer_config(), &cancel, 0)
+        let mut stream = HttpSource::open(file, test_buffer_config(), &cancel, 0)
             .await
             .unwrap();
         assert_eq!(
@@ -359,14 +359,14 @@ async fn http_total_overrides_metadata_for_all_windows() {
         let expected = body();
         let (url, requests) = serve_ranges(expected.clone()).await;
         let cancel = CancellationToken::new();
-        let spec = SourceSpec {
+        let file = RemoteFile {
             client: Client::new(),
             url,
             headers: HeaderMap::new(),
             content_length: Some(reported_size as u64),
             bitrate_bps: 160_000,
         };
-        let mut stream = PrefetchStream::open(spec, test_buffer_config(), &cancel, 0)
+        let mut stream = HttpSource::open(file, test_buffer_config(), &cancel, 0)
             .await
             .unwrap();
         assert_eq!(stream.byte_len().await, Some(BODY_LEN as u64));
@@ -389,14 +389,14 @@ async fn rejected_range_before_known_end_is_an_error() {
     let expected = body();
     let (url, _) = serve_ranges_with(expected.clone(), usize::MAX, false).await;
     let cancel = CancellationToken::new();
-    let spec = SourceSpec {
+    let file = RemoteFile {
         client: Client::new(),
         url,
         headers: HeaderMap::new(),
         content_length: Some(BODY_LEN as u64 * 2),
         bitrate_bps: 160_000,
     };
-    let mut stream = PrefetchStream::open(spec, test_buffer_config(), &cancel, 0)
+    let mut stream = HttpSource::open(file, test_buffer_config(), &cancel, 0)
         .await
         .unwrap();
     let mut actual = Vec::new();

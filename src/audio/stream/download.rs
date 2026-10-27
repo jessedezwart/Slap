@@ -12,15 +12,12 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use super::{
-    SourceSpec,
-    range::{request_window, response_total},
-};
+use super::{RemoteFile, request::request_window};
 use crate::audio::AudioError;
 
 /// Downloads the file one ranged window after another.
-pub(super) struct Windows {
-    spec: SourceSpec,
+pub(super) struct RangedDownload {
+    file: RemoteFile,
     /// Bytes per ranged request.
     window: u64,
     cancel: CancellationToken,
@@ -40,37 +37,33 @@ struct Body {
     started: Instant,
 }
 
-impl Windows {
+impl RangedDownload {
     /// `response` is the first window, already opened by the caller so that a
     /// dead URL fails before songbird is handed a track; every window after it
     /// is requested here.
     pub fn new(
-        spec: SourceSpec,
+        file: RemoteFile,
         window: u64,
         cancel: CancellationToken,
         offset: u64,
         response: Response,
         requested: u64,
     ) -> Self {
-        let mut windows = Self {
-            spec,
+        Self {
+            file,
             window,
             cancel,
             offset,
-            body: None,
-        };
-        windows.body = Some(windows.start(response, requested));
-
-        windows
+            body: Some(Self::start(response, requested)),
+        }
     }
 
-    /// The rest of the download as a stream, which ends early when `cancel`
-    /// fires.
+    /// The rest of the download as a stream, which ends early when `cancel` fires.
     pub fn into_stream(self) -> impl Stream<Item = io::Result<Bytes>> + Send + 'static {
         let cancel = self.cancel.clone();
 
-        stream::try_unfold(self, |mut windows| async move {
-            Ok(windows.next().await?.map(|bytes| (bytes, windows)))
+        stream::try_unfold(self, |mut download| async move {
+            Ok(download.next().await?.map(|bytes| (bytes, download)))
         })
         .take_until(cancel.cancelled_owned())
     }
@@ -103,15 +96,8 @@ impl Windows {
         }
     }
 
-    /// Track a freshly opened window, adopting the file length it reports.
-    fn start(&mut self, response: Response, requested: u64) -> Body {
-        let total = response_total(&response).or(self.spec.content_length);
-        if total != self.spec.content_length {
-            debug!(offset = self.offset, previous_bytes = ?self.spec.content_length,
-                effective_bytes = ?total, "audio file length changed");
-        }
-        self.spec.content_length = total;
-
+    /// Track a freshly opened window.
+    fn start(response: Response, requested: u64) -> Body {
         Body {
             partial: response.status() == StatusCode::PARTIAL_CONTENT,
             stream: response.bytes_stream().boxed(),
@@ -131,13 +117,13 @@ impl Windows {
             ..
         } = finished;
         debug!(offset = self.offset, received, requested, partial,
-            expected_bytes = ?self.spec.content_length, elapsed_ms = started.elapsed().as_millis(),
+            expected_bytes = ?self.file.content_length, elapsed_ms = started.elapsed().as_millis(),
             "audio window finished");
 
         let stop_reason = if !partial {
             Some("full_response_consumed")
         } else if self
-            .spec
+            .file
             .content_length
             .is_some_and(|length| self.offset >= length)
         {
@@ -151,7 +137,7 @@ impl Windows {
         }
 
         if received == 0 {
-            warn!(offset = self.offset, expected_bytes = ?self.spec.content_length,
+            warn!(offset = self.offset, expected_bytes = ?self.file.content_length,
                 "audio response made no progress");
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -159,25 +145,25 @@ impl Windows {
             ));
         }
         if received < requested {
-            debug!(offset = self.offset, received, requested, expected_bytes = ?self.spec.content_length,
+            debug!(offset = self.offset, received, requested, expected_bytes = ?self.file.content_length,
                 "short audio window; continuing download");
         }
 
-        match request_window(&self.spec, self.offset, self.window, &self.cancel).await {
-            Ok((response, requested)) => Ok(Some(self.start(response, requested))),
+        match request_window(&self.file, self.offset, self.window, &self.cancel).await {
+            Ok((response, requested)) => Ok(Some(Self::start(response, requested))),
             Err(AudioError::Cancelled) => {
                 self.stopped("cancelled");
                 Ok(None)
             }
             // For an unknown total, probing past the last byte establishes EOF.
             Err(AudioError::HttpStatus(StatusCode::RANGE_NOT_SATISFIABLE))
-                if self.spec.content_length.is_none() =>
+                if self.file.content_length.is_none() =>
             {
                 self.stopped("range_exhausted");
                 Ok(None)
             }
             Err(error) => {
-                warn!(offset = self.offset, expected_bytes = ?self.spec.content_length, %error,
+                warn!(offset = self.offset, expected_bytes = ?self.file.content_length, %error,
                     "audio download interrupted");
                 Err(io::Error::other(error))
             }
@@ -185,7 +171,7 @@ impl Windows {
     }
 
     fn stopped(&self, reason: &'static str) {
-        debug!(offset = self.offset, expected_bytes = ?self.spec.content_length, reason,
+        debug!(offset = self.offset, expected_bytes = ?self.file.content_length, reason,
             "audio download stopped");
     }
 }

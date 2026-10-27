@@ -148,14 +148,14 @@ impl Config {
             },
             ytdlp: YtDlpConfig {
                 program: env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),
-                timeout: Duration::from_millis(parse_env("YTDLP_TIMEOUT_MS", 15_000u64)?),
+                timeout: Duration::from_millis(parse_env("YTDLP_TIMEOUT_MS", 15_000)?),
                 extra_args,
                 cookies_file,
             },
             buffer: BufferConfig {
-                target: Duration::from_millis(parse_env("BUFFER_MS", 2_000u64)?),
-                prefill_ratio: parse_env("PREFILL_RATIO", 0.5f32)?,
-                assumed_bitrate_bps: parse_env("ASSUMED_BITRATE_BPS", 160_000u32)?,
+                target: Duration::from_millis(parse_env("BUFFER_MS", 2_000)?),
+                prefill_ratio: parse_env("PREFILL_RATIO", 0.5)?,
+                assumed_bitrate_bps: parse_env("ASSUMED_BITRATE_BPS", 160_000)?,
             },
         })
     }

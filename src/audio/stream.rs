@@ -1,15 +1,15 @@
-mod range;
-mod reader;
-mod windows;
+mod download;
+mod http;
+mod request;
 
 use reqwest::{Client, header::HeaderMap};
 
-pub use reader::PrefetchStream;
+pub use http::HttpSource;
 
 use crate::media::StreamInfo;
 
 #[derive(Clone)]
-pub struct SourceSpec {
+pub struct RemoteFile {
     // The shared HTTP client
     pub client: Client,
     // The URL to request from
@@ -22,7 +22,7 @@ pub struct SourceSpec {
     pub bitrate_bps: u32,
 }
 
-impl SourceSpec {
+impl RemoteFile {
     /// `assumed_bitrate_bps` is used when the resolver reported no bitrate.
     pub fn new(client: Client, stream: &StreamInfo, assumed_bitrate_bps: u32) -> Self {
         Self {

@@ -62,7 +62,7 @@ impl SpotifyClient {
             return Ok(token.clone());
         }
 
-        let form: Vec<(&str, &str)> = match auth.refresh_token.as_deref() {
+        let form = match auth.refresh_token.as_deref() {
             Some(token) => vec![("grant_type", "refresh_token"), ("refresh_token", token)],
             None => vec![("grant_type", "client_credentials")],
         };
