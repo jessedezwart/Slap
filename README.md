@@ -87,22 +87,8 @@ cargo test
 
 | Crate | What it is |
 | --- | --- |
-| `crates/slap-core` | The bot as a library: `Bot::start`, `Bot::guilds`, `Bot::shutdown`. |
+| `crates/slap-core` | The bot as a library: `Bot::start`, `Bot::shutdown`. |
 | `crates/slap-headless` | The headless binary, what the Docker image runs. |
-| `crates/slap-gui` | A Tauri desktop window showing connected guilds. |
-
-`cargo build` and `cargo test` cover only `slap-core` and `slap`, so the
-headless build never needs a GUI toolchain. The GUI needs Tauri's
-[system dependencies](https://v2.tauri.app/start/prerequisites/) (on Debian:
-`libwebkit2gtk-4.1-dev libsoup-3.0-dev libgtk-3-dev librsvg2-dev`). With those
-installed, run it from the repository root so it finds `.env`:
-
-```sh
-cargo run -p slap-gui
-```
-
-Its frontend is plain HTML, CSS and JavaScript in `crates/slap-gui/ui`.
-There is no Node toolchain or bundler.
 
 ## Configuration
 

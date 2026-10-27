@@ -1,6 +1,6 @@
 //! The bot itself, independent of how it is hosted.
 //!
-//! A front end (the headless binary, the desktop GUI) loads a [`Config`],
+//! A front end (the headless binary) loads a [`Config`],
 //! starts a [`Bot`] on a Tokio runtime and calls [`Bot::shutdown`] when done.
 
 mod audio;
@@ -12,7 +12,6 @@ mod voice;
 
 use std::{collections::HashMap, num::NonZeroUsize, sync::Arc, thread};
 
-use serde::Serialize;
 use songbird::{Config as SongbirdConfig, Songbird, shards::TwilightMap};
 use tokio::{sync::watch, task::JoinHandle};
 use tracing::{info, warn};
@@ -47,17 +46,6 @@ pub fn build_runtime(worker_threads: Option<usize>) -> std::io::Result<tokio::ru
         .worker_threads(worker_threads)
         .enable_all()
         .build()
-}
-
-/// A guild the bot is a member of, as last seen on the gateway.
-#[derive(Clone, Debug, Serialize)]
-pub struct GuildSummary {
-    /// A string, because snowflakes do not fit in a JavaScript number.
-    pub id: String,
-    pub name: String,
-    pub member_count: Option<u64>,
-    /// Whether the bot is currently in a voice channel there.
-    pub in_voice: bool,
 }
 
 /// A running bot: everything `start` built that `shutdown` takes down again.
@@ -165,24 +153,6 @@ impl Bot {
             dispatchers,
             command_loop,
         })
-    }
-
-    /// The guilds the bot is in, sorted by name.
-    pub fn guilds(&self) -> Vec<GuildSummary> {
-        let mut guilds: Vec<_> = self
-            .state
-            .cache
-            .iter()
-            .guilds()
-            .map(|guild| GuildSummary {
-                id: guild.id().to_string(),
-                name: guild.name().to_owned(),
-                member_count: guild.member_count(),
-                in_voice: self.state.sessions.channel_of(guild.id()).is_some(),
-            })
-            .collect();
-        guilds.sort_by_cached_key(|guild| guild.name.to_lowercase());
-        guilds
     }
 
     /// Leave every voice channel, stop the dispatchers and let the players clean up.
