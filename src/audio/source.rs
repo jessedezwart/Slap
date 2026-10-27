@@ -22,8 +22,8 @@ use crate::media::{StreamInfo, Target, ytdlp::YtDlpResolver};
 pub struct AudioContext {
     /// Shared connection pool for every audio fetch.
     pub http: Client,
-    /// Turns a track into audio once the queue reaches it.
-    pub resolver: YtDlpResolver,
+    /// Finds the media URL for a track once the queue reaches it.
+    pub url_resolver: YtDlpResolver,
     /// How much audio to hold ahead of the mixer, in playback time.
     pub buffer: Duration,
 }
@@ -60,16 +60,15 @@ impl TrackSource {
         // Start two async tasks:
         // - One that waits for the cancellation token to be triggered.
         // - One that runs yt-dlp to resolve the target.
-        // Bias is used to ensure that if the cancellation token is triggered, we return early and don't wait for yt-dlp to finish.
+        // Bias is used to ensure that if the cancellation token is triggered, no need to wait for yt-dlp to finish.
         // This is done at the start of the poll and when the future is polled again after being woken up, so that we don't wait for yt-dlp to finish if the cancellation token is triggered while yt-dlp is running.
         let resolved = tokio::select! {
             biased;
             () = self.cancel.cancelled() => return Err(AudioError::Cancelled),
-            result = self.audio.resolver.resolve(&self.target) => result?,
+            result = self.audio.url_resolver.resolve(&self.target) => result?,
         };
 
-        // Later re-resolves (expired URL, seek) must reach the same upload
-        // rather than search again and maybe land on a different one.
+        // If the target was a search query, and we got a resolved URL, update the target to be that URL.
         if let Target::Search(_) = self.target
             && let Some(url) = resolved.metadata.webpage_url.clone()
         {
@@ -82,7 +81,6 @@ impl TrackSource {
 }
 
 #[async_trait::async_trait]
-/// Everything here is async; songbird will use `create_async`.
 impl Compose for TrackSource {
     fn create(&mut self) -> Result<AudioStream<Box<dyn MediaSource>>, AudioStreamError> {
         Err(AudioStreamError::Unsupported)
@@ -93,23 +91,14 @@ impl Compose for TrackSource {
     ) -> Result<AudioStream<Box<dyn MediaSource>>, AudioStreamError> {
         let resolved = self.resolve().await.map_err(fail)?;
 
-        let started = Instant::now();
-        debug!(
-            title = ?resolved.metadata.title,
-            bitrate_bps = resolved.bitrate_bps,
-            "opening audio stream"
-        );
-
         let file = RemoteFile::new(self.audio.http.clone(), &resolved);
         let budget_bytes = budget_bytes(self.audio.buffer, resolved.bitrate_bps);
 
-        // Returns once the prefill is buffered.
+        // Prefill buffer
         let stream = HttpStream::open(file, budget_bytes, &self.cancel, 0)
             .await
             .map_err(fail)?;
-        debug!(title = ?resolved.metadata.title, elapsed_ms = started.elapsed().as_millis(), "audio buffer ready");
 
-        // songbird's adapter does the read-ahead, so its ring is the buffer.
         Ok(AudioStream {
             input: Box::new(AsyncAdapterStream::new(Box::new(stream), budget_bytes))
                 as Box<dyn MediaSource>,

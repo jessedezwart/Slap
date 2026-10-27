@@ -18,7 +18,7 @@ fn resolver(config: YtDlpConfig) -> YtDlpResolver {
 fn audio(resolver: YtDlpResolver) -> Arc<AudioContext> {
     Arc::new(AudioContext {
         http: reqwest::Client::new(),
-        resolver,
+        url_resolver: resolver,
         buffer: Duration::from_millis(5_000),
     })
 }

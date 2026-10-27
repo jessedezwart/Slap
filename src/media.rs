@@ -95,7 +95,6 @@ pub struct Import {
 #[derive(Debug)]
 pub enum Target {
     Url(Url),
-    /// A recording to go and find an upload of.
     Search(SearchQuery),
 }
 
@@ -108,8 +107,7 @@ impl From<Url> for Target {
 /// A recording described by a catalog, to be found on an audio host.
 #[derive(Debug, Clone)]
 pub struct SearchQuery {
-    /// Stable identity of the recording in its catalog (a Spotify ID, say),
-    /// so the upload it resolved to can be remembered across runs.
+    /// Stable identity of the recording in its catalog (e.g. Spotify track ID)
     pub key: String,
     /// The credited artists, as one line.
     pub artist: String,

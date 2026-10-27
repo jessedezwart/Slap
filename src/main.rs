@@ -167,7 +167,7 @@ impl Bot {
             importer,
             audio: Arc::new(AudioContext {
                 http: reqwest::Client::builder().user_agent("slap").build()?,
-                resolver,
+                url_resolver: resolver,
                 buffer: config.buffer,
             }),
             application_id,
