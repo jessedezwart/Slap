@@ -271,33 +271,20 @@ impl SessionManager {
         Ok(())
     }
 
-    /// The playing track, then up to `len` upcoming ones.
-    pub async fn queue_head(
-        &self,
-        guild_id: Id<GuildMarker>,
-        channel_id: Id<ChannelMarker>,
-        player_message: Id<MessageMarker>,
-        len: usize,
-    ) -> Result<QueueHead, SessionError> {
-        let session = self.lock(guild_id).await;
-        check_player(&session, channel_id, player_message)?;
-        let call = self.call(guild_id)?;
-        let call = call.lock().await;
-        Ok(head_of(&call, len))
-    }
-
-    /// Constant-size snapshot of the session `cancel` belongs to; all locks
-    /// are released before querying the driver or making a Discord request.
+    /// The playing track, then up to `len` upcoming ones, of the session
+    /// `cancel` belongs to; all locks are released before querying the
+    /// driver or making a Discord request.
     pub async fn now_playing(
         &self,
         guild_id: Id<GuildMarker>,
+        len: usize,
         cancel: &CancellationToken,
     ) -> Option<QueueHead> {
         let session = self.lock(guild_id).await;
         current(&session, cancel)?;
         let call = self.songbird.get(guild_id)?;
         let call = call.lock().await;
-        Some(head_of(&call, 0))
+        Some(head_of(&call, len))
     }
 
     /// Make `message_id` the player of the session `cancel` belongs to,
@@ -450,7 +437,7 @@ pub enum Control {
     Stop,
 }
 
-/// The front of the queue, from [`SessionManager::queue_head`].
+/// The front of the queue, from [`SessionManager::now_playing`].
 pub struct QueueHead {
     /// The playing track first, then the requested upcoming ones.
     pub tracks: Vec<TrackHandle>,

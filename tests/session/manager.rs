@@ -108,7 +108,7 @@ async fn controls_from_an_ended_session_cannot_stop_its_replacement() {
 
     // The replacement session shows its player on another message.
     let replacement = insert(&manager, guild, channel, Some(Id::new(200))).await;
-    assert!(manager.now_playing(guild, &cancel).await.is_none());
+    assert!(manager.now_playing(guild, 0, &cancel).await.is_none());
     assert!(
         manager
             .claim_player(guild, &cancel, Id::new(300))

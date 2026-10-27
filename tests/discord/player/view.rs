@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::UNIX_EPOCH};
 
 use super::*;
-use crate::{discord::player::button_action, media::Metadata, session::Playlist};
+use crate::{discord::player::button_action, session::Playlist};
 
 /// A queue entry for `metadata`, queued by user 30 outside any playlist.
 fn entry(metadata: Metadata) -> QueueEntry {
@@ -99,18 +99,19 @@ fn paused_views_are_stable_and_titles_are_bounded() {
         ready: ReadyState::Playable,
         ..Default::default()
     };
-    let view = View::playing(&metadata, &info, 500, "", channel, UNIX_EPOCH);
+    let view = View::playing(&metadata, &info, &[], 500, "", channel, UNIX_EPOCH);
     let content = texts(&view.components);
     assert!(content.starts_with("### Paused"));
     assert!(!content.contains("@everyone"));
     assert!(content.contains("From **[Late Night](<https://www.youtube.com/playlist?list=PL1>)**"));
     assert!(content.contains("Added by <@30>"));
     assert!(content.contains("<#20>"));
-    assert!(content.contains("`0:30 / 1:00` · Queue size: `500`"));
+    assert!(content.contains("`0:30 / 1:00`\n"));
+    assert!(content.contains("**Up next** · `500` queued\n-# …and 500 more"));
     assert!(content.chars().count() < 1000);
     assert_eq!(
         view,
-        View::playing(&metadata, &info, 500, "", channel, UNIX_EPOCH)
+        View::playing(&metadata, &info, &[], 500, "", channel, UNIX_EPOCH)
     );
     let buttons = buttons_of(&view);
     assert_eq!(buttons[0].custom_id.as_deref(), Some("player:resume"));
@@ -119,6 +120,7 @@ fn paused_views_are_stable_and_titles_are_bounded() {
             &View::playing(
                 &metadata,
                 &TrackState::default(),
+                &[],
                 0,
                 "",
                 channel,
@@ -128,6 +130,30 @@ fn paused_views_are_stable_and_titles_are_bounded() {
         )
         .starts_with("### Loading…")
     );
+}
+
+#[test]
+fn up_next_lists_five_bounded_titles() {
+    let owned: Vec<_> = (1..=7)
+        .map(|i| Metadata {
+            title: Some(format!("Song {i}")),
+            duration: Some(Duration::from_secs(60 * i)),
+            ..Metadata::default()
+        })
+        .collect();
+    let next: Vec<&Metadata> = owned.iter().collect();
+    let content = up_next(&next, 12);
+    assert!(content.starts_with("**Up next** · `12` queued\n1. Song 1 `1:00`\n"));
+    assert!(content.contains("\n5. Song 5 `5:00`\n-# …and 7 more"));
+    assert!(!content.contains("Song 6"));
+    assert_eq!(up_next(&next[..2], 2).lines().count(), 3);
+    assert_eq!(up_next(&[], 0), "**Up next**\n-# Nothing else is queued.");
+    let metadata = Metadata {
+        title: Some("*@\n".repeat(100)),
+        ..Metadata::default()
+    };
+    // Newlines in titles cannot add lines.
+    assert_eq!(up_next(&[&metadata; 5], 5).lines().count(), 6);
 }
 
 #[test]
@@ -141,6 +167,7 @@ fn thumbnails_and_links_only_accept_https() {
     let view = View::playing(
         &entry(metadata.clone()),
         &TrackState::default(),
+        &[],
         0,
         "",
         Id::new(1),
@@ -164,6 +191,7 @@ fn thumbnails_and_links_only_accept_https() {
     let view = View::playing(
         &entry(metadata),
         &TrackState::default(),
+        &[],
         0,
         "",
         Id::new(1),
@@ -186,7 +214,7 @@ fn controls_disable_for_empty_queues() {
     let view = View::empty("");
     for (button, disabled) in buttons_of(&view)
         .into_iter()
-        .zip([true, true, false, false, false])
+        .zip([true, true, false, false])
     {
         assert_eq!(button.disabled, disabled);
         assert_eq!(button.style, ButtonStyle::Secondary);

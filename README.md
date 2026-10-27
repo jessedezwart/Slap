@@ -143,17 +143,15 @@ always shuffled. Running `/play` without a link opens a form instead, with:
   everything queued, and starts the import instead.
 
 Everything else is a button on the player message: **Pause/Resume**, **Skip**,
-**Stop**, **Add**, and **Queue**. **Add** opens the same form as `/play`, so a
+**Stop**, and **Add**. **Add** opens the same form as `/play`, so a
 link can be queued without leaving the player.
 
 The first successful `/play` response becomes a live player message with the
-current title, thumbnail, requester, elapsed and total time, queue size, and
-those buttons. Later imports reuse that player. A playlist import names its
-playlist on the player, next to the track it is playing. When playback ends,
+current title, thumbnail, requester, elapsed and total time, the next five
+queued tracks with the queue size, and those buttons. Later imports reuse that
+player. A playlist import names its playlist on the player, next to the track it is playing. When playback ends,
 the player is left behind as a plain "Playback stopped" message with no
-buttons. Queue replies
-privately with the current track and the first five
-upcoming tracks. Skip and Stop succeed silently because the player shows the
+buttons. Skip and Stop succeed silently because the player shows the
 result; errors are private. Unknown track durations show elapsed time only.
 
 The player edits one message per voice session. Progress refreshes every

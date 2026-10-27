@@ -18,7 +18,6 @@ use twilight_model::{
         marker::{ChannelMarker, GuildMarker},
     },
 };
-use twilight_util::builder::InteractionResponseDataBuilder;
 
 pub use self::form::play_command;
 use self::{
@@ -32,7 +31,6 @@ use crate::{discord::player, session::Control, state::State};
 pub enum Action {
     /// Open the play form.
     OpenForm,
-    Queue,
     Control(Control),
 }
 
@@ -67,7 +65,6 @@ impl Request {
         match self {
             Self::Play(_) => "play",
             Self::Button(Action::OpenForm) => "open_form",
-            Self::Button(Action::Queue) => "queue",
             Self::Button(Action::Control(Control::Pause)) => "pause",
             Self::Button(Action::Control(Control::Resume)) => "resume",
             Self::Button(Action::Control(Control::Skip)) => "skip",
@@ -81,8 +78,6 @@ impl Request {
 enum ReplyMode {
     /// A reply everyone in the channel sees.
     Public,
-    /// A reply only the caller sees.
-    Private,
     /// No reply on success: the player shows the change. Errors go to the
     /// caller privately.
     Silent,
@@ -104,10 +99,6 @@ pub async fn handle_interaction(state: Arc<State>, interaction: Interaction) {
         Request::Play(input) => {
             let work = play::play(state, interaction, &input.url, input.mode);
             run(state, interaction, ReplyMode::Public, work).await;
-        }
-        Request::Button(Action::Queue) => {
-            let work = controls::queue(state, interaction);
-            run(state, interaction, ReplyMode::Private, work).await;
         }
         // The player reflects every control, so these do not reply.
         Request::Button(Action::Control(control)) => {
@@ -166,7 +157,7 @@ async fn respond(
                 .allowed_mentions(Some(&mentions))
                 .await?;
         }
-        (ReplyMode::Public | ReplyMode::Private, result) => {
+        (ReplyMode::Public, result) => {
             let reply = result.unwrap_or_else(|error| Reply::message(error.to_string()));
             let response = http
                 .update_response(&interaction.token)
@@ -244,11 +235,7 @@ async fn defer(
                 } else {
                     InteractionResponseType::DeferredChannelMessageWithSource
                 },
-                data: (mode == ReplyMode::Private).then(|| {
-                    InteractionResponseDataBuilder::new()
-                        .flags(MessageFlags::EPHEMERAL)
-                        .build()
-                }),
+                data: None,
             },
         )
         .await

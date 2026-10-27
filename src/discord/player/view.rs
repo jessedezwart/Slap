@@ -23,8 +23,12 @@ use crate::{
         commands::Action,
         text::{escape, format_duration, link, playlist_link},
     },
+    media::Metadata,
     session::{Control, QueueEntry},
 };
+
+/// Upcoming tracks the player lists.
+pub(super) const UP_NEXT_LEN: usize = 5;
 
 const ACCENT_PLAYING: u32 = 0x8B5CF6;
 const ACCENT_PAUSED: u32 = 0xF0B232;
@@ -78,9 +82,11 @@ impl Status {
 }
 
 impl View {
+    /// `next` is the front of the `upcoming` tracks, at most [`UP_NEXT_LEN`].
     pub fn playing(
         entry: &QueueEntry,
         info: &TrackState,
+        next: &[&Metadata],
         upcoming: usize,
         notice: &str,
         voice_channel: Id<ChannelMarker>,
@@ -118,10 +124,9 @@ impl View {
             text(format!("### {}", status.label())),
             separator(),
             details,
-            text(format!(
-                "{} · Queue size: `{upcoming}`",
-                progress(status, info.position, metadata.duration, now)
-            )),
+            text(progress(status, info.position, metadata.duration, now)),
+            separator(),
+            text(up_next(next, upcoming)),
         ];
         push_notice(&mut components, notice);
         components.push(buttons(false, status == Status::Paused));
@@ -181,6 +186,27 @@ fn push_notice(components: &mut Vec<Component>, notice: &str) {
     }
 }
 
+/// The next few tracks, numbered, under a count of everything still queued.
+fn up_next(next: &[&Metadata], upcoming: usize) -> String {
+    if upcoming == 0 {
+        return "**Up next**\n-# Nothing else is queued.".into();
+    }
+    let next = &next[..next.len().min(UP_NEXT_LEN)];
+    let mut content = format!("**Up next** · `{upcoming}` queued");
+    for (index, metadata) in next.iter().enumerate() {
+        let title: String = metadata.display_title().chars().take(80).collect();
+        let _ = write!(content, "\n{}. {}", index + 1, escape(&title));
+        if let Some(duration) = metadata.duration {
+            let _ = write!(content, " `{}`", format_duration(duration));
+        }
+    }
+    let more = upcoming.saturating_sub(next.len());
+    if more > 0 {
+        let _ = write!(content, "\n-# …and {more} more");
+    }
+    content
+}
+
 fn progress(
     status: Status,
     position: Duration,
@@ -232,7 +258,6 @@ fn buttons(empty: bool, paused: bool) -> Component {
             (Action::Control(Control::Skip), empty),
             (Action::Control(Control::Stop), false),
             (Action::OpenForm, false),
-            (Action::Queue, false),
         ]
         .into_iter()
         .map(|(action, disabled)| button(action, disabled))

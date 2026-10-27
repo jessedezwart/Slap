@@ -18,7 +18,7 @@ use twilight_model::{
     },
 };
 
-use super::view::View;
+use super::view::{UP_NEXT_LEN, View};
 use crate::{
     session::{GuildSession, QueueEntry, QueueHead},
     state::State,
@@ -113,10 +113,11 @@ impl PlayerTask {
         let head = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(Stop::Ended),
-            head = self.state.sessions.now_playing(self.guild_id, cancel) => head,
+            head = self.state.sessions.now_playing(self.guild_id, UP_NEXT_LEN, cancel) => head,
         };
         let QueueHead { tracks, total } = head.ok_or(Stop::Ended)?;
-        let Some(track) = tracks.into_iter().next() else {
+        let mut tracks = tracks.into_iter();
+        let Some(track) = tracks.next() else {
             return Ok(Some(View::empty(&self.notice)));
         };
         // get_info is a driver message/oneshot, not an HTTP request. Never
@@ -129,9 +130,12 @@ impl PlayerTask {
         let Ok(Ok(info)) = info else {
             return Ok(None);
         };
+        let next: Vec<_> = tracks.map(|track| track.data::<QueueEntry>()).collect();
+        let next: Vec<_> = next.iter().map(|entry| &entry.metadata).collect();
         Ok(Some(View::playing(
             &track.data::<QueueEntry>(),
             &info,
+            &next,
             total.saturating_sub(1),
             &self.notice,
             self.session.channel_id,
