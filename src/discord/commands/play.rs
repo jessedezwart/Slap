@@ -23,6 +23,16 @@ pub(super) async fn play(
 
     let (guild_id, channel_id) = caller_channel(state, interaction)?;
     let user_id = interaction.author_id().ok_or(CommandError::NotRanFromGuild)?;
+    // Server nickname, else display name, else username.
+    let user_name = interaction
+        .member
+        .as_ref()
+        .and_then(|member| member.nick.clone())
+        .or_else(|| {
+            let user = interaction.author()?;
+            Some(user.global_name.clone().unwrap_or_else(|| user.name.clone()))
+        })
+        .unwrap_or_default();
 
     let cancel = state.sessions.join(guild_id, channel_id).await?;
 
@@ -45,6 +55,7 @@ pub(super) async fn play(
 
     let origin = Arc::new(Origin {
         requester: user_id,
+        requester_name: user_name,
         url,
         playlist_name: import.playlist_name.take(),
         skipped: import.skipped,

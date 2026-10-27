@@ -133,8 +133,7 @@ impl PlayerTask {
             }
         };
 
-        let entries: Vec<_> = tracks.map(|track| track.data::<QueueEntry>()).collect();
-        let next: Vec<_> = entries.iter().map(|entry| &entry.metadata).collect();
+        let next: Vec<_> = tracks.map(|track| track.data::<QueueEntry>()).collect();
 
         Ok(Some(View::playing(
             &track.data::<QueueEntry>(),

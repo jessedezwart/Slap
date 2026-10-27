@@ -2,6 +2,7 @@
 
 use std::{
     fmt::Write as _,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -23,12 +24,14 @@ use crate::{
         commands::Action,
         text::{escape, format_duration, link, playlist_link},
     },
-    media::{Metadata, PLAYLIST_LIMIT},
+    media::PLAYLIST_LIMIT,
     session::{Control, Origin, QueueEntry},
 };
 
 /// Upcoming tracks the player lists.
 pub(super) const UP_NEXT_LEN: usize = 5;
+/// Characters kept of each "Up next" line.
+const UP_NEXT_LINE_LEN: usize = 80;
 
 const ACCENT_PLAYING: u32 = 0x8B5CF6;
 const ACCENT_PAUSED: u32 = 0xF0B232;
@@ -82,7 +85,7 @@ impl View {
     pub fn playing(
         entry: &QueueEntry,
         info: &TrackState,
-        next: &[&Metadata],
+        next: &[Arc<QueueEntry>],
         upcoming: usize,
         voice_channel: Id<ChannelMarker>,
         now: SystemTime,
@@ -183,18 +186,18 @@ fn separator() -> Component {
     })
 }
 
-fn up_next(next: &[&Metadata], upcoming: usize) -> String {
+fn up_next(next: &[Arc<QueueEntry>], upcoming: usize) -> String {
     if upcoming == 0 || next.is_empty() {
         return "**Up next**\n-# Nothing else is queued.".into();
     }
     let mut content = format!("**Up next** · `{upcoming}` queued\n```");
-    for (index, metadata) in next.iter().enumerate() {
-        let _ = write!(
-            content,
-            "\n{}. {}",
-            index + 1,
-            code_line(metadata.display_title())
+    for entry in next {
+        let line = format!(
+            "{}: {}",
+            entry.origin.requester_name,
+            entry.metadata.display_title()
         );
+        let _ = write!(content, "\n{}", code_line(&line));
     }
     content.push_str("\n```");
     content
@@ -214,11 +217,11 @@ fn import_notice(origin: &Origin) -> Option<String> {
     (!notice.is_empty()).then(|| notice.join(" "))
 }
 
-/// Keep a title on one line inside a code block: markdown does not render
-/// there, so only a newline or a backtick could break out of it.
 fn code_line(text: &str) -> String {
     text.chars()
-        .take(80)
+        // Limit the  amount of chars so the code block doesn't get too long
+        .take(UP_NEXT_LINE_LEN)
+        // Replace newlines and backticks with safe characters
         .map(|c| match c {
             '\n' | '\r' => ' ',
             '`' => '\'',
@@ -234,11 +237,12 @@ fn progress(
     now: SystemTime,
 ) -> String {
     if status != Status::Playing {
-        return static_position(position, duration);
+        return static_duration(position, duration);
     }
     let now = now.duration_since(UNIX_EPOCH).unwrap_or_default();
     match duration.filter(|duration| !duration.is_zero()) {
         Some(duration) => {
+            // Calculate end time based on current position and total duration
             let end = now + duration.saturating_sub(position);
             format!(
                 "`{}` · ends <t:{}:R>",
@@ -246,13 +250,13 @@ fn progress(
                 end.as_secs()
             )
         }
-        // Live streams and the like have no end to count down to.
+        // Live streams have no end to count down to.
         None => format!("Started <t:{}:R>", now.saturating_sub(position).as_secs()),
     }
 }
 
 /// A position that is not moving, against the length when it is known.
-fn static_position(position: Duration, duration: Option<Duration>) -> String {
+fn static_duration(position: Duration, duration: Option<Duration>) -> String {
     let Some(duration) = duration.filter(|duration| !duration.is_zero()) else {
         return format!("`{}`", format_duration(position));
     };
@@ -263,25 +267,20 @@ fn static_position(position: Duration, duration: Option<Duration>) -> String {
     )
 }
 
-/// The control row. Pause and Resume share a slot; an empty queue leaves
-/// nothing to pause or skip.
 fn buttons(empty: bool, paused: bool) -> Component {
-    let toggle = if paused {
+    let playback_toggle = if paused {
         Control::Resume
     } else {
         Control::Pause
     };
     Component::ActionRow(ActionRow {
         id: None,
-        components: [
-            (Action::Control(toggle), empty),
-            (Action::Control(Control::Skip), empty),
-            (Action::Control(Control::Stop), false),
-            (Action::OpenForm, false),
-        ]
-        .into_iter()
-        .map(|(action, disabled)| button(action, disabled))
-        .collect(),
+        components: vec![
+            button(Action::Control(playback_toggle), empty),
+            button(Action::Control(Control::Skip), empty),
+            button(Action::Control(Control::Stop), false),
+            button(Action::OpenForm, false),
+        ],
     })
 }
 

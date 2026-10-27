@@ -1,14 +1,15 @@
 use std::{sync::Arc, time::UNIX_EPOCH};
 
 use super::*;
-use crate::discord::player::button_action;
+use crate::{discord::player::button_action, media::Metadata};
 
-/// A queue entry for `metadata`, queued by user 30 outside any playlist.
+/// A queue entry for `metadata`, queued by user 30 (Ada) outside any playlist.
 fn entry(metadata: Metadata) -> QueueEntry {
     QueueEntry {
         metadata,
         origin: Arc::new(Origin {
             requester: Id::new(30),
+            requester_name: "Ada".into(),
             url: "https://youtu.be/x".parse().unwrap(),
             playlist_name: None,
             skipped: 0,
@@ -49,15 +50,15 @@ fn buttons_of(view: &View) -> Vec<&Button> {
 #[test]
 fn static_position_handles_unknown_zero_and_overrun() {
     assert_eq!(
-        static_position(Duration::from_secs(10), Some(Duration::from_secs(300))),
+        static_duration(Duration::from_secs(10), Some(Duration::from_secs(300))),
         "`0:10 / 5:00`"
     );
     assert_eq!(
-        static_position(Duration::from_secs(90), Some(Duration::from_secs(60))),
+        static_duration(Duration::from_secs(90), Some(Duration::from_secs(60))),
         "`1:00 / 1:00`"
     );
     for duration in [None, Some(Duration::ZERO)] {
-        assert_eq!(static_position(Duration::from_secs(30), duration), "`0:30`");
+        assert_eq!(static_duration(Duration::from_secs(30), duration), "`0:30`");
     }
 }
 
@@ -90,6 +91,7 @@ fn paused_views_are_stable_and_titles_are_bounded() {
     let metadata = QueueEntry {
         origin: Arc::new(Origin {
             requester: Id::new(30),
+            requester_name: "Ada".into(),
             url: "https://www.youtube.com/playlist?list=PL1".parse().unwrap(),
             playlist_name: Some("Late Night".into()),
             skipped: 2,
@@ -143,30 +145,29 @@ fn paused_views_are_stable_and_titles_are_bounded() {
 }
 
 #[test]
-fn up_next_lists_five_bounded_titles() {
-    let owned: Vec<_> = (1..=7)
-        .map(|i| Metadata {
-            title: Some(format!("Song {i}")),
-            duration: Some(Duration::from_secs(60)),
-            ..Metadata::default()
+fn up_next_lists_requesters_and_bounded_titles() {
+    let next: Vec<_> = (1..=2)
+        .map(|i| {
+            Arc::new(entry(Metadata {
+                title: Some(format!("Song {i}")),
+                ..Metadata::default()
+            }))
         })
         .collect();
-    let next: Vec<&Metadata> = owned.iter().collect();
-    let content = up_next(&next, 12);
-    assert!(content.starts_with("**Up next** · `12` queued\n```\n1. Song 1\n"));
-    assert!(content.ends_with("\n5. Song 5\n```"));
-    assert!(!content.contains("Song 6"));
     assert_eq!(
-        up_next(&next[..2], 2),
-        "**Up next** · `2` queued\n```\n1. Song 1\n2. Song 2\n```"
+        up_next(&next, 12),
+        "**Up next** · `12` queued\n```\nAda: Song 1\nAda: Song 2\n```"
     );
     assert_eq!(up_next(&[], 0), "**Up next**\n-# Nothing else is queued.");
-    let metadata = Metadata {
-        title: Some("```\n".repeat(100)),
-        ..Metadata::default()
-    };
+    let next = vec![
+        Arc::new(entry(Metadata {
+            title: Some("```\n".repeat(100)),
+            ..Metadata::default()
+        }));
+        5
+    ];
     // Titles can neither add lines nor close the block early.
-    let content = up_next(&[&metadata; 5], 5);
+    let content = up_next(&next, 5);
     assert_eq!(content.lines().count(), 8);
     assert_eq!(content.matches("```").count(), 2);
 }

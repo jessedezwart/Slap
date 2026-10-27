@@ -51,6 +51,8 @@ pub struct QueueEntry {
 pub struct Origin {
     /// Who queued the track; shown on the player.
     pub requester: Id<UserMarker>,
+    /// The requester's name as it was when they queued the track.
+    pub requester_name: String,
     pub url: Url,
     pub playlist_name: Option<String>,
     pub skipped: usize,
