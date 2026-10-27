@@ -135,7 +135,9 @@ fn check_response(response: reqwest::Response) -> Result<reqwest::Response, Spot
     Err(match status {
         StatusCode::TOO_MANY_REQUESTS => rate_limited(&response),
         // Without a user token Spotify reports a private playlist as missing.
-        StatusCode::NOT_FOUND | StatusCode::FORBIDDEN => SpotifyError::PlaylistNotFound,
+        StatusCode::NOT_FOUND => SpotifyError::PlaylistNotFound,
+        // `/items` of a playlist the authorized account does not own.
+        StatusCode::FORBIDDEN => SpotifyError::PlaylistNotOwned,
         StatusCode::UNAUTHORIZED => SpotifyError::AuthRevoked,
         _ => SpotifyError::Status(status),
     })

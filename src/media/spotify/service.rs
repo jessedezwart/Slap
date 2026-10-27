@@ -43,7 +43,9 @@ impl SpotifyService {
 
     pub(super) async fn track_by_id(&self, id: &str) -> Result<Import, SpotifyError> {
         let body = match self.client.get(&format!("tracks/{id}"), &[]).await {
-            Err(SpotifyError::PlaylistNotFound) => return Err(SpotifyError::TrackNotFound),
+            Err(SpotifyError::PlaylistNotFound | SpotifyError::PlaylistNotOwned) => {
+                return Err(SpotifyError::TrackNotFound);
+            }
             result => result?,
         };
         let mut import = Import::default();
@@ -56,7 +58,9 @@ impl SpotifyService {
 
     pub(super) async fn album_by_id(&self, id: &str) -> Result<Import, SpotifyError> {
         let album = match self.client.get(&format!("albums/{id}"), &[]).await {
-            Err(SpotifyError::PlaylistNotFound) => return Err(SpotifyError::AlbumNotFound),
+            Err(SpotifyError::PlaylistNotFound | SpotifyError::PlaylistNotOwned) => {
+                return Err(SpotifyError::AlbumNotFound);
+            }
             result => result?,
         };
         let page = album.get("tracks").unwrap_or(&Value::Null);
@@ -143,7 +147,8 @@ impl SpotifyService {
     /// credentials can see.
     async fn first_page_only(&self, id: &str) -> Result<Import, SpotifyError> {
         let body = self.client.get(&format!("playlists/{id}"), &[]).await?;
-        let page = body.get("items").unwrap_or(&Value::Null);
+        // Playlists the app owner's account does not own come without `items`.
+        let page = body.get("items").ok_or(SpotifyError::PlaylistNotOwned)?;
         let entries = entries(page);
         let count = entries.len();
 

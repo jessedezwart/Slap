@@ -34,12 +34,19 @@ pub enum SpotifyError {
     #[error("authorization expired or was revoked; reauthorize the bot")]
     AuthRevoked,
 
-    /// Without a user token Spotify reports a private playlist as missing,
-    /// so both get the same advice.
+    /// Private playlists and Spotify's own editorial playlists are reported
+    /// as missing too.
     #[error(
-        "playlist not found — make sure it is set to public, and that the link is a full https://open.spotify.com/playlist/... link"
+        "playlist not found — it may be private or one of Spotify's own playlists, which the bot cannot read"
     )]
     PlaylistNotFound,
+
+    /// Spotify only shows a Development Mode app the tracks of playlists its
+    /// own account owns or collaborates on.
+    #[error(
+        "Spotify only lets the bot read playlists made by the bot owner's account; albums and single tracks work for any link"
+    )]
+    PlaylistNotOwned,
 
     #[error("track not found — make sure the link is a full https://open.spotify.com/track/... link")]
     TrackNotFound,

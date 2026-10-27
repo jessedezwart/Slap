@@ -155,6 +155,20 @@ async fn client_credentials_reads_only_the_embedded_first_page() {
     assert!(requests[1].starts_with("GET /playlists/playlist "));
 }
 
+#[tokio::test]
+async fn client_credentials_reports_a_playlist_it_cannot_list() {
+    let (base, task) = server(vec![
+        (200, json!({"access_token":"app"})),
+        (200, json!({"name":"Jazz House Vibes", "owner":{"id":"someone"}})),
+    ])
+    .await;
+    assert!(matches!(
+        service(&base, None).playlist_by_id("playlist").await,
+        Err(SpotifyError::PlaylistNotOwned)
+    ));
+    task.await.unwrap();
+}
+
 /// Confirms against the real API that client credentials reach a public
 /// playlist at all, and that only a user token pages past the first 100.
 #[tokio::test]
@@ -225,8 +239,8 @@ async fn actionable_errors_and_empty_playlist() {
             .contains("SPOTIFY_CLIENT_ID")
     );
     for (status, expected) in [
-        (403, "set to public"),
-        (404, "set to public"),
+        (403, "bot owner's account"),
+        (404, "private"),
         (429, "rate limit"),
     ] {
         let (base, task) = server(vec![
