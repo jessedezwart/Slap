@@ -10,7 +10,7 @@ fn song(name: &str) -> Value {
 
 #[test]
 fn reads_the_fields_a_search_needs() {
-    let parsed = track(&song("Song & punctuation?!")).unwrap();
+    let parsed = entry(&song("Song & punctuation?!")).unwrap();
     let Target::Search(query) = &parsed.target else {
         panic!("a Spotify track is searched for");
     };
@@ -38,12 +38,12 @@ fn reads_the_fields_a_search_needs() {
 fn accepts_the_legacy_track_field() {
     let mut old = song("Legacy");
     old["track"] = old.as_object_mut().unwrap().remove("item").unwrap();
-    assert!(track(&old).is_some());
+    assert!(entry(&old).is_some());
 }
 
 #[test]
 fn rejects_entries_that_cannot_be_played() {
-    for entry in [
+    for value in [
         Value::Null,
         json!({"item":null}),
         json!({"item":{"type":"episode"}}),
@@ -51,9 +51,28 @@ fn rejects_entries_that_cannot_be_played() {
         // No ID means nothing stable to cache the resolution against.
         json!({"item":{"type":"track", "name":"No ID", "artists":[{"name":"A"}]}}),
     ] {
-        assert!(track(&entry).is_none(), "{entry}");
+        assert!(entry(&value).is_none(), "{value}");
     }
     let mut local = song("Local");
     local["is_local"] = json!(true);
-    assert!(track(&local).is_none());
+    assert!(entry(&local).is_none());
+}
+
+#[test]
+fn reads_a_bare_track_object() {
+    let parsed = track(&song("Single")["item"]).unwrap();
+    assert_eq!(
+        parsed.metadata.title.as_deref(),
+        Some("Artist, Guest — Single")
+    );
+    let album = json!({"images":[{"url":"https://i.scdn.co/image/cover"}]});
+    assert_eq!(
+        album_track(&song("Single")["item"], &album)
+            .unwrap()
+            .metadata
+            .thumbnail
+            .as_deref(),
+        Some("https://i.scdn.co/image/cover")
+    );
+    assert!(track(&json!({"type":"episode", "name":"Pod", "artists":[{"name":"A"}]})).is_none());
 }

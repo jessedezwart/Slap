@@ -21,7 +21,7 @@ impl Importer {
     pub async fn import(&self, url: &Url) -> Result<Import, MediaError> {
         if is_spotify_url(url) {
             debug!(source = "Spotify", "importing link");
-            return Ok(self.spotify.playlist(url).await?);
+            return Ok(self.spotify.import(url).await?);
         }
 
         // yt-dlp supports far more sites than can be listed, so give it every

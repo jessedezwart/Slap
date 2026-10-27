@@ -173,7 +173,7 @@ async fn live_public_playlist() {
 
     let app = SpotifyService::new(config(None))
         .unwrap()
-        .playlist(&url)
+        .import(&url)
         .await
         .unwrap();
     println!(
@@ -193,7 +193,7 @@ async fn live_public_playlist() {
     };
     let user = SpotifyService::new(config(Some(refresh)))
         .unwrap()
-        .playlist(&url)
+        .import(&url)
         .await
         .unwrap();
     println!(
@@ -259,4 +259,54 @@ async fn actionable_errors_and_empty_playlist() {
             .is_empty()
     );
     task.await.unwrap();
+}
+
+#[tokio::test]
+async fn imports_a_single_track_and_reports_a_missing_one() {
+    let (base, task) = server(vec![
+        (200, json!({"access_token":"token"})),
+        (200, song("Single")["item"].clone()),
+        (404, json!({})),
+    ])
+    .await;
+    let spotify = service(&base, None);
+    let single = spotify.track_by_id("2I67vuiIAcmcchh7037NDP").await.unwrap();
+    assert_eq!(single.tracks.len(), 1);
+    assert_eq!(single.skipped, 0);
+    assert!(single.playlist_name.is_none());
+    assert!(matches!(
+        spotify.track_by_id("missing").await,
+        Err(SpotifyError::TrackNotFound)
+    ));
+    let requests = task.await.unwrap();
+    assert!(requests[1].starts_with("GET /tracks/2I67vuiIAcmcchh7037NDP "));
+}
+
+#[tokio::test]
+async fn imports_an_albums_first_page_with_its_cover_and_name() {
+    let item = |name| song(name)["item"].clone();
+    let (base, task) = server(vec![
+        (200, json!({"access_token":"token"})),
+        (
+            200,
+            json!({"name":"Debut", "images":[{"url":"https://i.scdn.co/image/cover"}],
+                "tracks":{"items":[item("One"), item("Two")], "total":60, "next":"https://untrusted.invalid/never-follow"}}),
+        ),
+        (404, json!({})),
+    ])
+    .await;
+    let spotify = service(&base, None);
+    let album = spotify.album_by_id("album").await.unwrap();
+    assert_eq!(album.playlist_name.as_deref(), Some("Debut"));
+    assert_eq!(album.tracks.len(), 2);
+    assert!(album.truncated);
+    assert!(album.tracks.iter().all(
+        |t| t.metadata.thumbnail.as_deref() == Some("https://i.scdn.co/image/cover")
+    ));
+    assert!(matches!(
+        spotify.album_by_id("missing").await,
+        Err(SpotifyError::AlbumNotFound)
+    ));
+    let requests = task.await.unwrap();
+    assert!(requests[1].starts_with("GET /albums/album "));
 }

@@ -16,10 +16,29 @@ pub fn playlist_name(body: &Value) -> Option<String> {
 
 /// A playlist entry as a track to search for, or `None` when it is a local
 /// file, a podcast episode or otherwise unplayable.
-pub fn track(entry: &Value) -> Option<ImportedTrack> {
-    let track = entry.get("item").or_else(|| entry.get("track"))?;
-    if entry.get("is_local").and_then(Value::as_bool) == Some(true)
-        || track.get("is_local").and_then(Value::as_bool) == Some(true)
+pub fn entry(entry: &Value) -> Option<ImportedTrack> {
+    let item = entry.get("item").or_else(|| entry.get("track"))?;
+    if entry.get("is_local").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    track(item)
+}
+
+/// A track from an album's track list, which leaves out the album, so its
+/// cover comes from `album`.
+pub fn album_track(item: &Value, album: &Value) -> Option<ImportedTrack> {
+    let mut parsed = track(item)?;
+    parsed.metadata.thumbnail = album
+        .pointer("/images/0/url")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    Some(parsed)
+}
+
+/// A track object as a track to search for, or `None` when it is a local
+/// file, a podcast episode or otherwise unplayable.
+pub fn track(track: &Value) -> Option<ImportedTrack> {
+    if track.get("is_local").and_then(Value::as_bool) == Some(true)
         || track.get("type").and_then(Value::as_str) != Some("track")
     {
         return None;

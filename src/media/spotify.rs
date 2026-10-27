@@ -1,4 +1,4 @@
-//! Spotify: a small Web API client that reads playlists into
+//! Spotify: a small Web API client that reads playlists, albums and tracks into
 //! [`crate::media`] tracks.
 //!
 //! Spotify only describes tracks; it has no audio. The resolver searches for
@@ -19,12 +19,12 @@ pub use service::SpotifyService;
 #[derive(Debug, Error)]
 pub enum SpotifyError {
     #[error(
-        "playlist support needs SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET configured by the bot owner"
+        "Spotify support needs SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET configured by the bot owner"
     )]
     NotConfigured,
 
     #[error(
-        "use a full https://open.spotify.com/playlist/... link; shortened links, albums and individual tracks are not supported"
+        "use a full https://open.spotify.com/playlist/..., /album/... or /track/... link; shortened links are not supported"
     )]
     UnsupportedLink,
 
@@ -40,6 +40,12 @@ pub enum SpotifyError {
         "playlist not found — make sure it is set to public, and that the link is a full https://open.spotify.com/playlist/... link"
     )]
     PlaylistNotFound,
+
+    #[error("track not found — make sure the link is a full https://open.spotify.com/track/... link")]
+    TrackNotFound,
+
+    #[error("album not found — make sure the link is a full https://open.spotify.com/album/... link")]
+    AlbumNotFound,
 
     #[error("rate limit reached; try again {}", retry_hint(*.0))]
     RateLimited(Option<u64>),
@@ -77,8 +83,22 @@ pub fn is_spotify_url(url: &Url) -> bool {
     )
 }
 
-/// Pull the playlist ID out of a share link.
-pub fn playlist_id(url: &Url) -> Result<&str, SpotifyError> {
+/// What a share link points at.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Link<'a> {
+    Playlist(&'a str),
+    Album(&'a str),
+    Track(&'a str),
+}
+
+/// Pull the resource type and ID out of a share link.
+pub fn link(url: &Url) -> Result<Link<'_>, SpotifyError> {
+    if !matches!(
+        url.host_str(),
+        Some("open.spotify.com" | "www.open.spotify.com")
+    ) {
+        return Err(SpotifyError::UnsupportedLink);
+    }
     let parts: Vec<_> = url.path().trim_matches('/').split('/').collect();
     // Localized links carry an `intl-xx` prefix before the resource type.
     let parts = if parts.first().is_some_and(|p| p.starts_with("intl-")) {
@@ -86,17 +106,11 @@ pub fn playlist_id(url: &Url) -> Result<&str, SpotifyError> {
     } else {
         &parts[..]
     };
-    match parts {
-        ["playlist", id]
-            if id.len() == 22
-                && id.bytes().all(|c| c.is_ascii_alphanumeric())
-                && matches!(
-                    url.host_str(),
-                    Some("open.spotify.com" | "www.open.spotify.com")
-                ) =>
-        {
-            Ok(id)
-        }
+    let valid = |id: &str| id.len() == 22 && id.bytes().all(|c| c.is_ascii_alphanumeric());
+    match *parts {
+        ["playlist", id] if valid(id) => Ok(Link::Playlist(id)),
+        ["album", id] if valid(id) => Ok(Link::Album(id)),
+        ["track", id] if valid(id) => Ok(Link::Track(id)),
         _ => Err(SpotifyError::UnsupportedLink),
     }
 }

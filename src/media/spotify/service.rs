@@ -1,4 +1,4 @@
-//! Playlist lookups, in Spotify's own terms.
+//! Playlist, album and track lookups, in Spotify's own terms.
 
 use std::time::Duration;
 
@@ -6,10 +6,10 @@ use serde_json::Value;
 use tracing::info;
 use url::Url;
 
-use super::{SpotifyClient, SpotifyError, parse, playlist_id};
+use super::{Link, SpotifyClient, SpotifyError, link, parse};
 use crate::{
     config::SpotifyConfig,
-    media::{Import, PLAYLIST_LIMIT},
+    media::{Import, ImportedTrack, PLAYLIST_LIMIT},
 };
 
 /// Max API cap
@@ -28,11 +28,48 @@ impl SpotifyService {
         })
     }
 
-    pub async fn playlist(&self, url: &Url) -> Result<Import, SpotifyError> {
-        let id = playlist_id(url)?;
-        tokio::time::timeout(IMPORT_TIMEOUT, self.playlist_by_id(id))
+    pub async fn import(&self, url: &Url) -> Result<Import, SpotifyError> {
+        let import = async {
+            match link(url)? {
+                Link::Playlist(id) => self.playlist_by_id(id).await,
+                Link::Album(id) => self.album_by_id(id).await,
+                Link::Track(id) => self.track_by_id(id).await,
+            }
+        };
+        tokio::time::timeout(IMPORT_TIMEOUT, import)
             .await
             .map_err(|_| SpotifyError::Timeout)?
+    }
+
+    pub(super) async fn track_by_id(&self, id: &str) -> Result<Import, SpotifyError> {
+        let body = match self.client.get(&format!("tracks/{id}"), &[]).await {
+            Err(SpotifyError::PlaylistNotFound) => return Err(SpotifyError::TrackNotFound),
+            result => result?,
+        };
+        let mut import = Import::default();
+        match parse::track(&body) {
+            Some(track) => import.tracks.push(track),
+            None => import.skipped += 1,
+        }
+        Ok(import)
+    }
+
+    pub(super) async fn album_by_id(&self, id: &str) -> Result<Import, SpotifyError> {
+        let album = match self.client.get(&format!("albums/{id}"), &[]).await {
+            Err(SpotifyError::PlaylistNotFound) => return Err(SpotifyError::AlbumNotFound),
+            result => result?,
+        };
+        let page = album.get("tracks").unwrap_or(&Value::Null);
+        let entries = entries(page);
+        let count = entries.len();
+
+        let mut import = Import {
+            playlist_name: parse::playlist_name(&album),
+            ..Import::default()
+        };
+        collect_into(&mut import, entries, |item| parse::album_track(item, &album));
+        import.truncated = total(page).is_some_and(|total| total > count);
+        Ok(import)
     }
 
     pub(super) async fn playlist_by_id(&self, id: &str) -> Result<Import, SpotifyError> {
@@ -81,7 +118,7 @@ impl SpotifyService {
                 .await?;
             let entries = entries(&page);
             let count = entries.len();
-            collect_into(&mut playlist, entries);
+            collect_into(&mut playlist, entries, parse::entry);
             offset += count;
 
             if playlist.tracks.len() + playlist.skipped >= PLAYLIST_LIMIT {
@@ -114,7 +151,7 @@ impl SpotifyService {
             playlist_name: parse::playlist_name(&body),
             ..Import::default()
         };
-        collect_into(&mut playlist, entries);
+        collect_into(&mut playlist, entries, parse::entry);
         playlist.truncated =
             total(page).is_some_and(|total| total > count) || count > PLAYLIST_LIMIT;
         Ok(playlist)
@@ -122,10 +159,14 @@ impl SpotifyService {
 }
 
 /// Append entries, stopping at the limit and counting what was unplayable.
-fn collect_into(playlist: &mut Import, entries: &[Value]) {
+fn collect_into(
+    playlist: &mut Import,
+    entries: &[Value],
+    parse: impl Fn(&Value) -> Option<ImportedTrack>,
+) {
     let room = PLAYLIST_LIMIT.saturating_sub(playlist.tracks.len() + playlist.skipped);
     for entry in entries.iter().take(room) {
-        match parse::track(entry) {
+        match parse(entry) {
             Some(track) => playlist.tracks.push(track),
             None => playlist.skipped += 1,
         }

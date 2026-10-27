@@ -87,7 +87,7 @@ pub struct Import {
     pub skipped: usize,
     /// More tracks exist than were returned.
     pub truncated: bool,
-    /// Set only when the link was a playlist, and it had a name.
+    /// Set only when the link was a playlist or album, and it had a name.
     pub playlist_name: Option<String>,
 }
 

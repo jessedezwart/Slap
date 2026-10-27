@@ -70,7 +70,7 @@ pub struct GuildSession {
     pub player_message: Option<Id<MessageMarker>>,
 }
 
-/// Messages are written for the person who pressed the button.
+/// User facing messages
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     #[error("I could not join your voice channel: {0}")]

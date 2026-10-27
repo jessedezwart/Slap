@@ -64,7 +64,6 @@ fn main() -> ExitCode {
         }
     };
 
-    // Sized from `TOKIO_WORKER_THREADS`, or one worker per core.
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
