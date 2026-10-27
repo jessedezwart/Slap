@@ -10,7 +10,7 @@ use tracing::warn;
 use twilight_model::{
     channel::{
         Message,
-        message::{AllowedMentions, MessageFlags},
+        message::{MessageFlags},
     },
     id::{
         Id,

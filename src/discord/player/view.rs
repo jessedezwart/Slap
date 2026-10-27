@@ -34,7 +34,6 @@ const ACCENT_PLAYING: u32 = 0x8B5CF6;
 const ACCENT_PAUSED: u32 = 0xF0B232;
 const ACCENT_IDLE: u32 = 0x80848E;
 
-/// A Components V2 message: everything lives in one accented container.
 #[derive(Debug, PartialEq)]
 pub(super) struct View {
     pub components: Vec<Component>,
@@ -46,14 +45,12 @@ enum Status {
     Playing,
     Paused,
     Loading,
-    /// The track has finished and the next one has not started yet.
-    Changing,
 }
 
 impl Status {
     fn of(info: &TrackState) -> Self {
         if info.playing.is_done() {
-            Self::Changing
+            Self::Loading
         } else if info.playing == PlayMode::Pause {
             Self::Paused
         } else if info.ready != ReadyState::Playable {
@@ -68,7 +65,6 @@ impl Status {
             Self::Playing => "Now playing",
             Self::Paused => "Paused",
             Self::Loading => "Loading…",
-            Self::Changing => "Changing tracks…",
         }
     }
 
@@ -76,7 +72,7 @@ impl Status {
         match self {
             Self::Playing => ACCENT_PLAYING,
             Self::Paused => ACCENT_PAUSED,
-            Self::Loading | Self::Changing => ACCENT_IDLE,
+            Self::Loading => ACCENT_IDLE,
         }
     }
 }
@@ -102,6 +98,7 @@ impl View {
         let _ = write!(details, "\n- Added by <@{}>", origin.requester);
         let _ = write!(details, "\n- <#{voice_channel}>");
         let details = match metadata.thumbnail.as_deref() {
+            // Add thumbnail if valid URL
             Some(url) if url.starts_with("https://") => Component::Section(Section {
                 id: None,
                 components: vec![text(details)],
@@ -120,6 +117,8 @@ impl View {
             }),
             _ => text(details),
         };
+
+        // Assemble
         let mut components = vec![
             text(format!("### {}", status.label())),
             separator(),
@@ -128,6 +127,7 @@ impl View {
             separator(),
             text(up_next(next, upcoming)),
         ];
+        // Add notice if exists
         if let Some(notice) = import_notice(origin) {
             components.push(text(format!("-# {notice}")));
         }
@@ -162,6 +162,7 @@ impl View {
         Self {
             components: vec![Component::Container(Container {
                 id: None,
+                // Two somes are Twilight's way of setting something that can be missing or null.
                 accent_color: Some(Some(accent)),
                 spoiler: None,
                 components,
@@ -182,10 +183,7 @@ fn separator() -> Component {
     })
 }
 
-/// The next few tracks as a numbered code block, under a count of
-/// everything still queued.
 fn up_next(next: &[&Metadata], upcoming: usize) -> String {
-    let next = &next[..next.len().min(UP_NEXT_LEN)];
     if upcoming == 0 || next.is_empty() {
         return "**Up next**\n-# Nothing else is queued.".into();
     }
