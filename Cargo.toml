@@ -7,10 +7,6 @@ edition = "2024"
 lto = "fat"
 codegen-units = 1
 strip = true
-opt-level = 3
-incremental = false
-debug-assertions = false
-overflow-checks = false
 
 [dependencies]
 songbird = { version = "0.6", default-features = false, features = [
