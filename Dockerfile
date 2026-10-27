@@ -55,7 +55,7 @@ COPY --from=build /etc/yt-dlp/plugins /etc/yt-dlp/plugins
 COPY --from=deno /deno /usr/local/bin/deno
 COPY --from=build /usr/local/bin/slap /usr/local/bin/slap
 
-RUN install -d -o bot -g bot /app/data
+RUN install -d -o bot -g bot /app/data /app/secrets
 ENV CACHE_PATH=/app/data/cache.redb
 
 USER bot

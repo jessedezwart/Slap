@@ -12,7 +12,7 @@ services:
       - cache:/app/data
       # Optional YouTube cookies; see README. Writable because yt-dlp saves
       # its cookie jar back.
-      - ./secrets:/app/secrets
+      - secrets:/app/secrets
     configs:
       - source: ytdlp
         target: /etc/yt-dlp.conf
@@ -34,3 +34,4 @@ configs:
 
 volumes:
   cache:
+  secrets:

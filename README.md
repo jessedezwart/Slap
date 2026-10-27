@@ -2,15 +2,16 @@
 
 A Discord music bot that plays audio **without transcode** using yt-dlp and songbird. Designed to be highly efficient.
 
-### Why not use Songbird's built-in YouTube source?
+## Why not use Songbird's built-in YouTube source?
 
-First of all, this is an educational exercise. Goal is managing data efficiently across different services without blocking threads, handling disconnects across the pipeline. And seeing how performant I could make it.
+This is an educational exercise. Goal is managing data efficiently across different services without blocking threads, handling disconnects across the pipeline, and seeing how performant I could make it.
 
 There are a few additional advantages:
+
 - Controlling yt-dlp means we can set to use Opus-in-WebM, which is the only format that can be passed through to Discord without transcoding.
 - Songbird loads the entire track into memory. This has disadavantages for ram usage and startup time. And since the complete track needs to be loaded on an OS-thread, it can block the complete thread.
-- Songbird doesn't cache yt-dlp metadata. Not that big of a deal, but means additional stalling of an OS-thread.
-- Since I only delegate the playback, I have more control over the failure-handling. I think Songbird orphans instead of kills a yt-dlp process when yt-dlp fails for example.
+- Songbird doesn't cache yt-dlp metadata, which means additional stalling of an OS-thread.
+- Since only playback is delegated, I have more control over the failure-handling. I think Songbird orphans instead of kills a yt-dlp process when yt-dlp fails for example.
 
 ## Sources
 
@@ -23,50 +24,12 @@ Some supported sources:
 
 Full list is here: https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md
 
-## Architecture
-
-1. yt-dlp resolves a link to YouTube's Opus-in-WebM rendition.
-1. The bot fetches the WebM and demuxes it to Opus frames.
-1. The frames are passed to songbird for playback.
-
 ## Docker
 
 Set the token in .env and run:
 
 ```sh
 docker compose up
-```
-
-### Notes
-
-yt-dlp's version is pinned by the `YTDLP_VERSION` build argument. YouTube
-breaks extractors regularly, so rebuild with a newer one when resolution starts
-failing:
-
-```sh
-docker build --build-arg YTDLP_VERSION=2026.09.01 -t slap .
-```
-
-YouTube stops serving audio with `403 Forbidden` after the first MiB unless
-yt-dlp sends a proof-of-origin (PO) token. The image ships the
-[bgutil PO token plugin](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)
-and Deno, and `compose.yaml` runs the token provider next to the bot. When
-bumping the plugin, change `BGUTIL_VERSION` in the `Dockerfile` and the
-`pot-provider` image tag together. To check the setup:
-
-```sh
-docker compose exec bot yt-dlp -v --skip-download "https://www.youtube.com/watch?v=0uPEeFVtMpI" 2>&1 | grep -i "pot\]"
-```
-
-It should list `bgutil:http-2.0.0` among the PO Token Providers and print no
-connection errors for it.
-
-Outside Docker, install the plugin zip into a
-[yt-dlp plugin folder](https://github.com/yt-dlp/yt-dlp#installing-plugins),
-install Deno, and run the provider on the loopback interface:
-
-```sh
-docker run -d --init --name bgutil-provider -p 127.0.0.1:4416:4416 brainicism/bgutil-ytdlp-pot-provider:2.0.0
 ```
 
 ## Development
@@ -83,204 +46,33 @@ cargo test
 
 All configuration settings are documented in `.env.example`. Copy that file to `.env`.
 
-## YouTube cookies
+## YouTube DRM
+
+### PO Tokens
+
+YouTube may stop serving audio unless a PO token is sent. The image ships the
+[bgutil PO token plugin](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)
+and Deno.
+
+### Cookies
 
 If YouTube asks to sign in to confirm you are not a bot, export YouTube cookies
 in Netscape/Mozilla cookie-file format to `secrets/cookies.txt`. Follow yt-dlp's
 [YouTube cookie export instructions](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies).
-Then set this in `.env` and restart the bot:
-
-```env
-YTDLP_COOKIES_FILE=secrets/cookies.txt
-```
-
-The same line works for a local run and for Docker: `compose.yaml` always
-mounts `./secrets` at `/app/secrets`, the container's working directory. With
-the variable unset, the bot runs without cookies.
-
-The bot passes this path to `yt-dlp --cookies` for searches, track resolution,
-and playlist listings. Paths containing spaces are supported. The existing
-`YTDLP_EXTRA_ARGS=--cookies secrets/cookies.txt` also works for paths without
-spaces; use one configuration method. Cookies may expire; replace the file if
-YouTube asks for authentication again.
-
-For Docker, yt-dlp saves its cookie jar back, so the directory and file must be
-readable and writable by the container's bot user (UID 10001). On Linux, for
-example:
-
-```sh
-sudo chown -R 10001:10001 secrets
-sudo chmod 700 secrets
-sudo chmod 600 secrets/cookies.txt
-docker compose up --build
-```
-
-Everything in `secrets/` except `.gitkeep` is excluded from Git and Docker
-build contexts.
-
-When this authentication error occurs, the affected guild's playback stops,
-its queue is cleared, and the bot disconnects from voice. A separate warning
-asks the bot admin to configure or refresh YouTube cookies, and the player
-message is deleted as with a normal stop.
-An error during the initial import is also reported in the command response.
-The bot process keeps running; retry `/play` after fixing the cookie setup.
-
-## Commands
-
-Join a voice channel, then run `/play`. Pass the link directly:
-
-```
-/play url: https://…
-```
-
-A link passed this way is always added to the back of the queue. Imports are
-always shuffled. Running `/play` without a link opens a form instead, with:
-
-- **Track or playlist link** — an HTTP(S) track or playlist link.
-- **If something is already playing** — where the import goes: *Add to the
-  queue* (the default) appends it, *Play next* puts it directly after the
-  current track, and *Replace the queue* stops the current track, clears
-  everything queued, and starts the import instead.
-
-Everything else is a button on the player message: **Pause/Resume**, **Skip**,
-**Stop**, and **Add**. **Add** opens the same form as `/play`, so a
-link can be queued without leaving the player.
-
-The first successful `/play` response becomes a live player message with the
-current title, thumbnail, requester, elapsed and total time, the next five
-queued tracks with the queue size, and those buttons. Later imports reuse that
-player. A playlist import names its playlist on the player, next to the track it is playing. When playback ends,
-the player is left behind as a "Playback stopped" message with no buttons,
-offering a `/play` command for the playlist (or else the track) it was
-last playing, so it can be started again. Skip and Stop succeed silently because the player shows the
-result; errors are private. Unknown track durations show elapsed time only.
-
-The player edits one message per voice session. Progress refreshes every
-15 seconds (four scheduled edits per minute while playing), with earlier
-updates on playback changes. Event bursts are coalesced and edits are spaced
-at least two seconds apart. Unchanged paused/empty views cause no HTTP edits.
-Progress-only updates send text without resending the buttons. The updater
-uses existing metadata and Songbird's playback position: no extra yt-dlp,
-Spotify, artwork or audio requests. Queue reads clone only the current track
-and the first five upcoming tracks.
-
-All updates run in an asynchronous task, with no playback locks held during
-HTTP or driver queries. Requests have timeouts and transient failures back off.
-Stop/disconnect cancels the updater and disables its controls; old buttons
-cannot affect a new session. Deleting the player stops its updater; another
-`/play` creates a replacement. Edits use the bot token so long sessions are
-not limited by the interaction token's lifetime.
-
-Controls require you to be in the bot's voice channel. A `/play` request from
-another channel will not move the bot or interrupt that channel's queue.
-Playlist imports inspect at most 1000 entries and report skipped unavailable
-entries and truncation. Links containing both a video and a playlist import the
-playlist; remove the playlist parameter to request only the video. Tracks resolve
-their audio URLs when playback approaches, and ordinary failures advance to the next track.
-YouTube bot-verification errors stop playback and ask the admin to configure cookies.
-The Opus-only source restriction still applies.
-
-The bot joins **self-deafened** and disconnects as soon as it is the only member
-left in its voice channel, including while paused or loading a playlist. Other
-bots count as members. Leaving clears the queue and cancels pending imports.
-No additional permissions or privileged intents are needed: self-deafening uses
-Discord's [voice-state update](https://discord.com/developers/docs/events/gateway-events#update-voice-state),
-and does not require **Deafen Members**. The existing `GUILD_VOICE_STATES` intent
-supplies channel occupancy updates.
-
-Restart the bot after updating to register the new slash commands.
 
 ## Spotify playlists
 
-Configure `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` in `.env`, then
-restart the bot. Spotify is optional; other sources work without these settings.
+To use Spotify playlists, you need to create a Spotify app and authorize an account.
+Configure `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` in `.env`, then restart the bot.
 
 1. Create an app in the [Spotify developer dashboard](https://developer.spotify.com/dashboard).
 2. Put the client ID and secret in `.env`. This is enough to import **public**
    playlists, up to their first 100 tracks.
-3. Optionally, lift that ceiling by also setting `SPOTIFY_REFRESH_TOKEN`. Use
+3. To use public playlists and increase the playlist limit, set `SPOTIFY_REFRESH_TOKEN`. Use
    Spotify's [Authorization Code flow](https://developer.spotify.com/documentation/web-api/tutorials/code-flow)
    to authorize an account, registering the redirect URI in the dashboard and
    requesting `playlist-read-private` and `playlist-read-collaborative`.
    `scripts/spotify-get-refresh-token` walks through this.
-4. Run `/play` and paste `https://open.spotify.com/playlist/PLAYLIST_ID` into
-   the form.
-
-### The 100-track ceiling
-
-Spotify requires user authentication for `GET /playlists/{id}/items`, which is
-the only endpoint that paginates. With client credentials the bot falls back to
-the tracks embedded in `GET /playlists/{id}`, which returns the first 100 and
-ignores `offset`. Imports past that point report the playlist as truncated.
-
-With a refresh token the bot pages properly and imports up to 1000 tracks,
-including private and collaborative playlists belonging to the authorized
-account. A rotated refresh token is retained in memory; reauthorize and update
-`.env` if authorization fails after a restart.
-
-### Search cache
-
-Searching is the slow part of a playlist import, and the answer never changes,
-so each Spotify track ID and the YouTube upload it resolved to are stored in a
-[redb](https://github.com/cberner/redb) database at `CACHE_PATH`
-(`cache.redb` by default; set it empty to disable). Repeat imports skip the
-search entirely. If a cached upload has since been taken down, the bot searches
-again. The cache is only an optimisation: if it cannot be opened or read, the
-bot logs a warning and behaves as it did without one.
-
-The bot reads playlist pages in order, up to 1000 entries, and searches for each
-track's **artist(s) + song name** when playback approaches. It takes the top
-YouTube Music song result, and if that does not run within 10 s or 7% of the
-Spotify duration, the top regular YouTube result. If neither matches, the track
-is skipped. Only the duration is checked, so a cover or live version of the
-same length can still be picked.
-Local files, episodes, removed tracks and entries without artist/title metadata
-are skipped. Failed YouTube playback advances to the next queued track.
-Full playlist URLs (including localized `intl-...` URLs and share parameters)
-are supported; shortened `spotify.link` URLs, albums, and individual Spotify
-track links are not.
-
-A playlist that is neither public nor owned by the authorized account cannot be
-read, and Spotify reports it as missing rather than forbidden, so the bot asks
-the user to check that the playlist is public. Development
-apps also require an app owner with Premium and have user allowlist limits; see
-[Spotify's development-mode rules](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide).
-All Discord users of this bot use the same configured Spotify account.
-Access tokens refresh automatically for imports. If Spotify returns a rotated
-refresh token it is retained in memory; reauthorize/update `.env` if authorization
-fails after a restart.
-
-## Stream reuse
-
-The redb cache above removes the *search*, but each track still costs a yt-dlp
-run to turn its page URL into a direct media URL. A single link is the
-exception: expanding it already returns that URL, so it plays without a second
-run.
-
-Each queued track keeps the media URL it last played from and reuses it, for
-example on a seek, for as long as it works. googlevideo signs its URLs with an
-expiry, which the bot reads and honours minus a two-minute margin, since
-playback still has to start on the URL after it is handed out. Nothing is
-shared between tracks or guilds: the same song queued twice is resolved twice.
-
-## Notes on behaviour
-
-**Disconnects drop everything.** Each guild owns one `CancellationToken`; every
-yt-dlp child, fetch task and buffer holds a descendant of it. Any voice
-disconnect — dropped connection, kick, channel move, shutdown — cancels that one
-token and the entire pipeline for that guild goes away.
-
-
-## Tests
-
-```sh
-cargo test                      # unit + socket-level buffer tests, no network
-cargo test -- --ignored         # end-to-end: needs yt-dlp and network access
-```
-
-The ignored test resolves a real video and asserts that what songbird ends up
-holding is a `CODEC_TYPE_OPUS` track — the precondition the passthrough design
-rests on. Point it at another video with `YTDLP_TEST_URL`.
 
 ## Invite
 
