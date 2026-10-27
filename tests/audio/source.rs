@@ -47,7 +47,7 @@ async fn youtube_audio_parses_as_opus() {
     });
 
     let cancel = CancellationToken::new();
-    let mut source = TrackSource::new(url, None, audio(resolver), Id::new(1), cancel.clone());
+    let mut source = TrackSource::new(url, None, audio(resolver), cancel.clone());
 
     let metadata = source
         .resolve()
@@ -100,7 +100,6 @@ fn source_without_ytdlp(stream: Option<StreamInfo>) -> TrackSource {
         url,
         stream,
         audio(resolver),
-        Id::new(1),
         CancellationToken::new(),
     )
 }

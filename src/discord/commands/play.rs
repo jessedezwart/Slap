@@ -91,7 +91,6 @@ pub(super) async fn play(
                 track.target,
                 track.stream,
                 Arc::clone(&state.audio),
-                guild_id,
                 cancel.clone(),
             );
             let entry = QueueEntry {

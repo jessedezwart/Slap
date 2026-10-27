@@ -10,7 +10,6 @@ use songbird::input::{AsyncAdapterStream, AudioStream, AudioStreamError, Compose
 use symphonia_core::io::MediaSource;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
-use twilight_model::id::{Id, marker::GuildMarker};
 
 use super::{
     AudioError,
@@ -30,7 +29,6 @@ pub struct AudioContext {
 }
 
 pub struct TrackSource {
-    guild_id: Id<GuildMarker>,
     target: Target,
     stream: Option<StreamInfo>,
     audio: Arc<AudioContext>,
@@ -43,11 +41,9 @@ impl TrackSource {
         target: impl Into<Target>,
         stream: Option<StreamInfo>,
         audio: Arc<AudioContext>,
-        guild_id: Id<GuildMarker>,
         cancel: CancellationToken,
     ) -> Self {
         Self {
-            guild_id,
             target: target.into(),
             stream,
             audio,
@@ -92,13 +88,10 @@ impl Compose for TrackSource {
         Err(AudioStreamError::Unsupported)
     }
 
-    // Don't log all arguments
-    #[tracing::instrument(skip_all, fields(guild_id = self.guild_id.get(), title = tracing::field::Empty))]
     async fn create_async(
         &mut self,
     ) -> Result<AudioStream<Box<dyn MediaSource>>, AudioStreamError> {
         let resolved = self.resolve().await.map_err(fail)?;
-        tracing::Span::current().record("title", resolved.metadata.display_title());
 
         let started = Instant::now();
         debug!(

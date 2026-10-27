@@ -128,8 +128,6 @@ impl RangedDownload {
 
                     return Err(io::Error::other(error));
                 }
-                // The window is done; whether the file is depends on how much
-                // of it arrived.
                 None => self.body = self.next_window(body.partial, body.received).await?,
             }
         }

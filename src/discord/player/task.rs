@@ -35,8 +35,6 @@ pub(super) struct PlayerTask {
     channel_id: Id<ChannelMarker>,
     message_id: Id<MessageMarker>,
     session: GuildSession,
-    /// The last track drawn as playing, whose link the stopped player offers.
-    last: Option<Arc<QueueEntry>>,
 }
 
 /// Why the task stopped updating the message.
@@ -60,11 +58,10 @@ impl PlayerTask {
             channel_id: message.channel_id,
             message_id: message.id,
             session,
-            last: None,
         }
     }
 
-    pub async fn run(mut self) {
+    pub async fn run(self) {
         match self.follow().await {
             Stop::Ended => self.stopped().await,
             // A later /play can claim a new player.
@@ -78,7 +75,7 @@ impl PlayerTask {
     }
 
     /// Redraw on every change until the session ends or the message is gone.
-    async fn follow(&mut self) -> Stop {
+    async fn follow(&self) -> Stop {
         loop {
             if let Err(stop) = self.redraw().await {
                 return stop;
@@ -94,7 +91,7 @@ impl PlayerTask {
     }
 
     /// Rewrite the message from the current state.
-    async fn redraw(&mut self) -> Result<(), Stop> {
+    async fn redraw(&self) -> Result<(), Stop> {
         let Some(view) = self.render().await? else {
             return Ok(());
         };
@@ -107,7 +104,7 @@ impl PlayerTask {
         }
     }
 
-    async fn render(&mut self) -> Result<Option<View>, Stop> {
+    async fn render(&self) -> Result<Option<View>, Stop> {
         let cancel = &self.session.cancel;
         let head = tokio::select! {
             biased;
@@ -131,17 +128,14 @@ impl PlayerTask {
         };
         let next: Vec<_> = tracks.map(|track| track.data::<QueueEntry>()).collect();
         let next: Vec<_> = next.iter().map(|entry| &entry.metadata).collect();
-        let entry = track.data::<QueueEntry>();
-        let view = View::playing(
-            &entry,
+        Ok(Some(View::playing(
+            &track.data::<QueueEntry>(),
             &info,
             &next,
             total.saturating_sub(1),
             self.session.channel_id,
             SystemTime::now(),
-        );
-        self.last = Some(entry);
-        Ok(Some(view))
+        )))
     }
 
     async fn stopped(&self) {
@@ -149,7 +143,7 @@ impl PlayerTask {
             &self.state,
             self.channel_id,
             self.message_id,
-            &View::stopped(self.last.as_deref()),
+            &View::stopped(),
         )
         .await
         .is_err()

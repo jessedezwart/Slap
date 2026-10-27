@@ -16,7 +16,6 @@ use twilight_model::{
     },
     id::{Id, marker::ChannelMarker},
 };
-use url::Url;
 
 use super::{BUTTONS, PlayerButton};
 use crate::{
@@ -147,28 +146,13 @@ impl View {
         )
     }
 
-    /// `last` is the last track drawn as playing: its playlist, or else the
-    /// track itself, is offered to play again.
-    pub fn stopped(last: Option<&QueueEntry>) -> Self {
-        let playlist = last.and_then(|entry| entry.playlist.as_deref());
-        let url = match playlist {
-            Some(playlist) => Some(&playlist.url),
-            None => last.and_then(|entry| entry.metadata.webpage_url.as_ref()),
-        };
-        let mut body = String::new();
-        if let Some(playlist) = playlist {
-            let _ = writeln!(body, "{}", playlist_link(playlist));
-        }
-        body.push_str("The queue is cleared and I left the voice channel.");
-        if let Some(url) = url {
-            let _ = write!(body, " Start it again with:\n{}", replay_command(url));
-        }
+    pub fn stopped() -> Self {
         Self::container(
             ACCENT_IDLE,
             vec![
                 text("### Playback stopped".into()),
                 separator(),
-                text(body),
+                text("The queue is cleared and I left the voice channel.".into()),
             ],
         )
     }
@@ -195,19 +179,6 @@ fn separator() -> Component {
         divider: Some(true),
         spacing: Some(SeparatorSpacingSize::Small),
     })
-}
-
-/// The `/play` invocation that starts this player over, ready to copy.
-///
-/// Only a backtick or a newline could break out of the code span, and a
-/// parsed URL holds neither, but strip them rather than rely on it.
-fn replay_command(url: &Url) -> String {
-    let url: String = url
-        .as_str()
-        .chars()
-        .filter(|c| !matches!(c, '`' | '\n' | '\r'))
-        .collect();
-    format!("`/play url: {url}`")
 }
 
 /// The next few tracks as a numbered code block, under a count of
