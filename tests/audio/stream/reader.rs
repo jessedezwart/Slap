@@ -1,5 +1,8 @@
 use std::{
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -13,8 +16,8 @@ use reqwest::{Client, header::HeaderMap};
 
 use super::*;
 
-/// A body comfortably larger than the smallest buffer we will allocate, so
-/// the reader has to cycle permits to get through it.
+/// A body comfortably larger than the smallest buffer we will allocate, so it
+/// cannot arrive in the prefill alone.
 const BODY_LEN: usize = 512 * 1024;
 
 fn test_buffer_config() -> BufferConfig {
@@ -99,11 +102,8 @@ async fn open_stream(url: String, cancel: &CancellationToken) -> PrefetchStream 
         .expect("stream should open")
 }
 
-/// Every byte arrives, in order, exactly once.
-///
-/// The body is many times the buffer budget, so this only completes if
-/// permits are released as chunks are consumed — a stuck budget would hang
-/// here rather than return short.
+/// Every byte arrives, in order, exactly once — the prefilled head followed
+/// by the rest of the body.
 #[tokio::test]
 async fn streams_a_body_larger_than_the_buffer() {
     let expected = body();
@@ -113,7 +113,6 @@ async fn streams_a_body_larger_than_the_buffer() {
     let cancel = CancellationToken::new();
     let mut stream = open_stream(url, &cancel).await;
 
-    stream.prefill().await.expect("prefill");
     let _ = release.send(());
 
     let mut actual = Vec::new();
@@ -126,63 +125,41 @@ async fn streams_a_body_larger_than_the_buffer() {
     assert_eq!(actual, expected);
 }
 
-/// Prefill returns once the target depth is buffered, without waiting for
+/// Opening returns once the prefill target is buffered, without waiting for
 /// the rest of the body.
 #[tokio::test]
-async fn prefill_returns_before_the_body_is_complete() {
+async fn open_returns_before_the_body_is_complete() {
     let (release, released) = oneshot::channel();
     // 40 KiB covers the 32 KiB prefill target for a 64 KiB budget.
     let url = serve(body(), 40 * 1024, released).await;
 
     let cancel = CancellationToken::new();
-    let mut stream = open_stream(url, &cancel).await;
-
-    tokio::time::timeout(Duration::from_secs(5), stream.prefill())
+    tokio::time::timeout(Duration::from_secs(5), open_stream(url, &cancel))
         .await
-        .expect("prefill should complete without the rest of the body")
-        .expect("prefill should succeed");
+        .expect("open should complete without the rest of the body");
 
     let _ = release.send(());
 }
 
-/// Cancelling the guild token stops the fetch task.
+/// Cancelling the guild token ends the stream even while the body is stalled.
 #[tokio::test]
-async fn cancelling_the_parent_token_stops_the_pump() {
+async fn cancelling_the_token_ends_the_stream() {
     let (release, released) = oneshot::channel();
     let url = serve(body(), 40 * 1024, released).await;
 
     let cancel = CancellationToken::new();
     let mut stream = open_stream(url, &cancel).await;
-
-    stream.prefill().await.expect("prefill");
 
     // The guild is torn down while the body is still arriving.
     cancel.cancel();
 
-    let task = stream.task.take().expect("task handle");
-    let _ = tokio::time::timeout(Duration::from_secs(5), task)
+    let mut actual = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut actual))
         .await
-        .expect("pump task should finish promptly after cancellation");
+        .expect("stream should end promptly after cancellation")
+        .expect("cancellation is a clean end");
 
-    assert!(stream.cancel.is_cancelled());
-
-    let _ = release.send(());
-}
-
-/// Dropping the stream cancels its token, so nothing outlives it.
-#[tokio::test]
-async fn dropping_the_stream_cancels_its_token() {
-    let (release, released) = oneshot::channel();
-    let url = serve(body(), 40 * 1024, released).await;
-
-    let cancel = CancellationToken::new();
-    let stream = open_stream(url, &cancel).await;
-    let child = stream.cancel.clone();
-
-    drop(stream);
-
-    assert!(child.is_cancelled());
-    assert!(!cancel.is_cancelled(), "parent must be left alone");
+    assert!(actual.len() < BODY_LEN);
 
     let _ = release.send(());
 }

@@ -6,11 +6,10 @@
 //! network allows into a byte-bounded queue, and the mixer only ever reads from
 //! that queue.
 //!
-//! The bound is a [`Semaphore`](tokio::sync::Semaphore) holding one permit per buffered byte, so the
-//! configured buffer is honoured in bytes rather than in "however large the
-//! chunks happened to be". Each chunk carries its permits and releases them
-//! when the reader is done with it, which is also the backpressure that stops a
-//! long track from being downloaded into memory all at once.
+//! That background task and queue are songbird's own `AsyncAdapterStream`: it
+//! pulls from our `AsyncRead` into a ring buffer sized to the configured
+//! budget, and stops pulling while the ring is full. That is the backpressure
+//! that stops a long track from being downloaded into memory all at once.
 //!
 //! "As fast as the network allows" needs one thing from the request shape:
 //! googlevideo paces a request for a whole file down to roughly playback rate,
@@ -21,19 +20,13 @@
 //! than one open request. This is the same trick as yt-dlp's
 //! `--http-chunk-size`.
 
-mod pump;
 mod range;
 mod reader;
+mod windows;
 
-use bytes::Bytes;
 use reqwest::{Client, header::HeaderMap};
-use tokio::sync::OwnedSemaphorePermit;
 
 pub use reader::PrefetchStream;
-
-/// Largest piece we hand to the queue at once. Also caps how many permits a
-/// single acquisition needs, so it can never exceed the whole budget.
-const MAX_CHUNK_BYTES: usize = 32 * 1024;
 
 /// Everything needed to open — or reopen — the byte stream.
 #[derive(Clone)]
@@ -45,10 +38,4 @@ pub struct SourceSpec {
     /// an open-ended range, so we pass yt-dlp's reported filesize through.
     pub content_length: Option<u64>,
     pub bitrate_bps: Option<u32>,
-}
-
-/// A buffered chunk. Dropping it returns its bytes to the budget.
-struct Chunk {
-    bytes: Bytes,
-    _permit: OwnedSemaphorePermit,
 }

@@ -18,9 +18,6 @@ use crate::{
     media::{StreamInfo, Target, ytdlp::YtDlpResolver},
 };
 
-/// Small buffer songbird needs. Value is based on the default buffer size in songbird's `AsyncAdapterStream`.
-const ADAPTER_BUFFER_BYTES: usize = 64 * 1024;
-
 pub struct StreamSource {
     guild_id: Option<Id<GuildMarker>>,
     target: Target,
@@ -125,19 +122,17 @@ impl Compose for StreamSource {
             bitrate_bps: resolved.bitrate_bps,
         };
 
-        let mut stream = PrefetchStream::open(spec, self.buffer_config, &self.cancel, 0)
+        // Returns once the prefill is buffered.
+        let stream = PrefetchStream::open(spec, self.buffer_config, &self.cancel, 0)
             .await
             .map_err(fail)?;
-
-        // Never hand songbird a track whose buffer is still empty.
-        stream.prefill().await.map_err(fail)?;
         debug!(title = ?resolved.metadata.title, elapsed_ms = started.elapsed().as_millis(), "audio buffer ready");
 
+        // songbird's adapter does the read-ahead, so its ring is the buffer.
+        let budget_bytes = stream.budget_bytes();
         Ok(AudioStream {
-            input: Box::new(AsyncAdapterStream::new(
-                Box::new(stream),
-                ADAPTER_BUFFER_BYTES,
-            )) as Box<dyn MediaSource>,
+            input: Box::new(AsyncAdapterStream::new(Box::new(stream), budget_bytes))
+                as Box<dyn MediaSource>,
         })
     }
 

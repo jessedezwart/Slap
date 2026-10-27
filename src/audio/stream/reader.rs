@@ -1,144 +1,125 @@
-//! The songbird side: reads buffered chunks and reopens the stream on resume.
+//! The songbird side: an `AsyncRead` over the window stream that reopens on resume.
 
 use std::{
     io::{self, SeekFrom},
     pin::Pin,
-    sync::Arc,
     task::{Context, Poll},
-    time::Duration,
 };
 
-use songbird::input::{AsyncMediaSource, AudioStreamError};
-use tokio::{
-    io::{AsyncRead, AsyncSeek, ReadBuf},
-    sync::{Notify, Semaphore, mpsc},
-    task::JoinHandle,
-    time::Instant,
+use bytes::Bytes;
+use futures_util::{
+    StreamExt,
+    stream::{self, BoxStream},
 };
-use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, warn};
+use songbird::input::{AsyncMediaSource, AudioStreamError};
+use sync_wrapper::SyncWrapper;
+use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
+use tokio_util::{io::StreamReader, sync::CancellationToken};
+use tracing::{Instrument, debug};
 
 use super::{
-    Chunk, MAX_CHUNK_BYTES, SourceSpec,
-    pump::Pump,
+    SourceSpec,
     range::{request_window, response_total, window_bytes},
+    windows::Windows,
 };
 use crate::{audio::AudioError, config::BufferConfig};
-
-/// Stalls shorter than this are normal scheduling noise and not worth logging.
-const STALL_LOG_THRESHOLD: Duration = Duration::from_millis(50);
 
 pub struct PrefetchStream {
     spec: SourceSpec,
     buffer: BufferConfig,
-    /// Cancelled when the guild's pipeline is torn down; our own token is a
-    /// child of it, so one cancel upstream kills every stream below.
-    parent: CancellationToken,
+    /// Cancelled when the guild's pipeline is torn down, which ends the stream.
     cancel: CancellationToken,
-    rx: mpsc::Receiver<Result<Chunk, io::Error>>,
-    task: Option<JoinHandle<()>>,
-    ready: Arc<Notify>,
-    current: Option<Chunk>,
-    cursor: usize,
+    /// songbird wants a `Sync` source; the stream is only ever touched
+    /// through `&mut`, so the wrapper costs nothing.
+    reader: SyncWrapper<StreamReader<BoxStream<'static, io::Result<Bytes>>, Bytes>>,
+    /// How much songbird's adapter should buffer ahead of the mixer.
+    budget_bytes: usize,
     pos: u64,
     len: Option<u64>,
-    /// Set when a read finds the queue empty: the mixer is being starved.
-    starved_since: Option<Instant>,
     span: tracing::Span,
 }
 
 impl PrefetchStream {
-    /// Open the stream and start filling the buffer.
+    /// Open the stream and download until the prefill target is buffered.
     ///
-    /// The initial request happens here rather than in the background task so
-    /// that a dead URL surfaces as an error before songbird is handed a track.
+    /// The initial request happens here rather than lazily so that a dead URL
+    /// surfaces as an error before songbird is handed a track.
     pub async fn open(
         mut spec: SourceSpec,
         buffer: BufferConfig,
-        parent: &CancellationToken,
+        cancel: &CancellationToken,
         offset: u64,
     ) -> Result<Self, AudioError> {
-        let cancel = parent.child_token();
-
         let budget_bytes = buffer.bytes_for(spec.bitrate_bps);
         let prefill_bytes = buffer.prefill_bytes(budget_bytes);
 
         let window = window_bytes(budget_bytes);
-        let (response, requested) = request_window(&spec, offset, window, &cancel).await?;
+        let (response, requested) = request_window(&spec, offset, window, cancel).await?;
 
         // With a *windowed* request `Content-Length` describes the window, not
         // the file, so the total has to come from `Content-Range` or from
         // yt-dlp. The bare `Content-Length` is only meaningful
         // when the server ignored the range and sent the whole body.
         let len = response_total(&response).or(spec.content_length);
-        // The pump and subsequent ranges must use the same authoritative size.
+        // Later windows must use the same authoritative size.
         debug!(metadata_bytes = ?spec.content_length, http_bytes = ?response_total(&response),
             effective_bytes = ?len, "selected audio file length");
         spec.content_length = len;
 
-        let budget = Arc::new(Semaphore::new(budget_bytes));
-        let ready = Arc::new(Notify::new());
-
-        // The semaphore is the real bound; the channel just needs enough slots
-        // not to become the bottleneck.
-        let channel_capacity = (budget_bytes / MAX_CHUNK_BYTES).max(4) + 4;
-        let (tx, rx) = mpsc::channel(channel_capacity);
-
-        let pump = Pump {
-            spec: spec.clone(),
-            tx,
-            budget,
-            ready: Arc::clone(&ready),
-            cancel: cancel.clone(),
+        let mut windows = Windows::new(
+            spec.clone(),
             window,
-            prefill_bytes,
-        };
-        let task = tokio::spawn(pump.run(response, requested, offset).in_current_span());
+            cancel.clone(),
+            offset,
+            response,
+            requested,
+        );
+
+        // Never hand songbird a track whose buffer is still empty. A short
+        // track can end before the target depth is ever reached.
+        let mut prefilled = Vec::new();
+        let mut buffered = 0u64;
+        while buffered < prefill_bytes {
+            let next = tokio::select! {
+                () = cancel.cancelled() => return Err(AudioError::Cancelled),
+                next = windows.next() => next?,
+            };
+            let Some(bytes) = next else { break };
+
+            buffered += bytes.len() as u64;
+            prefilled.push(bytes);
+        }
 
         debug!(
             budget_bytes,
             prefill_bytes,
+            buffered,
             offset,
             window,
             content_length = ?len,
             "opened prefetch stream"
         );
 
+        let bytes = stream::iter(prefilled.into_iter().map(Ok::<_, io::Error>))
+            .chain(windows.into_stream())
+            .boxed();
+
         Ok(Self {
             spec,
             buffer,
-            parent: parent.clone(),
-            cancel,
-            rx,
-            task: Some(task),
-            ready,
-            current: None,
-            cursor: 0,
+            cancel: cancel.clone(),
+            reader: SyncWrapper::new(StreamReader::new(bytes)),
+            budget_bytes,
             pos: offset,
             len,
-            starved_since: None,
             span: tracing::Span::current(),
         })
     }
 
-    /// Wait until enough audio is buffered to start playing.
-    pub async fn prefill(&mut self) -> Result<(), AudioError> {
-        tokio::select! {
-            () = self.ready.notified() => Ok(()),
-            () = self.cancel.cancelled() => Err(AudioError::Cancelled),
-        }
-    }
-}
-
-impl Drop for PrefetchStream {
-    fn drop(&mut self) {
-        // Belt and braces: cancelling stops the task cooperatively, aborting
-        // covers the case where it is parked inside the HTTP stack.
-        self.cancel.cancel();
-
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
+    /// Ring buffer size to give songbird's `AsyncAdapterStream`, which does
+    /// the actual read-ahead.
+    pub fn budget_bytes(&self) -> usize {
+        self.budget_bytes
     }
 }
 
@@ -149,49 +130,11 @@ impl AsyncRead for PrefetchStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let me = self.get_mut();
+        let before = buf.filled().len();
+        let result = Pin::new(me.reader.get_mut()).poll_read(cx, buf);
+        me.pos += (buf.filled().len() - before) as u64;
 
-        loop {
-            if let Some(chunk) = me.current.as_ref() {
-                let remaining = &chunk.bytes[me.cursor..];
-
-                if !remaining.is_empty() {
-                    let count = remaining.len().min(buf.remaining());
-                    buf.put_slice(&remaining[..count]);
-                    me.cursor += count;
-                    me.pos += count as u64;
-
-                    if let Some(since) = me.starved_since.take() {
-                        let stalled = since.elapsed();
-
-                        if stalled >= STALL_LOG_THRESHOLD {
-                            warn!(
-                                ?stalled,
-                                "audio buffer ran dry: playback may have stuttered"
-                            );
-                        }
-                    }
-
-                    return Poll::Ready(Ok(()));
-                }
-
-                // Dropping the chunk releases its permits back to the budget,
-                // which lets the fetch task pull more.
-                me.current = None;
-                me.cursor = 0;
-            }
-
-            match me.rx.poll_recv(cx) {
-                Poll::Ready(Some(Ok(chunk))) => me.current = Some(chunk),
-                Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(error)),
-                // Sender dropped: end of stream.
-                Poll::Ready(None) => return Poll::Ready(Ok(())),
-                Poll::Pending => {
-                    me.starved_since.get_or_insert_with(Instant::now);
-
-                    return Poll::Pending;
-                }
-            }
-        }
+        result
     }
 }
 
@@ -238,18 +181,13 @@ impl AsyncMediaSource for PrefetchStream {
     ) -> Result<Box<dyn AsyncMediaSource>, AudioStreamError> {
         debug!(parent: &self.span, offset, expected_bytes = ?self.len, "resuming audio stream after error");
 
-        let mut stream = Self::open(self.spec.clone(), self.buffer, &self.parent, offset)
+        let stream = Self::open(self.spec.clone(), self.buffer, &self.cancel, offset)
             .instrument(self.span.clone())
             .await
             .map_err(|error| {
                 debug!(parent: &self.span, offset, %error, "audio stream resume failed");
                 AudioStreamError::Fail(Box::new(error))
             })?;
-
-        stream.prefill().await.map_err(|error| {
-            debug!(parent: &self.span, offset, %error, "audio stream resume prefill failed");
-            AudioStreamError::Fail(Box::new(error))
-        })?;
 
         debug!(parent: &self.span, offset, "audio stream resumed");
         Ok(Box::new(stream))

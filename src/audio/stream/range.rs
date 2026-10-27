@@ -63,7 +63,7 @@ pub(super) async fn request_window(
     };
 
     // 206 when the range was served, 200 if the server ignored it and sent the
-    // whole body — the pump finishes after consuming that response.
+    // whole body — the download finishes after consuming that response.
     let status = response.status();
     debug!(offset, requested, %status,
         content_range = ?response.headers().get(CONTENT_RANGE).and_then(|v| v.to_str().ok()),

@@ -11,6 +11,10 @@ pub enum AudioError {
     #[error("HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),
 
+    /// The download broke off partway through a window.
+    #[error("audio download failed: {0}")]
+    Io(#[from] std::io::Error),
+
     #[error("audio host returned HTTP {0}")]
     HttpStatus(reqwest::StatusCode),
 
