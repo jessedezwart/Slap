@@ -42,21 +42,20 @@ const PRELOAD_LEAD: Duration = Duration::from_secs(5);
 #[derive(Debug)]
 pub struct QueueEntry {
     pub metadata: Metadata,
-    /// Who queued the track; shown on the player.
-    pub requester: Id<UserMarker>,
-    /// The playlist this track was imported from, shared by every track of
-    /// that import so the player can name it without a second lookup.
-    pub playlist: Option<Arc<Playlist>>,
-    /// What went wrong importing it (skipped entries, a truncated playlist),
-    /// shared by every track of that import like `playlist`.
-    pub notice: Option<Arc<str>>,
+    /// The import this track came from
+    pub origin: Arc<Origin>,
 }
 
-/// A named playlist, and the link it was imported from.
+/// Details about the track import request
 #[derive(Debug)]
-pub struct Playlist {
-    pub name: String,
+pub struct Origin {
+    /// Who queued the track; shown on the player.
+    pub requester: Id<UserMarker>,
     pub url: Url,
+    pub playlist_name: Option<String>,
+    pub skipped: usize,
+    /// More entries existed than were imported.
+    pub truncated: bool,
 }
 
 #[derive(Clone)]
@@ -199,16 +198,13 @@ impl SessionManager {
     }
 
     /// Add a complete import atomically, rejecting work cancelled by stop/leave.
-    ///
-    /// Returns the first track's queue position, counting the playing track as
-    /// position 1.
     pub async fn enqueue(
         &self,
         guild_id: Id<GuildMarker>,
         cancel: &CancellationToken,
         tracks: Vec<(Input, QueueEntry)>,
         mode: QueueMode,
-    ) -> Result<usize, SessionError> {
+    ) -> Result<(), SessionError> {
         let session = self.lock(guild_id).await;
         let session = current(&session, cancel).ok_or(SessionError::Ended)?;
         let call = self.call(guild_id)?;
@@ -218,7 +214,7 @@ impl SessionManager {
             call.queue().stop();
         }
         let count = tracks.len();
-        let appended_at = call.queue().len() + 1;
+        let was_playing = !call.queue().is_empty();
         for (input, entry) in tracks {
             let preload = entry
                 .metadata
@@ -227,16 +223,13 @@ impl SessionManager {
             let track = Track::new_with_data(input, Arc::new(entry));
             call.enqueue_with_preload(track, preload);
         }
-        let position = if mode == QueueMode::Next && appended_at > 1 {
+        if mode == QueueMode::Next && was_playing {
             call.queue().modify_queue(|queue| play_next(queue, count));
-            2
-        } else {
-            appended_at
-        };
+        }
         // Wake the player for a change songbird has no event for, like the
         // queue growing.
         session.redraw.notify_one();
-        Ok(position)
+        Ok(())
     }
 
     /// Voice controls share the lifecycle lock with joins, enqueues and teardown.

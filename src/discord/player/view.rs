@@ -23,8 +23,8 @@ use crate::{
         commands::Action,
         text::{escape, format_duration, link, playlist_link},
     },
-    media::Metadata,
-    session::{Control, QueueEntry},
+    media::{Metadata, PLAYLIST_LIMIT},
+    session::{Control, Origin, QueueEntry},
 };
 
 /// Upcoming tracks the player lists.
@@ -95,10 +95,11 @@ impl View {
         let status = Status::of(info);
         let title = escape(metadata.display_title());
         let mut details = link(&title, metadata.webpage_url.as_ref());
-        if let Some(playlist) = entry.playlist.as_deref() {
-            let _ = write!(details, "\n- From {}", playlist_link(playlist));
+        let origin = &entry.origin;
+        if let Some(name) = origin.playlist_name.as_deref() {
+            let _ = write!(details, "\n- From {}", playlist_link(name, &origin.url));
         }
-        let _ = write!(details, "\n- Added by <@{}>", entry.requester);
+        let _ = write!(details, "\n- Added by <@{}>", origin.requester);
         let _ = write!(details, "\n- <#{voice_channel}>");
         let details = match metadata.thumbnail.as_deref() {
             Some(url) if url.starts_with("https://") => Component::Section(Section {
@@ -127,7 +128,7 @@ impl View {
             separator(),
             text(up_next(next, upcoming)),
         ];
-        if let Some(notice) = entry.notice.as_deref() {
+        if let Some(notice) = import_notice(origin) {
             components.push(text(format!("-# {notice}")));
         }
         components.push(buttons(false, status == Status::Paused));
@@ -199,6 +200,20 @@ fn up_next(next: &[&Metadata], upcoming: usize) -> String {
     }
     content.push_str("\n```");
     content
+}
+
+/// What went wrong importing the tracks, if anything.
+fn import_notice(origin: &Origin) -> Option<String> {
+    let mut notice = Vec::new();
+    if origin.skipped > 0 {
+        notice.push(format!("Skipped {} unavailable entries.", origin.skipped));
+    }
+    if origin.truncated {
+        notice.push(format!(
+            "Import limited to the first {PLAYLIST_LIMIT} playlist entries."
+        ));
+    }
+    (!notice.is_empty()).then(|| notice.join(" "))
 }
 
 /// Keep a title on one line inside a code block: markdown does not render

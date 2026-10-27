@@ -4,8 +4,6 @@ use std::time::Duration;
 
 use url::Url;
 
-use crate::session::Playlist;
-
 /// Stop a track title from breaking out of its bold markers or pinging anyone.
 pub(super) fn escape(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
@@ -47,8 +45,8 @@ pub(super) fn link(label: &str, url: Option<&Url>) -> String {
 }
 
 /// A playlist's name, linked to the playlist it was imported from.
-pub(super) fn playlist_link(playlist: &Playlist) -> String {
-    link(&escape(&playlist.name), Some(&playlist.url))
+pub(super) fn playlist_link(name: &str, url: &Url) -> String {
+    link(&escape(name), Some(url))
 }
 
 #[cfg(test)]

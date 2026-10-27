@@ -1,15 +1,19 @@
 use std::{sync::Arc, time::UNIX_EPOCH};
 
 use super::*;
-use crate::{discord::player::button_action, session::Playlist};
+use crate::discord::player::button_action;
 
 /// A queue entry for `metadata`, queued by user 30 outside any playlist.
 fn entry(metadata: Metadata) -> QueueEntry {
     QueueEntry {
         metadata,
-        requester: Id::new(30),
-        playlist: None,
-        notice: None,
+        origin: Arc::new(Origin {
+            requester: Id::new(30),
+            url: "https://youtu.be/x".parse().unwrap(),
+            playlist_name: None,
+            skipped: 0,
+            truncated: false,
+        }),
     }
 }
 
@@ -84,11 +88,13 @@ fn playing_tracks_count_down_on_their_own() {
 fn paused_views_are_stable_and_titles_are_bounded() {
     let channel = Id::new(20);
     let metadata = QueueEntry {
-        playlist: Some(Arc::new(Playlist {
-            name: "Late Night".into(),
+        origin: Arc::new(Origin {
+            requester: Id::new(30),
             url: "https://www.youtube.com/playlist?list=PL1".parse().unwrap(),
-        })),
-        notice: Some("Skipped 2 unavailable entries.".into()),
+            playlist_name: Some("Late Night".into()),
+            skipped: 2,
+            truncated: false,
+        }),
         ..entry(Metadata {
             title: Some("*@everyone\n".repeat(1000)),
             duration: Some(Duration::from_secs(60)),

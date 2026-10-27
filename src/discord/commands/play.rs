@@ -10,7 +10,7 @@ use super::{CommandError, Reply, caller_channel};
 use crate::{
     audio::source::TrackSource,
     media::{PLAYLIST_LIMIT, validate_url},
-    session::{Playlist, QueueEntry, QueueMode, SessionError},
+    session::{Origin, QueueEntry, QueueMode, SessionError},
     state::State,
 };
 
@@ -43,28 +43,14 @@ pub(super) async fn play(
     // Imports are always shuffled. Not to be confused with the queue mode.
     import.tracks.shuffle(&mut rand::rng());
     let count = import.tracks.len();
-    let playlist = import
-        .playlist_name
-        .take()
-        .map(|name| {
-            Arc::new(Playlist {
-                name,
-                url: url.clone(),
-            })
-        });
-    let mut notice = String::new();
-    if import.skipped > 0 {
-        let _ = write!(notice, " Skipped {} unavailable entries.", import.skipped);
-    }
-    if import.truncated {
-        let _ = write!(
-            notice,
-            " Import limited to the first {PLAYLIST_LIMIT} playlist entries."
-        );
-    }
-    let entry_notice: Option<Arc<str>> = Some(notice.trim())
-        .filter(|notice| !notice.is_empty())
-        .map(Arc::from);
+
+    let origin = Arc::new(Origin {
+        requester: user_id,
+        url,
+        playlist_name: import.playlist_name.take(),
+        skipped: import.skipped,
+        truncated: import.truncated,
+    });
     let tracks = import
         .tracks
         .into_iter()
@@ -78,20 +64,32 @@ pub(super) async fn play(
             );
             let entry = QueueEntry {
                 metadata: track.metadata,
-                requester: user_id,
-                playlist: playlist.clone(),
-                notice: entry_notice.clone(),
+                origin: Arc::clone(&origin),
             };
             (source.into(), entry)
         })
         .collect();
-    let position = state
+    state
         .sessions
         .enqueue(guild_id, &cancel, tracks, mode)
         .await?;
-    debug!(%guild_id, %channel_id, position, count, ?mode, "queued tracks");
+    debug!(%guild_id, %channel_id, count, ?mode, "queued tracks");
+    let mut message = if count == 1 {
+        "Queued 1 track.".to_owned()
+    } else {
+        format!("Queued {count} tracks.")
+    };
+    if origin.skipped > 0 {
+        let _ = write!(message, " Skipped {} unavailable entries.", origin.skipped);
+    }
+    if origin.truncated {
+        let _ = write!(
+            message,
+            " Import limited to the first {PLAYLIST_LIMIT} playlist entries."
+        );
+    }
     Ok(Reply {
-        message: "Player loading...".into(),
+        message,
         player: Some(cancel),
     })
 }
