@@ -1,11 +1,11 @@
 //! The per-shard gateway loop.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use twilight_cache_inmemory::DefaultInMemoryCache;
-use twilight_gateway::{Event, EventTypeFlags, Shard, StreamExt as _};
+use twilight_gateway::{CloseFrame, Event, EventTypeFlags, Shard, StreamExt as _};
 use twilight_model::id::{
     Id,
     marker::{ChannelMarker, GuildMarker, UserMarker},
@@ -17,7 +17,10 @@ use crate::{discord::commands, state::State};
 pub async fn run_shard(state: Arc<State>, mut shard: Shard, shutdown: CancellationToken) {
     loop {
         let item = tokio::select! {
-            () = shutdown.cancelled() => break,
+            () = shutdown.cancelled() => {
+                close(&mut shard).await;
+                break;
+            }
             item = shard.next_event(EventTypeFlags::all()) => item,
         };
 
@@ -44,6 +47,25 @@ pub async fn run_shard(state: Arc<State>, mut shard: Shard, shutdown: Cancellati
     }
 
     debug!(shard = %shard.id(), "shard stopped");
+}
+
+async fn close(shard: &mut Shard) {
+    shard.close(CloseFrame::NORMAL);
+
+    // Wait for the shard to close
+    let closed = async {
+        while let Some(item) = shard.next_event(EventTypeFlags::empty()).await {
+            if let Ok(Event::GatewayClose(_)) = item {
+                break;
+            }
+        }
+    };
+    if tokio::time::timeout(Duration::from_secs(5), closed)
+        .await
+        .is_err()
+    {
+        warn!(shard = %shard.id(), "gateway did not close in time");
+    }
 }
 
 fn handle_event(state: &Arc<State>, event: Event) {
