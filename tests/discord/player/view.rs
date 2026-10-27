@@ -107,7 +107,8 @@ fn paused_views_are_stable_and_titles_are_bounded() {
     assert!(content.contains("Added by <@30>"));
     assert!(content.contains("<#20>"));
     assert!(content.contains("`0:30 / 1:00`\n"));
-    assert!(content.contains("**Up next** · `500` queued\n-# …and 500 more"));
+    // No upcoming tracks were fetched, so there is nothing to list.
+    assert!(content.contains("**Up next**\n"));
     assert!(content.chars().count() < 1000);
     assert_eq!(
         view,
@@ -137,23 +138,28 @@ fn up_next_lists_five_bounded_titles() {
     let owned: Vec<_> = (1..=7)
         .map(|i| Metadata {
             title: Some(format!("Song {i}")),
-            duration: Some(Duration::from_secs(60 * i)),
+            duration: Some(Duration::from_secs(60)),
             ..Metadata::default()
         })
         .collect();
     let next: Vec<&Metadata> = owned.iter().collect();
     let content = up_next(&next, 12);
-    assert!(content.starts_with("**Up next** · `12` queued\n1. Song 1 `1:00`\n"));
-    assert!(content.contains("\n5. Song 5 `5:00`\n-# …and 7 more"));
+    assert!(content.starts_with("**Up next** · `12` queued\n```\n1. Song 1\n"));
+    assert!(content.ends_with("\n5. Song 5\n```"));
     assert!(!content.contains("Song 6"));
-    assert_eq!(up_next(&next[..2], 2).lines().count(), 3);
+    assert_eq!(
+        up_next(&next[..2], 2),
+        "**Up next** · `2` queued\n```\n1. Song 1\n2. Song 2\n```"
+    );
     assert_eq!(up_next(&[], 0), "**Up next**\n-# Nothing else is queued.");
     let metadata = Metadata {
-        title: Some("*@\n".repeat(100)),
+        title: Some("```\n".repeat(100)),
         ..Metadata::default()
     };
-    // Newlines in titles cannot add lines.
-    assert_eq!(up_next(&[&metadata; 5], 5).lines().count(), 6);
+    // Titles can neither add lines nor close the block early.
+    let content = up_next(&[&metadata; 5], 5);
+    assert_eq!(content.lines().count(), 8);
+    assert_eq!(content.matches("```").count(), 2);
 }
 
 #[test]

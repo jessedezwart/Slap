@@ -186,25 +186,37 @@ fn push_notice(components: &mut Vec<Component>, notice: &str) {
     }
 }
 
-/// The next few tracks, numbered, under a count of everything still queued.
+/// The next few tracks as a numbered code block, under a count of
+/// everything still queued.
 fn up_next(next: &[&Metadata], upcoming: usize) -> String {
-    if upcoming == 0 {
+    let next = &next[..next.len().min(UP_NEXT_LEN)];
+    if upcoming == 0 || next.is_empty() {
         return "**Up next**\n-# Nothing else is queued.".into();
     }
-    let next = &next[..next.len().min(UP_NEXT_LEN)];
-    let mut content = format!("**Up next** · `{upcoming}` queued");
+    let mut content = format!("**Up next** · `{upcoming}` queued\n```");
     for (index, metadata) in next.iter().enumerate() {
-        let title: String = metadata.display_title().chars().take(80).collect();
-        let _ = write!(content, "\n{}. {}", index + 1, escape(&title));
-        if let Some(duration) = metadata.duration {
-            let _ = write!(content, " `{}`", format_duration(duration));
-        }
+        let _ = write!(
+            content,
+            "\n{}. {}",
+            index + 1,
+            code_line(metadata.display_title())
+        );
     }
-    let more = upcoming.saturating_sub(next.len());
-    if more > 0 {
-        let _ = write!(content, "\n-# …and {more} more");
-    }
+    content.push_str("\n```");
     content
+}
+
+/// Keep a title on one line inside a code block: markdown does not render
+/// there, so only a newline or a backtick could break out of it.
+fn code_line(text: &str) -> String {
+    text.chars()
+        .take(80)
+        .map(|c| match c {
+            '\n' | '\r' => ' ',
+            '`' => '\'',
+            _ => c,
+        })
+        .collect()
 }
 
 fn progress(
