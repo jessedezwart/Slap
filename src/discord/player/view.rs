@@ -16,6 +16,7 @@ use twilight_model::{
     },
     id::{Id, marker::ChannelMarker},
 };
+use url::Url;
 
 use super::{BUTTONS, PlayerButton};
 use crate::{
@@ -88,7 +89,6 @@ impl View {
         info: &TrackState,
         next: &[&Metadata],
         upcoming: usize,
-        notice: &str,
         voice_channel: Id<ChannelMarker>,
         now: SystemTime,
     ) -> Self {
@@ -128,29 +128,47 @@ impl View {
             separator(),
             text(up_next(next, upcoming)),
         ];
-        push_notice(&mut components, notice);
+        if let Some(notice) = entry.notice.as_deref() {
+            components.push(text(format!("-# {notice}")));
+        }
         components.push(buttons(false, status == Status::Paused));
         Self::container(status.accent(), components)
     }
 
-    pub fn empty(notice: &str) -> Self {
-        let mut components = vec![
-            text("### Queue finished".into()),
-            separator(),
-            text("Press Add to queue more music, or Stop to disconnect.".into()),
-        ];
-        push_notice(&mut components, notice);
-        components.push(buttons(true, false));
-        Self::container(ACCENT_IDLE, components)
+    pub fn empty() -> Self {
+        Self::container(
+            ACCENT_IDLE,
+            vec![
+                text("### Queue finished".into()),
+                separator(),
+                text("Press Add to queue more music, or Stop to disconnect.".into()),
+                buttons(true, false),
+            ],
+        )
     }
 
-    pub fn stopped() -> Self {
+    /// `last` is the last track drawn as playing: its playlist, or else the
+    /// track itself, is offered to play again.
+    pub fn stopped(last: Option<&QueueEntry>) -> Self {
+        let playlist = last.and_then(|entry| entry.playlist.as_deref());
+        let url = match playlist {
+            Some(playlist) => Some(&playlist.url),
+            None => last.and_then(|entry| entry.metadata.webpage_url.as_ref()),
+        };
+        let mut body = String::new();
+        if let Some(playlist) = playlist {
+            let _ = writeln!(body, "{}", playlist_link(playlist));
+        }
+        body.push_str("The queue is cleared and I left the voice channel.");
+        if let Some(url) = url {
+            let _ = write!(body, " Start it again with:\n{}", replay_command(url));
+        }
         Self::container(
             ACCENT_IDLE,
             vec![
                 text("### Playback stopped".into()),
                 separator(),
-                text("The queue is cleared and I left the voice channel.".into()),
+                text(body),
             ],
         )
     }
@@ -179,11 +197,17 @@ fn separator() -> Component {
     })
 }
 
-fn push_notice(components: &mut Vec<Component>, notice: &str) {
-    let notice = notice.trim();
-    if !notice.is_empty() {
-        components.push(text(format!("-# {notice}")));
-    }
+/// The `/play` invocation that starts this player over, ready to copy.
+///
+/// Only a backtick or a newline could break out of the code span, and a
+/// parsed URL holds neither, but strip them rather than rely on it.
+fn replay_command(url: &Url) -> String {
+    let url: String = url
+        .as_str()
+        .chars()
+        .filter(|c| !matches!(c, '`' | '\n' | '\r'))
+        .collect();
+    format!("`/play url: {url}`")
 }
 
 /// The next few tracks as a numbered code block, under a count of

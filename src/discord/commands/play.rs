@@ -6,7 +6,7 @@ use rand::seq::SliceRandom;
 use tracing::debug;
 use twilight_model::application::interaction::Interaction;
 
-use super::{CommandError, NewPlayer, Reply, caller_channel};
+use super::{CommandError, Reply, caller_channel};
 use crate::{
     audio::source::TrackSource,
     discord::text::{escape, format_duration, playlist_link},
@@ -69,6 +69,19 @@ pub(super) async fn play(
         .clone()
         .unwrap_or_else(|| raw_url.to_owned());
     let duration = import.tracks[0].metadata.duration;
+    let mut notice = String::new();
+    if import.skipped > 0 {
+        let _ = write!(notice, " Skipped {} unavailable entries.", import.skipped);
+    }
+    if import.truncated {
+        let _ = write!(
+            notice,
+            " Import limited to the first {PLAYLIST_LIMIT} playlist entries."
+        );
+    }
+    let entry_notice: Option<Arc<str>> = Some(notice.trim())
+        .filter(|notice| !notice.is_empty())
+        .map(Arc::from);
     let tracks = import
         .tracks
         .into_iter()
@@ -85,6 +98,7 @@ pub(super) async fn play(
                 metadata: track.metadata,
                 requester: user_id,
                 playlist: playlist.clone(),
+                notice: entry_notice.clone(),
             };
             (source.into(), entry)
         })
@@ -127,19 +141,9 @@ pub(super) async fn play(
             }
         )
     };
-    let mut notice = String::new();
-    if import.skipped > 0 {
-        let _ = write!(notice, " Skipped {} unavailable entries.", import.skipped);
-    }
-    if import.truncated {
-        let _ = write!(
-            notice,
-            " Import limited to the first {PLAYLIST_LIMIT} playlist entries."
-        );
-    }
     message.push_str(&notice);
     Ok(Reply {
         message,
-        player: Some(NewPlayer { cancel, notice }),
+        player: Some(cancel),
     })
 }

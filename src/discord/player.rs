@@ -74,7 +74,6 @@ pub async fn start(
     guild_id: Id<GuildMarker>,
     cancel: &CancellationToken,
     message: Message,
-    notice: String,
 ) {
     let Some(session) = state
         .sessions
@@ -87,7 +86,7 @@ pub async fn start(
         }
         return;
     };
-    let task = PlayerTask::new(Arc::clone(&state), guild_id, &message, session, notice);
+    let task = PlayerTask::new(Arc::clone(&state), guild_id, &message, session);
     state.player_tasks.spawn(task.run());
 }
 

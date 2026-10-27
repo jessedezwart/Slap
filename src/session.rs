@@ -47,6 +47,9 @@ pub struct QueueEntry {
     /// The playlist this track was imported from, shared by every track of
     /// that import so the player can name it without a second lookup.
     pub playlist: Option<Arc<Playlist>>,
+    /// What went wrong importing it (skipped entries, a truncated playlist),
+    /// shared by every track of that import like `playlist`.
+    pub notice: Option<Arc<str>>,
 }
 
 /// A named playlist, and the link it was imported from.

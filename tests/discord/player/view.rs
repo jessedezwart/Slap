@@ -9,6 +9,7 @@ fn entry(metadata: Metadata) -> QueueEntry {
         metadata,
         requester: Id::new(30),
         playlist: None,
+        notice: None,
     }
 }
 
@@ -87,6 +88,7 @@ fn paused_views_are_stable_and_titles_are_bounded() {
             name: "Late Night".into(),
             url: "https://www.youtube.com/playlist?list=PL1".parse().unwrap(),
         })),
+        notice: Some("Skipped 2 unavailable entries.".into()),
         ..entry(Metadata {
             title: Some("*@everyone\n".repeat(1000)),
             duration: Some(Duration::from_secs(60)),
@@ -99,7 +101,7 @@ fn paused_views_are_stable_and_titles_are_bounded() {
         ready: ReadyState::Playable,
         ..Default::default()
     };
-    let view = View::playing(&metadata, &info, &[], 500, "", channel, UNIX_EPOCH);
+    let view = View::playing(&metadata, &info, &[], 500, channel, UNIX_EPOCH);
     let content = texts(&view.components);
     assert!(content.starts_with("### Paused"));
     assert!(!content.contains("@everyone"));
@@ -109,10 +111,12 @@ fn paused_views_are_stable_and_titles_are_bounded() {
     assert!(content.contains("`0:30 / 1:00`\n"));
     // No upcoming tracks were fetched, so there is nothing to list.
     assert!(content.contains("**Up next**\n"));
+    // The track's own import notice, not the player's.
+    assert!(content.contains("-# Skipped 2 unavailable entries.\n"));
     assert!(content.chars().count() < 1000);
     assert_eq!(
         view,
-        View::playing(&metadata, &info, &[], 500, "", channel, UNIX_EPOCH)
+        View::playing(&metadata, &info, &[], 500, channel, UNIX_EPOCH)
     );
     let buttons = buttons_of(&view);
     assert_eq!(buttons[0].custom_id.as_deref(), Some("player:resume"));
@@ -123,7 +127,6 @@ fn paused_views_are_stable_and_titles_are_bounded() {
                 &TrackState::default(),
                 &[],
                 0,
-                "",
                 channel,
                 UNIX_EPOCH
             )
@@ -175,7 +178,6 @@ fn thumbnails_and_links_only_accept_https() {
         &TrackState::default(),
         &[],
         0,
-        "",
         Id::new(1),
         UNIX_EPOCH,
     );
@@ -199,7 +201,6 @@ fn thumbnails_and_links_only_accept_https() {
         &TrackState::default(),
         &[],
         0,
-        "",
         Id::new(1),
         UNIX_EPOCH,
     );
@@ -217,7 +218,7 @@ fn thumbnails_and_links_only_accept_https() {
 
 #[test]
 fn controls_disable_for_empty_queues() {
-    let view = View::empty("");
+    let view = View::empty();
     for (button, disabled) in buttons_of(&view)
         .into_iter()
         .zip([true, true, false, false])
@@ -227,16 +228,25 @@ fn controls_disable_for_empty_queues() {
         assert!(button.emoji.is_some());
         assert!(button_action(button.custom_id.as_deref().unwrap()).is_some());
     }
-    assert!(
-        texts(&View::empty(" Skipped 2 unavailable entries.").components)
-            .contains("-# Skipped 2 unavailable entries.")
-    );
 }
 
 #[test]
-fn stopped_players_have_no_controls() {
-    let view = View::stopped();
-    assert!(texts(&view.components).starts_with("### Playback stopped"));
+fn stopped_players_offer_what_was_playing() {
+    let last = QueueEntry {
+        playlist: Some(Arc::new(Playlist {
+            name: "Leveling".into(),
+            url: "https://open.spotify.com/playlist/6PW".parse().unwrap(),
+        })),
+        ..entry(Metadata {
+            webpage_url: Some("https://open.spotify.com/track/1".parse().unwrap()),
+            ..Default::default()
+        })
+    };
+    let view = View::stopped(Some(&last));
+    let content = texts(&view.components);
+    assert!(content.starts_with("### Playback stopped"));
+    assert!(content.contains("**[Leveling](<https://open.spotify.com/playlist/6PW>)**\n"));
+    assert!(content.ends_with("`/play url: https://open.spotify.com/playlist/6PW`\n"));
     let Component::Container(container) = &view.components[0] else {
         panic!()
     };
@@ -245,5 +255,19 @@ fn stopped_players_have_no_controls() {
             .components
             .iter()
             .any(|component| matches!(component, Component::ActionRow(_)))
+    );
+    // Outside a playlist the track's own link is offered.
+    let single = QueueEntry {
+        playlist: None,
+        ..last
+    };
+    assert!(
+        texts(&View::stopped(Some(&single)).components)
+            .ends_with("`/play url: https://open.spotify.com/track/1`\n")
+    );
+    // Stopped before anything played, there is nothing to offer.
+    assert!(
+        texts(&View::stopped(None).components)
+            .ends_with("I left the voice channel.\n")
     );
 }

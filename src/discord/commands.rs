@@ -164,17 +164,10 @@ async fn respond(
                 .content(Some(&reply.message))
                 .allowed_mentions(Some(&mentions))
                 .await?;
-            if let Some(player) = reply.player
+            if let Some(cancel) = reply.player
                 && let Some(guild_id) = interaction.guild_id
             {
-                player::start(
-                    Arc::clone(state),
-                    guild_id,
-                    &player.cancel,
-                    response.model().await?,
-                    player.notice,
-                )
-                .await;
+                player::start(Arc::clone(state), guild_id, &cancel, response.model().await?).await;
             }
         }
     }
@@ -184,14 +177,9 @@ async fn respond(
 #[derive(Default)]
 struct Reply {
     message: String,
-    /// Set when the reply should become the session's player.
-    player: Option<NewPlayer>,
-}
-
-/// Everything the player task needs.
-struct NewPlayer {
-    cancel: CancellationToken,
-    notice: String,
+    /// The session's token, set when the reply should become that session's
+    /// player. The bid loses when the session already has one.
+    player: Option<CancellationToken>,
 }
 
 impl Reply {
