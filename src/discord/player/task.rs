@@ -64,7 +64,7 @@ impl PlayerTask {
     pub async fn run(self) {
         match self.follow().await {
             Stop::Ended => self.stopped().await,
-            // A later /play can claim a new player.
+            // Releasing if gone is necessary because the session is still active, but the message is not.
             Stop::Gone => {
                 self.state
                     .sessions
@@ -80,8 +80,6 @@ impl PlayerTask {
             if let Err(stop) = self.redraw().await {
                 return stop;
             }
-            // Notify stores a single permit, so a burst of events while an
-            // edit is in flight costs one more redraw, not one per event.
             tokio::select! {
                 biased;
                 () = self.session.cancel.cancelled() => return Stop::Ended,
@@ -90,7 +88,6 @@ impl PlayerTask {
         }
     }
 
-    /// Rewrite the message from the current state.
     async fn redraw(&self) -> Result<(), Stop> {
         let Some(view) = self.render().await? else {
             return Ok(());
@@ -100,6 +97,7 @@ impl PlayerTask {
         }
         match edit(&self.state, self.channel_id, self.message_id, &view).await {
             Err(EditError::Gone) => Err(Stop::Gone),
+            // A failed edit is not fatal.
             Ok(()) | Err(EditError::Failed) => Ok(()),
         }
     }
@@ -116,18 +114,28 @@ impl PlayerTask {
         let Some(track) = tracks.next() else {
             return Ok(Some(View::empty()));
         };
-        // get_info is a driver message/oneshot, not an HTTP request. Never
-        // wait for it while holding a session, queue, or Call lock.
+
         let info = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(Stop::Ended),
             info = time::timeout(INFO_TIMEOUT, track.get_info()) => info,
         };
-        let Ok(Ok(info)) = info else {
-            return Ok(None);
+
+        let info = match info {
+            Ok(Ok(info)) => info,
+            Ok(Err(error)) => {
+                warn!(%error, "track info unavailable");
+                return Ok(None);
+            }
+            Err(_) => {
+                warn!("track info timed out");
+                return Ok(None);
+            }
         };
-        let next: Vec<_> = tracks.map(|track| track.data::<QueueEntry>()).collect();
-        let next: Vec<_> = next.iter().map(|entry| &entry.metadata).collect();
+
+        let entries: Vec<_> = tracks.map(|track| track.data::<QueueEntry>()).collect();
+        let next: Vec<_> = entries.iter().map(|entry| &entry.metadata).collect();
+
         Ok(Some(View::playing(
             &track.data::<QueueEntry>(),
             &info,
@@ -139,18 +147,14 @@ impl PlayerTask {
     }
 
     async fn stopped(&self) {
-        if edit(
-            &self.state,
-            self.channel_id,
-            self.message_id,
-            &View::stopped(),
-        )
-        .await
-        .is_err()
-        {
+        // Try to edit the player to say the session ended.
+        let result = edit(&self.state, self.channel_id, self.message_id, &View::stopped()).await;
+        // If can't edit, delete the message.
+        if let Err(EditError::Failed) = result {
             delete_player(&self.state, self.channel_id, self.message_id).await;
         }
     }
+
 }
 
 pub(super) async fn delete_player(
@@ -158,12 +162,8 @@ pub(super) async fn delete_player(
     channel_id: Id<ChannelMarker>,
     message_id: Id<MessageMarker>,
 ) {
-    match time::timeout(
-        HTTP_TIMEOUT,
-        state.http.delete_message(channel_id, message_id),
-    )
-    .await
-    {
+    let request = state.http.delete_message(channel_id, message_id);
+    match time::timeout(HTTP_TIMEOUT, request).await {
         Ok(Ok(_)) => {}
         Ok(Err(error)) => warn!(%message_id, %error, "failed to delete player message"),
         Err(_) => warn!(%message_id, "player message delete timed out"),
@@ -181,20 +181,16 @@ async fn edit(
     message_id: Id<MessageMarker>,
     view: &View,
 ) -> Result<(), EditError> {
-    let mentions = AllowedMentions::default();
     // The first edit converts the plain /play reply into a V2 message, which requires dropping its text content.
     let request = state
         .http
         .update_message(channel_id, message_id)
         .content(None)
         .flags(MessageFlags::IS_COMPONENTS_V2)
-        .components(Some(&view.components))
-        .allowed_mentions(Some(&mentions));
+        .components(Some(&view.components));
     match time::timeout(HTTP_TIMEOUT, request).await {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(error)) => {
-            // Deleted message / lost access: stop updating. A later /play can
-            // claim a new panel. Use the bot token so edits work after 15 min.
             if matches!(error.kind(), twilight_http::error::ErrorType::Response { status, .. }
                 if matches!(status.get(), 403 | 404))
             {

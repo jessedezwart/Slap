@@ -3,7 +3,6 @@
 use std::{fmt::Write as _, sync::Arc};
 
 use rand::seq::SliceRandom;
-use tracing::debug;
 use twilight_model::application::interaction::Interaction;
 
 use super::{CommandError, Reply, caller_channel};
@@ -73,7 +72,6 @@ pub(super) async fn play(
         .sessions
         .enqueue(guild_id, &cancel, tracks, mode)
         .await?;
-    debug!(%guild_id, %channel_id, count, ?mode, "queued tracks");
     let mut message = if count == 1 {
         "Queued 1 track.".to_owned()
     } else {

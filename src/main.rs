@@ -15,6 +15,7 @@ use tracing_subscriber::EnvFilter;
 use twilight_cache_inmemory::{DefaultInMemoryCache, ResourceType};
 use twilight_gateway::{Config as GatewayConfig, Intents};
 use twilight_http::Client as HttpClient;
+use twilight_model::channel::message::AllowedMentions;
 
 use crate::{
     audio::source::AudioContext,
@@ -110,7 +111,12 @@ impl Bot {
     async fn start(config: Config) -> Result<Self, BoxError> {
         let _ = rustls::crypto::ring::default_provider().install_default();
 
-        let http = Arc::new(HttpClient::new(config.token.clone()));
+        let http = Arc::new(
+            HttpClient::builder()
+                .token(config.token.clone())
+                .default_allowed_mentions(AllowedMentions::default())
+                .build(),
+        );
 
         let application_id = http.current_user_application().await?.model().await?.id;
         let user_id = http.current_user().await?.model().await?.id;
