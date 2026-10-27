@@ -7,7 +7,10 @@ use tracing::info;
 use url::Url;
 
 use super::{SpotifyClient, SpotifyError, parse, playlist_id};
-use crate::{config::SpotifyConfig, media::Import};
+use crate::{
+    config::SpotifyConfig,
+    media::{Import, PLAYLIST_LIMIT},
+};
 
 /// Max API cap
 const PAGE_SIZE: usize = 50;
@@ -16,15 +19,12 @@ const IMPORT_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct SpotifyService {
     pub(super) client: SpotifyClient,
-    /// Most tracks a single import may produce.
-    limit: usize,
 }
 
 impl SpotifyService {
-    pub fn new(config: Option<SpotifyConfig>, limit: usize) -> Result<Self, reqwest::Error> {
+    pub fn new(config: Option<SpotifyConfig>) -> Result<Self, reqwest::Error> {
         Ok(Self {
             client: SpotifyClient::new(config)?,
-            limit,
         })
     }
 
@@ -81,10 +81,10 @@ impl SpotifyService {
                 .await?;
             let entries = entries(&page);
             let count = entries.len();
-            self.collect_into(&mut playlist, entries);
+            collect_into(&mut playlist, entries);
             offset += count;
 
-            if playlist.tracks.len() + playlist.skipped >= self.limit {
+            if playlist.tracks.len() + playlist.skipped >= PLAYLIST_LIMIT {
                 playlist.truncated = total(&page).is_some_and(|total| total > offset)
                     || page.get("next").is_some_and(|next| !next.is_null());
                 break;
@@ -114,21 +114,20 @@ impl SpotifyService {
             playlist_name: parse::playlist_name(&body),
             ..Import::default()
         };
-        self.collect_into(&mut playlist, entries);
-        playlist.truncated = total(page).is_some_and(|total| total > count) || count > self.limit;
+        collect_into(&mut playlist, entries);
+        playlist.truncated =
+            total(page).is_some_and(|total| total > count) || count > PLAYLIST_LIMIT;
         Ok(playlist)
     }
+}
 
-    /// Append entries, stopping at the limit and counting what was unplayable.
-    fn collect_into(&self, playlist: &mut Import, entries: &[Value]) {
-        let room = self
-            .limit
-            .saturating_sub(playlist.tracks.len() + playlist.skipped);
-        for entry in entries.iter().take(room) {
-            match parse::track(entry) {
-                Some(track) => playlist.tracks.push(track),
-                None => playlist.skipped += 1,
-            }
+/// Append entries, stopping at the limit and counting what was unplayable.
+fn collect_into(playlist: &mut Import, entries: &[Value]) {
+    let room = PLAYLIST_LIMIT.saturating_sub(playlist.tracks.len() + playlist.skipped);
+    for entry in entries.iter().take(room) {
+        match parse::track(entry) {
+            Some(track) => playlist.tracks.push(track),
+            None => playlist.skipped += 1,
         }
     }
 }

@@ -44,7 +44,6 @@ pub fn track(entry: &Value) -> Option<ImportedTrack> {
     Some(ImportedTrack {
         metadata: Metadata {
             title: Some(format!("{artist} — {title}")),
-            uploader: Some(artist.clone()),
             duration,
             thumbnail: track
                 .pointer("/album/images/0/url")

@@ -8,14 +8,12 @@ use twilight_model::{
     id::{Id, marker::MessageMarker},
 };
 
-use super::{CommandError, caller_channel};
+use super::{CommandError, Reply, caller_channel};
 use crate::{
-    discord::{
-        state::State,
-        text::{escape, format_duration},
-    },
+    discord::text::{escape, format_duration},
     media::Metadata,
-    voice::session::{Control, QueueEntry, QueueHead, SessionError},
+    session::{Control, QueueEntry, QueueHead, SessionError},
+    state::State,
 };
 
 /// Upcoming tracks listed by the queue command.
@@ -27,29 +25,24 @@ fn player_message(interaction: &Interaction) -> Result<Id<MessageMarker>, Comman
     Ok(message.id)
 }
 
+/// Nothing to say on success: the player shows the change.
 pub(super) async fn control_playback(
     state: &Arc<State>,
     interaction: &Interaction,
     control: Control,
-) -> Result<String, CommandError> {
+) -> Result<Reply, CommandError> {
     let (guild_id, channel_id) = caller_channel(state, interaction)?;
     state
         .sessions
         .control(guild_id, channel_id, player_message(interaction)?, control)
         .await?;
-    Ok(match control {
-        Control::Pause => "Paused. Press Resume to continue.",
-        Control::Resume => "Resumed playback.",
-        Control::Skip => "Skipped the current track.",
-        Control::Stop => "Stopped playback, cleared the queue, and disconnected.",
-    }
-    .to_owned())
+    Ok(Reply::default())
 }
 
 pub(super) async fn queue(
     state: &Arc<State>,
     interaction: &Interaction,
-) -> Result<String, CommandError> {
+) -> Result<Reply, CommandError> {
     let (guild_id, channel_id) = caller_channel(state, interaction)?;
     let QueueHead { tracks, total } = state
         .sessions
@@ -62,7 +55,7 @@ pub(super) async fn queue(
         .await?;
     let entries: Vec<_> = tracks.iter().map(TrackHandle::data::<QueueEntry>).collect();
     let metadata: Vec<_> = entries.iter().map(|entry| &entry.metadata).collect();
-    Ok(format_queue(&metadata, total))
+    Ok(Reply::message(format_queue(&metadata, total)))
 }
 
 fn format_queue(tracks: &[&Metadata], total: usize) -> String {
@@ -70,14 +63,7 @@ fn format_queue(tracks: &[&Metadata], total: usize) -> String {
         return "The queue is empty.".into();
     };
     let label = |metadata: &Metadata| {
-        let title: String = metadata
-            .title
-            .as_deref()
-            .or(metadata.webpage_url.as_ref().map(url::Url::as_str))
-            .unwrap_or("Unknown track")
-            .chars()
-            .take(80)
-            .collect();
+        let title: String = metadata.display_title().chars().take(80).collect();
         let mut label = escape(&title);
         if let Some(duration) = metadata.duration {
             let _ = write!(label, " ({})", format_duration(duration));

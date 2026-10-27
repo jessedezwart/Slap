@@ -24,7 +24,7 @@ use twilight_util::builder::{
     command::{CommandBuilder, StringBuilder},
 };
 
-use crate::{discord::state::State, voice::session::QueueMode};
+use crate::{session::QueueMode, state::State};
 
 /// Identifies both the modal `/play` opens and the submission it sends back.
 pub(super) const PLAY_MODAL: &str = "play:modal";
@@ -146,29 +146,25 @@ pub(super) fn play_input(data: &ModalInteractionData) -> PlayInput {
         url: String::new(),
         mode: QueueMode::Append,
     };
-    // Labels wrap one component each; action rows are accepted for safety.
-    fn walk(components: &[ModalInteractionComponent], input: &mut PlayInput) {
-        for component in components {
-            match component {
-                ModalInteractionComponent::Label(label) => {
-                    walk(std::slice::from_ref(&label.component), input);
-                }
-                ModalInteractionComponent::ActionRow(row) => walk(&row.components, input),
-                ModalInteractionComponent::TextInput(text) if text.custom_id == "url" => {
-                    input.url = text.value.trim().to_owned();
-                }
-                ModalInteractionComponent::StringSelect(select) if select.custom_id == "mode" => {
-                    input.mode = match select.values.first().map(String::as_str) {
-                        Some("next") => QueueMode::Next,
-                        Some("replace") => QueueMode::Replace,
-                        _ => QueueMode::Append,
-                    };
-                }
-                _ => {}
+    // `play_modal` wraps every field in a label of its own.
+    for component in &data.components {
+        let ModalInteractionComponent::Label(label) = component else {
+            continue;
+        };
+        match &*label.component {
+            ModalInteractionComponent::TextInput(text) if text.custom_id == "url" => {
+                input.url = text.value.trim().to_owned();
             }
+            ModalInteractionComponent::StringSelect(select) if select.custom_id == "mode" => {
+                input.mode = match select.values.first().map(String::as_str) {
+                    Some("next") => QueueMode::Next,
+                    Some("replace") => QueueMode::Replace,
+                    _ => QueueMode::Append,
+                };
+            }
+            _ => {}
         }
     }
-    walk(&data.components, &mut input);
     input
 }
 

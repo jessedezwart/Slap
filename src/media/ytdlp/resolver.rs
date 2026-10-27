@@ -22,8 +22,8 @@ pub struct YtDlpResolver {
 }
 
 impl YtDlpResolver {
-    /// Built by [`super::build`], which shares `client` with importing.
-    pub(super) fn new(client: YtDlpClient, cache: Option<Arc<SearchCache>>) -> Self {
+    /// `client` is usually a clone of the one importing links.
+    pub fn new(client: YtDlpClient, cache: Option<Arc<SearchCache>>) -> Self {
         Self { client, cache }
     }
 
@@ -34,15 +34,15 @@ impl YtDlpResolver {
                 debug!(host = url.host_str(), "resolving audio source");
                 self.resolve_input(url.as_str()).await
             }
-            Target::Search(wanted) => self.resolve_search(wanted).await,
+            Target::Search(query) => self.resolve_search(query).await,
         }
     }
 
     /// Resolve each source's top result until one runs about as long as the
     /// requested track.
-    async fn resolve_search(&self, wanted: &SearchQuery) -> Result<StreamInfo, MediaError> {
-        if let Some(url) = self.cache.as_ref().and_then(|c| c.get(&wanted.key)) {
-            debug!(key = wanted.key, "reusing previously resolved upload");
+    async fn resolve_search(&self, query: &SearchQuery) -> Result<StreamInfo, MediaError> {
+        if let Some(url) = self.cache.as_ref().and_then(|c| c.get(&query.key)) {
+            debug!(key = query.key, "reusing previously resolved upload");
             match self.resolve_input(&url).await {
                 Ok(resolved) => return Ok(resolved),
                 Err(error) if error.is_fatal() => return Err(error),
@@ -53,7 +53,7 @@ impl YtDlpResolver {
             }
         }
 
-        let text = wanted.text();
+        let text = query.text();
         for source in SearchSource::ORDER {
             debug!(query = ?text, source = source.name(), "searching for audio");
             let resolved = match self.resolve_input(&source.input(&text)).await {
@@ -66,8 +66,8 @@ impl YtDlpResolver {
                     continue;
                 }
             };
-            if durations_match(wanted, &resolved.metadata) {
-                self.remember(wanted, &resolved).await;
+            if durations_match(query, &resolved.metadata) {
+                self.remember(query, &resolved).await;
                 return Ok(resolved);
             }
             debug!(source = source.name(), title = ?resolved.metadata.title,
@@ -80,13 +80,13 @@ impl YtDlpResolver {
 
     /// Record which upload a track resolved to, so the next run skips the
     /// search entirely.
-    async fn remember(&self, wanted: &SearchQuery, resolved: &StreamInfo) {
+    async fn remember(&self, query: &SearchQuery, resolved: &StreamInfo) {
         let (Some(cache), Some(url)) = (self.cache.clone(), resolved.metadata.webpage_url.clone())
         else {
             return;
         };
         let url = url.to_string();
-        let id = wanted.key.clone();
+        let id = query.key.clone();
         // Committing fsyncs, so keep it off the runtime's worker threads.
         let _ = tokio::task::spawn_blocking(move || cache.put(&id, &url)).await;
     }
@@ -94,7 +94,7 @@ impl YtDlpResolver {
     /// Run `yt-dlp -j` and turn its JSON into a [`StreamInfo`].
     async fn resolve_input(&self, input: &str) -> Result<StreamInfo, MediaError> {
         let started = Instant::now();
-        let output = self.client.resolve(input).await?;
+        let output = self.client.video_json(input).await?;
         let resolved = parse::parse_stream(&output)?;
         debug!(title = ?resolved.metadata.title, duration_secs = resolved.metadata.duration.map(|d| d.as_secs()),
             elapsed_ms = started.elapsed().as_millis(), "audio source resolved");
@@ -104,8 +104,8 @@ impl YtDlpResolver {
 
 /// Decides whether a search result is the recording that was asked for.
 /// Compares duration of requested track and ytdlp search result of the same track.
-fn durations_match(wanted: &SearchQuery, found: &Metadata) -> bool {
-    match (wanted.duration, found.duration) {
+fn durations_match(query: &SearchQuery, found: &Metadata) -> bool {
+    match (query.duration, found.duration) {
         // If both durations are known, check if they are within tolerance. When no duration is known, we assume it matches.
         (Some(wanted), Some(found)) => wanted.abs_diff(found) <= duration_tolerance(wanted),
         _ => true,

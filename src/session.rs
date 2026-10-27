@@ -9,6 +9,8 @@
 //! the session leaves the map, so a caller holding one can tell whether the
 //! session it started with is still the current one.
 
+mod events;
+
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 
 use dashmap::DashMap;
@@ -17,7 +19,7 @@ use songbird::{
     error::JoinError,
     events::{CoreEvent, TrackEvent},
     input::Input,
-    tracks::{Track, TrackHandle},
+    tracks::{Track, TrackHandle, TrackQueue},
 };
 use tokio::sync::{Mutex, Notify, OwnedMutexGuard};
 use tokio_util::sync::CancellationToken;
@@ -28,10 +30,8 @@ use twilight_model::id::{
 };
 use url::Url;
 
-use crate::{
-    media::Metadata,
-    voice::events::{DriverDisconnectNotifier, PlayerNotifier},
-};
+use self::events::{DisconnectHandler, TrackEventHandler};
+use crate::media::Metadata;
 
 /// How far into a track the next one starts loading, matching the lead
 /// songbird's own `enqueue` would have picked.
@@ -66,26 +66,27 @@ pub struct GuildSession {
     pub player_message: Option<Id<MessageMarker>>,
 }
 
+/// Messages are written for the person who pressed the button.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
-    #[error("could not join the voice channel: {0}")]
+    #[error("I could not join your voice channel: {0}")]
     Join(#[from] JoinError),
 
-    #[error("not connected to a voice channel in this guild")]
+    #[error("I am not connected to a voice channel in this server.")]
     NotConnected,
 
-    #[error("caller is in a different voice channel")]
+    #[error("Join my voice channel to control playback.")]
     WrongChannel,
 
-    #[error("the queue is empty")]
+    #[error("Nothing is playing.")]
     EmptyQueue,
 
-    #[error("the track finished before the control was applied")]
+    #[error("The track finished before the command could be applied.")]
     TrackFinished,
 
     /// The session the caller started with, or the player they pressed, has
     /// been torn down.
-    #[error("the voice session ended")]
+    #[error("That voice session has ended; use the current player, or /play to start again.")]
     Ended,
 }
 
@@ -152,7 +153,7 @@ impl SessionManager {
             call.remove_all_global_events();
             call.add_global_event(
                 CoreEvent::DriverDisconnect.into(),
-                DriverDisconnectNotifier {
+                DisconnectHandler {
                     guild_id,
                     sessions: Arc::downgrade(self),
                     cancel: cancel.clone(),
@@ -167,7 +168,7 @@ impl SessionManager {
             ] {
                 call.add_global_event(
                     event.into(),
-                    PlayerNotifier {
+                    TrackEventHandler {
                         guild_id,
                         event,
                         redraw: Arc::clone(&redraw),
@@ -248,24 +249,23 @@ impl SessionManager {
     ) -> Result<(), SessionError> {
         let mut session = self.lock(guild_id).await;
         check_player(&session, channel_id, player_message)?;
-        if control == Control::Stop {
-            self.teardown_locked(guild_id, &mut session, "stop command")
-                .await;
-            return Ok(());
-        }
+        let apply: fn(&TrackQueue) -> _ = match control {
+            Control::Stop => {
+                self.teardown_locked(guild_id, &mut session, "stop command")
+                    .await;
+                return Ok(());
+            }
+            Control::Pause => TrackQueue::pause,
+            Control::Resume => TrackQueue::resume,
+            Control::Skip => TrackQueue::skip,
+        };
         let call = self.call(guild_id)?;
         let call = call.lock().await;
         let queue = call.queue();
         if queue.is_empty() {
             return Err(SessionError::EmptyQueue);
         }
-        match control {
-            Control::Pause => queue.pause(),
-            Control::Resume => queue.resume(),
-            Control::Skip => queue.skip(),
-            Control::Stop => unreachable!("handled above"),
-        }
-        .map_err(|_| SessionError::TrackFinished)?;
+        apply(queue).map_err(|_| SessionError::TrackFinished)?;
         // No player notify: songbird's own track events report the change.
         debug!(%guild_id, %channel_id, ?control, remaining = queue.len(), "playback control applied");
         Ok(())
@@ -467,5 +467,5 @@ fn play_next<T>(queue: &mut VecDeque<T>, count: usize) {
 }
 
 #[cfg(test)]
-#[path = "../../tests/voice/session.rs"]
+#[path = "../tests/session/manager.rs"]
 mod tests;

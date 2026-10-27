@@ -177,21 +177,15 @@ fn streams_go_stale_a_margin_before_they_expire() {
         stream
     };
 
-    let hour = stream(Some(3600));
-    assert!(hour.is_fresh());
-    let left = hour.time_left().unwrap();
-    assert!(
-        left > Duration::from_secs(3400) && left < Duration::from_secs(3500),
-        "{left:?}"
-    );
-
-    // Already gone, or so close it is not worth handing out.
-    for secs in [-10, 30] {
-        assert_eq!(stream(Some(secs)).time_left(), Some(Duration::ZERO));
-        assert!(!stream(Some(secs)).is_fresh());
+    for secs in [3600, 180] {
+        assert!(stream(Some(secs)).is_fresh(), "{secs}s");
     }
 
-    // No expiry known: usable, and the caller picks a ceiling.
-    assert_eq!(stream(None).time_left(), None);
+    // Already gone, or so close it is not worth handing out.
+    for secs in [-10, 30, 110] {
+        assert!(!stream(Some(secs)).is_fresh(), "{secs}s");
+    }
+
+    // No expiry known: usable.
     assert!(stream(None).is_fresh());
 }

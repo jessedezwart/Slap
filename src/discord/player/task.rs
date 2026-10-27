@@ -20,8 +20,8 @@ use twilight_model::{
 
 use super::view::View;
 use crate::{
-    discord::state::State,
-    voice::session::{GuildSession, QueueEntry, QueueHead},
+    session::{GuildSession, QueueEntry, QueueHead},
+    state::State,
 };
 
 /// How long the task gets to update the message.

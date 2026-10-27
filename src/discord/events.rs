@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use twilight_cache_inmemory::DefaultInMemoryCache;
 use twilight_gateway::{Event, EventTypeFlags, Shard, StreamExt as _};
@@ -11,13 +11,13 @@ use twilight_model::id::{
     marker::{ChannelMarker, GuildMarker, UserMarker},
 };
 
-use crate::discord::{commands, state::State};
+use crate::{discord::commands, state::State};
 
 /// Receive events for one shard until the shard closes or shutdown is signalled.
-pub async fn dispatcher(state: Arc<State>, mut shard: Shard, mut shutdown: watch::Receiver<bool>) {
+pub async fn run_shard(state: Arc<State>, mut shard: Shard, shutdown: CancellationToken) {
     loop {
         let item = tokio::select! {
-            _ = shutdown.changed() => break,
+            () = shutdown.cancelled() => break,
             item = shard.next_event(EventTypeFlags::all()) => item,
         };
 
@@ -43,7 +43,7 @@ pub async fn dispatcher(state: Arc<State>, mut shard: Shard, mut shutdown: watch
         handle_event(&state, event);
     }
 
-    debug!(shard = %shard.id(), "shard dispatcher stopped");
+    debug!(shard = %shard.id(), "shard stopped");
 }
 
 fn handle_event(state: &Arc<State>, event: Event) {

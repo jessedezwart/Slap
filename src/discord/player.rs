@@ -13,7 +13,7 @@ use twilight_model::{
 
 use self::task::{PlayerTask, delete_player};
 use super::commands::Action;
-use crate::{discord::state::State, voice::session::Control};
+use crate::{session::Control, state::State};
 
 /// A button the player can show.
 struct PlayerButton {
@@ -52,7 +52,7 @@ const BUTTONS: [PlayerButton; 6] = [
     },
     // A link does not fit on a button, so this one opens the play form.
     PlayerButton {
-        action: Action::Add,
+        action: Action::OpenForm,
         custom_id: "player:add",
         label: "Add",
         emoji: "➕",

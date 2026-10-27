@@ -4,7 +4,7 @@ use url::Url;
 use super::{
     Import, MediaError,
     spotify::{SpotifyService, is_spotify_url},
-    ytdlp::{self, YtDlpClient},
+    ytdlp::YtDlpClient,
 };
 
 /// Hands each link to the source that understands it.
@@ -27,6 +27,6 @@ impl Importer {
         // yt-dlp supports far more sites than can be listed, so give it every
         // other link and let yt-dlp decide.
         debug!(source = "yt-dlp", host = url.host_str(), "importing link");
-        Ok(ytdlp::import(&self.ytdlp, url).await?)
+        Ok(self.ytdlp.import(url).await?)
     }
 }

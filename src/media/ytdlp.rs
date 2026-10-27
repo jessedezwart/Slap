@@ -8,31 +8,28 @@
 //! [`crate::audio`]. The process is spawned as argv — there is no shell
 //! anywhere in this path.
 
-pub mod client;
+mod client;
 mod parse;
-pub mod resolver;
+mod resolver;
 
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use thiserror::Error;
-use url::Url;
 
 pub use client::YtDlpClient;
 pub use resolver::YtDlpResolver;
 
-use super::{Import, search_cache::SearchCache};
-use crate::config::YtDlpConfig;
-
+/// Messages are written for the person who typed the command.
 #[derive(Debug, Error)]
 pub enum YtDlpError {
-    #[error("could not run `{program}`: {source}")]
+    #[error("I could not run `{program}` ({source}). Is yt-dlp installed?")]
     Spawn {
         program: String,
         #[source]
         source: std::io::Error,
     },
 
-    #[error("yt-dlp did not respond within {0:?}")]
+    #[error("yt-dlp did not answer within {0:?}. Try again.")]
     Timeout(Duration),
 
     #[error("yt-dlp failed ({code}): {stderr}")]
@@ -44,7 +41,7 @@ pub enum YtDlpError {
     #[error("could not parse yt-dlp output: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("this video has no Opus audio track")]
+    #[error("That video has no Opus audio track, so I cannot stream it.")]
     NoOpusFormat,
 
     #[error("yt-dlp did not return a media URL")]
@@ -56,19 +53,4 @@ impl YtDlpError {
     pub fn is_fatal(&self) -> bool {
         matches!(self, Self::Spawn { .. } | Self::Timeout(_))
     }
-}
-
-/// yt-dlp plays two roles: listing links, and resolving tracks into audio.
-/// Both run the same program, so they share one client. `cache` lets the
-/// resolver skip searches resolved on an earlier run.
-pub fn build(config: YtDlpConfig, cache: Option<Arc<SearchCache>>) -> (YtDlpClient, YtDlpResolver) {
-    let client = YtDlpClient::new(config);
-    (client.clone(), YtDlpResolver::new(client, cache))
-}
-
-/// List a link: one video, or the entries of a playlist.
-pub async fn import(client: &YtDlpClient, url: &Url) -> Result<Import, YtDlpError> {
-    let output = client.list(url).await?;
-    // A single video comes back with its stream already attached.
-    parse::parse_list(&output, url)
 }

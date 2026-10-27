@@ -2,12 +2,14 @@ mod audio;
 mod config;
 mod discord;
 mod media;
-mod voice;
+mod session;
+mod state;
 
 use std::{collections::HashMap, process::ExitCode, sync::Arc};
 
 use songbird::{Config as SongbirdConfig, Songbird, shards::TwilightMap};
-use tokio::{signal, sync::watch, task::JoinHandle};
+use tokio::{signal, task::JoinHandle};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use twilight_cache_inmemory::{DefaultInMemoryCache, ResourceType};
@@ -17,12 +19,15 @@ use twilight_http::Client as HttpClient;
 use crate::{
     audio::source::AudioContext,
     config::Config,
-    discord::{commands, events::dispatcher, state::State},
+    discord::{commands, events::run_shard},
     media::{
-        PLAYLIST_LIMIT, importer::Importer, search_cache::SearchCache, spotify::SpotifyService,
-        ytdlp,
+        importer::Importer,
+        search_cache::SearchCache,
+        spotify::SpotifyService,
+        ytdlp::{YtDlpClient, YtDlpResolver},
     },
-    voice::session::SessionManager,
+    session::SessionManager,
+    state::State,
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -94,8 +99,8 @@ async fn run(config: Config) -> Result<(), BoxError> {
 /// A running bot: everything `start` built that `shutdown` takes down again.
 struct Bot {
     state: Arc<State>,
-    shutdown_tx: watch::Sender<bool>,
-    dispatchers: Vec<JoinHandle<()>>,
+    shutdown: CancellationToken,
+    shards: Vec<JoinHandle<()>>,
 }
 
 impl Bot {
@@ -142,9 +147,10 @@ impl Bot {
             .as_deref()
             .and_then(SearchCache::open_or_skip);
 
-        let (ytdlp, resolver) = ytdlp::build(config.ytdlp.clone(), search_cache);
-        let spotify = SpotifyService::new(config.spotify.clone(), PLAYLIST_LIMIT)?;
-        let importer = Importer::new(spotify, ytdlp);
+        // Importing and resolving run the same program, so they share a client.
+        let ytdlp = YtDlpClient::new(config.ytdlp);
+        let resolver = YtDlpResolver::new(ytdlp.clone(), search_cache);
+        let importer = Importer::new(SpotifyService::new(config.spotify)?, ytdlp);
 
         let state = Arc::new(State {
             player_tasks: tokio_util::task::TaskTracker::new(),
@@ -166,41 +172,39 @@ impl Bot {
             user_id,
         });
 
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let shutdown = CancellationToken::new();
 
-        let dispatchers: Vec<_> = shards
+        let shards: Vec<_> = shards
             .into_iter()
-            .map(|shard| tokio::spawn(dispatcher(Arc::clone(&state), shard, shutdown_rx.clone())))
+            .map(|shard| tokio::spawn(run_shard(Arc::clone(&state), shard, shutdown.clone())))
             .collect();
 
         Ok(Self {
             state,
-            shutdown_tx,
-            dispatchers,
+            shutdown,
+            shards,
         })
     }
 
-    /// Leave every voice channel, stop the dispatchers and let the players clean up.
     async fn shutdown(self) {
         let Self {
             state,
-            shutdown_tx,
-            dispatchers,
+            shutdown: cancellation_token,
+            shards,
         } = self;
         info!("leaving voice channels");
         for guild_id in state.sessions.known_guilds() {
             state.sessions.teardown(guild_id, "shutdown").await;
         }
 
-        let _ = shutdown_tx.send(true);
+        cancellation_token.cancel();
 
-        for dispatcher in dispatchers {
-            let _ = dispatcher.await;
+        for shard in shards {
+            let _ = shard.await;
         }
 
         state.player_tasks.close();
-        // Let cancelled players disable their controls; a slow Discord request
-        // must not hold shutdown indefinitely.
+        // Wait till player tasks are finished or timeout.
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(12),
             state.player_tasks.wait(),

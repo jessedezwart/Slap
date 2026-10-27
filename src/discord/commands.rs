@@ -22,32 +22,26 @@ use twilight_util::builder::InteractionResponseDataBuilder;
 
 pub use self::form::play_command;
 use self::{
-    error::{CommandError, user_message},
+    error::CommandError,
     form::{PLAY_MODAL, PlayInput, command_input, open_modal, play_input},
 };
-use crate::{
-    discord::{player, state::State},
-    voice::session::Control,
-};
+use crate::{discord::player, session::Control, state::State};
 
 /// What a player button asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     /// Open the play form.
-    Add,
+    OpenForm,
     Queue,
     Control(Control),
 }
 
 /// What an interaction asks for.
 enum Request {
-    /// `/play` without a link, or the Add button: answered with the form.
-    OpenForm,
+    /// A `/play` link, or a submitted play form.
     Play(PlayInput),
-    /// The queue button.
-    Queue,
-    /// A playback button.
-    Control(Control),
+    /// A player button, or `/play` without a link, which opens the form.
+    Button(Action),
 }
 
 impl Request {
@@ -56,18 +50,13 @@ impl Request {
             // Without a link the command only opens the form; the
             // submission does the work.
             InteractionData::ApplicationCommand(data) if data.name == "play" => {
-                Some(command_input(data).map_or(Self::OpenForm, Self::Play))
+                Some(command_input(data).map_or(Self::Button(Action::OpenForm), Self::Play))
             }
             InteractionData::ModalSubmit(data) if data.custom_id == PLAY_MODAL => {
                 Some(Self::Play(play_input(data)))
             }
             InteractionData::MessageComponent(data) => {
-                Some(match player::button_action(&data.custom_id)? {
-                    // Add opens the same form /play does; its submission does the work.
-                    Action::Add => Self::OpenForm,
-                    Action::Queue => Self::Queue,
-                    Action::Control(control) => Self::Control(control),
-                })
+                player::button_action(&data.custom_id).map(Self::Button)
             }
             _ => None,
         }
@@ -76,13 +65,13 @@ impl Request {
     /// The name logs record for it.
     fn name(&self) -> &'static str {
         match self {
-            Self::OpenForm => "open_form",
             Self::Play(_) => "play",
-            Self::Queue => "queue",
-            Self::Control(Control::Pause) => "pause",
-            Self::Control(Control::Resume) => "resume",
-            Self::Control(Control::Skip) => "skip",
-            Self::Control(Control::Stop) => "stop",
+            Self::Button(Action::OpenForm) => "open_form",
+            Self::Button(Action::Queue) => "queue",
+            Self::Button(Action::Control(Control::Pause)) => "pause",
+            Self::Button(Action::Control(Control::Resume)) => "resume",
+            Self::Button(Action::Control(Control::Skip)) => "skip",
+            Self::Button(Action::Control(Control::Stop)) => "stop",
         }
     }
 }
@@ -109,50 +98,52 @@ pub async fn handle_interaction(state: Arc<State>, interaction: Interaction) {
         return;
     };
     Span::current().record("command", request.name());
-    let mode = match request {
-        // The command itself only opens the form; the submission does the work.
-        Request::OpenForm => {
-            if let Err(error) = open_modal(&state, &interaction).await {
+    let (state, interaction) = (&state, &interaction);
+    // Each future is only built here; it starts once `run` has deferred.
+    match request {
+        Request::Play(input) => {
+            let work = play::play(state, interaction, &input.url, input.mode);
+            run(state, interaction, ReplyMode::Public, work).await;
+        }
+        Request::Button(Action::Queue) => {
+            let work = controls::queue(state, interaction);
+            run(state, interaction, ReplyMode::Private, work).await;
+        }
+        // The player reflects every control, so these do not reply.
+        Request::Button(Action::Control(control)) => {
+            let work = controls::control_playback(state, interaction, control);
+            run(state, interaction, ReplyMode::Silent, work).await;
+        }
+        // The form is the answer; its submission does the work.
+        Request::Button(Action::OpenForm) => {
+            if let Err(error) = open_modal(state, interaction).await {
                 warn!(%error, "failed to open the play modal");
             }
-            return;
         }
-        // The player reflects every panel action, so only the queue replies.
-        Request::Play(_) => ReplyMode::Public,
-        Request::Queue => ReplyMode::Private,
-        Request::Control(_) => ReplyMode::Silent,
-    };
+    }
+}
+
+/// Acknowledge the interaction, do `work`, then answer as `mode` says.
+async fn run(
+    state: &Arc<State>,
+    interaction: &Interaction,
+    mode: ReplyMode,
+    work: impl Future<Output = Result<Reply, CommandError>>,
+) {
     let started = Instant::now();
     debug!("interaction received");
-    if let Err(error) = defer(&state, &interaction, mode).await {
+    if let Err(error) = defer(state, interaction, mode).await {
         warn!(%error, "failed to acknowledge interaction");
         return;
     }
-    let result = execute(&state, &interaction, request).await;
+    let result = work.await;
     let elapsed_ms = started.elapsed().as_millis();
     match &result {
         Ok(_) => info!(elapsed_ms, "interaction completed"),
         Err(error) => warn!(%error, elapsed_ms, "interaction rejected or failed"),
     }
-    if let Err(error) = respond(&state, &interaction, mode, result).await {
+    if let Err(error) = respond(state, interaction, mode, result).await {
         warn!(%error, "failed to send interaction response");
-    }
-}
-
-async fn execute(
-    state: &Arc<State>,
-    interaction: &Interaction,
-    request: Request,
-) -> Result<Reply, CommandError> {
-    match request {
-        Request::Play(input) => play::play(state, interaction, &input.url, input.mode).await,
-        Request::Queue => controls::queue(state, interaction)
-            .await
-            .map(Reply::message),
-        Request::Control(control) => controls::control_playback(state, interaction, control)
-            .await
-            .map(Reply::message),
-        Request::OpenForm => unreachable!("the form is opened instead of deferring"),
     }
 }
 
@@ -170,13 +161,13 @@ async fn respond(
         // separate private follow-ups, never overwrite the live player.
         (ReplyMode::Silent, Err(error)) => {
             http.create_followup(&interaction.token)
-                .content(&user_message(&error))
+                .content(&error.to_string())
                 .flags(MessageFlags::EPHEMERAL)
                 .allowed_mentions(Some(&mentions))
                 .await?;
         }
         (ReplyMode::Public | ReplyMode::Private, result) => {
-            let reply = result.unwrap_or_else(|error| Reply::message(user_message(&error)));
+            let reply = result.unwrap_or_else(|error| Reply::message(error.to_string()));
             let response = http
                 .update_response(&interaction.token)
                 .content(Some(&reply.message))
@@ -199,6 +190,7 @@ async fn respond(
     Ok(())
 }
 
+#[derive(Default)]
 struct Reply {
     message: String,
     /// Set when the reply should become the session's player.

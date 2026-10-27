@@ -5,11 +5,6 @@ use std::{env, fmt::Display, path::PathBuf, str::FromStr, time::Duration};
 use thiserror::Error;
 use tracing::warn;
 
-/// Smallest buffer we will ever allocate, regardless of configuration.
-const MIN_BUFFER_BYTES: usize = 64 * 1024;
-/// Upper bound, so a silly `BUFFER_MS` cannot exhaust memory across many guilds.
-const MAX_BUFFER_BYTES: usize = 8 * 1024 * 1024;
-
 /// Failures while reading configuration out of the environment.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -28,7 +23,8 @@ pub struct Config {
     pub token: String,
     pub ytdlp: YtDlpConfig,
     pub spotify: Option<SpotifyConfig>,
-    pub buffer: BufferConfig,
+    /// How much audio we hold ahead of songbird's mixer, in playback time.
+    pub buffer: Duration,
     /// Where the search cache lives. `CACHE_PATH=` disables it.
     pub search_cache_path: Option<PathBuf>,
 }
@@ -40,12 +36,6 @@ pub struct SpotifyConfig {
     /// Optional. Client credentials can read a public playlist, but only a
     /// user token can page past its first 100 tracks.
     pub refresh_token: Option<String>,
-}
-
-impl std::fmt::Debug for SpotifyConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("SpotifyConfig { credentials: [redacted] }")
-    }
 }
 
 impl SpotifyConfig {
@@ -76,26 +66,6 @@ pub struct YtDlpConfig {
     /// whitespace; still argv, still no shell.
     pub extra_args: Vec<String>,
     pub cookies_file: PathBuf,
-}
-
-/// How much audio we hold ahead of songbird's mixer.
-#[derive(Clone, Copy)]
-pub struct BufferConfig {
-    /// Target depth, in playback time.
-    pub target: Duration,
-}
-
-impl BufferConfig {
-    /// Convert the configured playback time into a byte budget for this track.
-    pub fn budget_bytes(&self, bitrate_bps: u32) -> usize {
-        let per_second = u64::from(bitrate_bps.max(8_000)) / 8;
-        let millis = u64::try_from(self.target.as_millis()).unwrap_or(u64::MAX);
-        let bytes = per_second * millis / 1000;
-
-        usize::try_from(bytes)
-            .unwrap_or(MAX_BUFFER_BYTES)
-            .clamp(MIN_BUFFER_BYTES, MAX_BUFFER_BYTES)
-    }
 }
 
 impl Config {
@@ -133,9 +103,7 @@ impl Config {
                 extra_args,
                 cookies_file,
             },
-            buffer: BufferConfig {
-                target: Duration::from_millis(parse_env("BUFFER_MS", 2_000)?),
-            },
+            buffer: Duration::from_millis(parse_env("BUFFER_MS", 2_000)?),
         })
     }
 }

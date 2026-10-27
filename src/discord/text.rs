@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use url::Url;
 
-use crate::voice::session::Playlist;
+use crate::session::Playlist;
 
 /// Stop a track title from breaking out of its bold markers or pinging anyone.
 pub(super) fn escape(text: &str) -> String {

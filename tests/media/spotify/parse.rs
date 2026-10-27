@@ -23,7 +23,6 @@ fn reads_the_fields_a_search_needs() {
         metadata.title.as_deref(),
         Some("Artist, Guest — Song & punctuation?!")
     );
-    assert_eq!(metadata.uploader.as_deref(), Some("Artist, Guest"));
     assert_eq!(
         metadata.thumbnail.as_deref(),
         Some("https://i.scdn.co/image/large")

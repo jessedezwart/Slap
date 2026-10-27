@@ -4,6 +4,7 @@ use std::{
     io::{self, SeekFrom},
     pin::Pin,
     task::{Context, Poll},
+    time::Duration,
 };
 
 use bytes::Bytes;
@@ -21,11 +22,29 @@ use super::{
     AudioError,
     download::{RangedDownload, RemoteFile},
 };
-use crate::config::BufferConfig;
+
+/// Smallest buffer we will ever allocate, regardless of configuration.
+const MIN_BUFFER_BYTES: usize = 64 * 1024;
+/// Upper bound, so a silly `BUFFER_MS` cannot exhaust memory across many guilds.
+const MAX_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+
+/// Used when yt-dlp reports no bitrate. YouTube's itag 251 is ~160 kbps.
+const ASSUMED_BITRATE_BPS: u32 = 160_000;
+
+/// Convert `buffer` worth of playback into a byte budget for a track.
+pub fn budget_bytes(buffer: Duration, bitrate_bps: Option<u32>) -> usize {
+    let bitrate_bps = bitrate_bps.unwrap_or(ASSUMED_BITRATE_BPS);
+    let per_second = u64::from(bitrate_bps.max(8_000)) / 8;
+    let millis = u64::try_from(buffer.as_millis()).unwrap_or(u64::MAX);
+    let bytes = per_second * millis / 1000;
+
+    usize::try_from(bytes)
+        .unwrap_or(MAX_BUFFER_BYTES)
+        .clamp(MIN_BUFFER_BYTES, MAX_BUFFER_BYTES)
+}
 
 pub struct HttpStream {
     file: RemoteFile,
-    buffer: BufferConfig,
     cancel: CancellationToken,
     /// The downloaded bytes, readable by songbird:
     /// - `BoxStream` because the stream is named by Rust.
@@ -40,11 +59,10 @@ pub struct HttpStream {
 impl HttpStream {
     pub async fn open(
         file: RemoteFile,
-        buffer: BufferConfig,
+        budget_bytes: usize,
         cancel: &CancellationToken,
         offset: u64,
     ) -> Result<Self, AudioError> {
-        let budget_bytes = buffer.budget_bytes(file.bitrate_bps);
         // Playback starts once half the budget is buffered.
         let prefill_bytes = budget_bytes as u64 / 2;
 
@@ -74,18 +92,11 @@ impl HttpStream {
 
         Ok(Self {
             file,
-            buffer,
             cancel: cancel.clone(),
             reader: SyncWrapper::new(StreamReader::new(bytes)),
             budget_bytes,
             pos: offset,
         })
-    }
-
-    /// Ring buffer size to give songbird's `AsyncAdapterStream`, which does
-    /// the actual read-ahead.
-    pub fn budget_bytes(&self) -> usize {
-        self.budget_bytes
     }
 }
 
@@ -151,7 +162,7 @@ impl AsyncMediaSource for HttpStream {
     ) -> Result<Box<dyn AsyncMediaSource>, AudioStreamError> {
         debug!(offset, expected_bytes = ?self.file.content_length, "resuming audio stream after error");
 
-        let stream = Self::open(self.file.clone(), self.buffer, &self.cancel, offset)
+        let stream = Self::open(self.file.clone(), self.budget_bytes, &self.cancel, offset)
             .await
             .map_err(|error| {
                 debug!(offset, %error, "audio stream resume failed");

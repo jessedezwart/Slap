@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::UNIX_EPOCH};
 
 use super::*;
-use crate::{discord::player::button_action, media::Metadata, voice::session::Playlist};
+use crate::{discord::player::button_action, media::Metadata, session::Playlist};
 
 /// A queue entry for `metadata`, queued by user 30 outside any playlist.
 fn entry(metadata: Metadata) -> QueueEntry {

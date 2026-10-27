@@ -1,9 +1,13 @@
 use std::time::Duration;
 
 use super::*;
-#[cfg(unix)]
-use crate::media::ytdlp::{YtDlpClient, import};
-use crate::{config::YtDlpConfig, media::ytdlp::build};
+use crate::config::YtDlpConfig;
+
+/// A client and a resolver sharing it, without the search cache.
+fn build(config: YtDlpConfig) -> (YtDlpClient, YtDlpResolver) {
+    let client = YtDlpClient::new(config);
+    (client.clone(), YtDlpResolver::new(client, None))
+}
 
 /// A recording to search for. The key only matters to the resolved-track
 /// cache, which these tests leave disabled.
@@ -68,7 +72,7 @@ fn fake_ytdlp(
     let log = path.with_extension("log");
     std::fs::write(&path, script).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let (client, resolver) = build(config(&path), None);
+    let (client, resolver) = build(config(&path));
     let calls = move || {
         let calls = std::fs::read_to_string(&log).unwrap_or_default();
         std::fs::remove_file(&log).ok();
@@ -95,7 +99,6 @@ async fn search_prefers_youtube_music_and_falls_back_on_wrong_duration() {
 
     let found = found.unwrap();
     assert_eq!(found.media_url, "https://cdn/song");
-    assert_eq!(found.metadata.uploader.as_deref(), Some("Artist"));
     assert_eq!(
         found_calls,
         ["https://music.youtube.com/search?q=Artist+Song+%24%28literal%29%3B#songs"]
@@ -129,7 +132,7 @@ async fn listing_a_single_link_carries_its_stream() {
     let (client, _, calls, path) = fake_ytdlp(FAKE_SINGLE_VIDEO);
     let url = Url::parse("https://www.youtube.com/watch?v=song").unwrap();
 
-    let import = import(&client, &url).await.unwrap();
+    let import = client.import(&url).await.unwrap();
     std::fs::remove_file(&path).unwrap();
 
     assert_eq!(import.tracks.len(), 1);
@@ -146,15 +149,12 @@ async fn listing_a_single_link_carries_its_stream() {
 #[tokio::test]
 #[ignore = "requires yt-dlp and network access"]
 async fn live_search_finds_the_requested_recording() {
-    let (_, ytdlp) = build(
-        YtDlpConfig {
-            program: std::env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),
-            timeout: Duration::from_secs(60),
-            extra_args: Vec::new(),
-            cookies_file: "secrets/cookies.txt".into(),
-        },
-        None,
-    );
+    let (_, ytdlp) = build(YtDlpConfig {
+        program: std::env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),
+        timeout: Duration::from_secs(60),
+        extra_args: Vec::new(),
+        cookies_file: "secrets/cookies.txt".into(),
+    });
     for (artists, title, secs) in [
         (
             &["Daft Punk", "Pharrell Williams", "Nile Rodgers"][..],
@@ -173,9 +173,8 @@ async fn live_search_finds_the_requested_recording() {
         let started = Instant::now();
         let resolved = ytdlp.resolve(&Target::Search(query.clone())).await.unwrap();
         println!(
-            "{title}: {:?} by {:?}, {:?}, {:?} in {:?}",
+            "{title}: {:?}, {:?}, {:?} in {:?}",
             resolved.metadata.title,
-            resolved.metadata.uploader,
             resolved.metadata.duration,
             resolved.metadata.webpage_url,
             started.elapsed()
@@ -199,17 +198,14 @@ printf '%s\n' '{"url":"https://cdn/audio","acodec":"opus"}'
     let cookie_file = cookie_dir.join(".env.cookies");
     std::fs::write(&cookie_file, "").unwrap();
     let cookie_arg = cookie_file.to_string_lossy().into_owned();
-    let (client, resolver) = build(
-        YtDlpConfig {
-            cookies_file: cookie_file.clone(),
-            ..config(&path)
-        },
-        None,
-    );
+    let (client, resolver) = build(YtDlpConfig {
+        cookies_file: cookie_file.clone(),
+        ..config(&path)
+    });
     let url = Url::parse("https://youtube.com/watch?v=test").unwrap();
     resolver.resolve(&Target::Url(url.clone())).await.unwrap();
     let resolve_args = calls();
-    import(&client, &url).await.unwrap();
+    client.import(&url).await.unwrap();
     let list_args = calls();
     for args in [resolve_args, list_args] {
         assert!(

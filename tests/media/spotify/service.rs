@@ -1,10 +1,7 @@
 use super::*;
-use crate::config::SpotifyConfig;
+use crate::{config::SpotifyConfig, media::PLAYLIST_LIMIT as LIMIT};
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-/// Small enough to exercise the limit in two pages.
-const LIMIT: usize = 100;
 
 fn song(name: &str) -> Value {
     json!({"item": {"type":"track", "id":"4cOdK2wGLETKBW3PvgPWqT", "name":name,
@@ -49,14 +46,11 @@ async fn server(responses: Vec<(u16, Value)>) -> (String, tokio::task::JoinHandl
 }
 
 fn service(base: &str, refresh_token: Option<&str>) -> SpotifyService {
-    let mut service = SpotifyService::new(
-        Some(SpotifyConfig {
-            client_id: "client".into(),
-            client_secret: "secret".into(),
-            refresh_token: refresh_token.map(str::to_owned),
-        }),
-        LIMIT,
-    )
+    let mut service = SpotifyService::new(Some(SpotifyConfig {
+        client_id: "client".into(),
+        client_secret: "secret".into(),
+        refresh_token: refresh_token.map(str::to_owned),
+    }))
     .unwrap();
     service.client.api_base = base.into();
     service.client.token_url = format!("{base}/token");
@@ -177,7 +171,7 @@ async fn live_public_playlist() {
         })
     };
 
-    let app = SpotifyService::new(config(None), 1000)
+    let app = SpotifyService::new(config(None))
         .unwrap()
         .playlist(&url)
         .await
@@ -197,7 +191,7 @@ async fn live_public_playlist() {
     let Ok(refresh) = std::env::var("SPOTIFY_REFRESH_TOKEN") else {
         return;
     };
-    let user = SpotifyService::new(config(Some(refresh)), 1000)
+    let user = SpotifyService::new(config(Some(refresh)))
         .unwrap()
         .playlist(&url)
         .await
@@ -221,7 +215,7 @@ async fn live_public_playlist() {
 
 #[tokio::test]
 async fn actionable_errors_and_empty_playlist() {
-    let disabled = SpotifyService::new(None, LIMIT).unwrap();
+    let disabled = SpotifyService::new(None).unwrap();
     assert!(
         disabled
             .playlist_by_id("unused")

@@ -9,12 +9,10 @@ use twilight_model::application::interaction::Interaction;
 use super::{CommandError, NewPlayer, Reply, caller_channel};
 use crate::{
     audio::source::TrackSource,
-    discord::{
-        state::State,
-        text::{escape, format_duration, playlist_link},
-    },
+    discord::text::{escape, format_duration, playlist_link},
     media::{PLAYLIST_LIMIT, validate_url},
-    voice::session::{Playlist, QueueEntry, QueueMode, SessionError},
+    session::{Playlist, QueueEntry, QueueMode, SessionError},
+    state::State,
 };
 
 pub(super) async fn play(

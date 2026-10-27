@@ -9,17 +9,17 @@ use std::sync::{Arc, Weak};
 
 use songbird::{
     events::{Event, EventContext, EventHandler, TrackEvent},
-    tracks::{PlayMode, ReadyState},
+    tracks::PlayMode,
 };
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 use twilight_model::id::{Id, marker::GuildMarker};
 
-use crate::voice::session::{QueueEntry, SessionManager};
+use super::{QueueEntry, SessionManager};
 
 /// Turns any voice disconnect into a full teardown of the guild's pipeline.
-pub struct DriverDisconnectNotifier {
+pub struct DisconnectHandler {
     pub guild_id: Id<GuildMarker>,
     /// Weak, because the manager owns songbird, which owns this handler.
     pub sessions: Weak<SessionManager>,
@@ -28,7 +28,7 @@ pub struct DriverDisconnectNotifier {
 }
 
 #[async_trait::async_trait]
-impl EventHandler for DriverDisconnectNotifier {
+impl EventHandler for DisconnectHandler {
     async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
         if let EventContext::DriverDisconnect(data) = ctx
             && let Some(sessions) = self.sessions.upgrade()
@@ -55,44 +55,25 @@ impl EventHandler for DriverDisconnectNotifier {
 
 /// Wake the panel and log transitions. No queue locks, HTTP requests, or
 /// per-frame logs here.
-pub struct PlayerNotifier {
+pub struct TrackEventHandler {
     pub guild_id: Id<GuildMarker>,
     pub event: TrackEvent,
     pub redraw: Arc<Notify>,
 }
 
 #[async_trait::async_trait]
-impl EventHandler for PlayerNotifier {
+impl EventHandler for TrackEventHandler {
     async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
         self.redraw.notify_one();
         if let EventContext::Track(states) = ctx {
             for (state, handle) in *states {
                 let entry = handle.data::<QueueEntry>();
-                let metadata = &entry.metadata;
-                let span = tracing::info_span!("track", guild_id = %self.guild_id,
-                    track_id = %handle.uuid(), title = ?metadata.title.as_deref().unwrap_or("Unknown track"));
-                // No awaits inside the span guard on this driver callback.
-                let _entered = span.enter();
-                match self.event {
-                    TrackEvent::Play | TrackEvent::Playable
-                        if state.playing == PlayMode::Play
-                            && state.ready == ReadyState::Playable =>
-                    {
-                        info!(position_secs = state.position.as_secs(), "now playing");
-                    }
-                    TrackEvent::Pause if state.ready == ReadyState::Playable => {
-                        info!(position_secs = state.position.as_secs(), "paused");
-                    }
-                    TrackEvent::End => {
-                        info!(reason = ?state.playing, position_secs = state.position.as_secs(), "ended");
-                    }
-                    TrackEvent::Error => {
-                        if let PlayMode::Errored(error) = &state.playing {
-                            warn!(%error, "track failed; queue will advance");
-                        }
-                    }
-                    TrackEvent::Playable => debug!("upcoming track preloaded"),
-                    _ => {}
+                let title = entry.metadata.display_title();
+                if let PlayMode::Errored(error) = &state.playing {
+                    warn!(guild_id = %self.guild_id, title, %error, "track failed; queue will advance");
+                } else {
+                    debug!(guild_id = %self.guild_id, title, event = ?self.event,
+                        position_secs = state.position.as_secs(), "track event");
                 }
             }
         }

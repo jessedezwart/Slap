@@ -97,12 +97,6 @@ pub fn parse_stream(stdout: &[u8]) -> Result<StreamInfo, YtDlpError> {
                 .duration
                 .filter(|d| *d > 0.0)
                 .map(Duration::from_secs_f64),
-            // Credited artists beat a "Name - Topic" channel.
-            uploader: output
-                .artists
-                .filter(|a| !a.is_empty())
-                .map(|a| a.join(", "))
-                .or(output.uploader),
             thumbnail: output.thumbnail,
             webpage_url: output.webpage_url.as_deref().and_then(http_url),
         },
@@ -213,7 +207,6 @@ impl Entry {
                     .and_then(|thumbnail| thumbnail.url)
                     .or(self.thumbnail),
                 webpage_url: Some(url.clone()),
-                ..Metadata::default()
             },
             target: url.into(),
             // Flat entries carry no audio URL; the resolver finds it later.
@@ -227,8 +220,6 @@ struct Output {
     title: Option<String>,
     duration: Option<f64>,
     webpage_url: Option<String>,
-    uploader: Option<String>,
-    artists: Option<Vec<String>>,
     thumbnail: Option<String>,
     requested_downloads: Option<Vec<Format>>,
     #[serde(flatten)]

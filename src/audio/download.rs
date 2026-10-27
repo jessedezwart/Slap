@@ -21,31 +21,25 @@ use crate::media::StreamInfo;
 /// googlevideo paces down to playback rate.
 pub const WINDOW_BYTES: u64 = 256 * 1024;
 
-/// Used when yt-dlp reports no bitrate. YouTube's itag 251 is ~160 kbps.
-const ASSUMED_BITRATE_BPS: u32 = 160_000;
-
 #[derive(Clone)]
 pub struct RemoteFile {
     // The shared HTTP client
-    pub client: Client,
+    pub http: Client,
     // The URL to request from
     pub url: String,
     // The headers to send with the request
     pub headers: HeaderMap,
     /// Length of complete file. Optional since not always provided.
     pub content_length: Option<u64>,
-    // Bitrate of the audio stream in bits per second. Falls back to the assumed bitrate when yt-dlp reports none.
-    pub bitrate_bps: u32,
 }
 
 impl RemoteFile {
-    pub fn new(client: Client, stream: &StreamInfo) -> Self {
+    pub fn new(http: Client, stream: &StreamInfo) -> Self {
         Self {
-            client,
+            http,
             url: stream.media_url.clone(),
             headers: stream.headers.clone(),
             content_length: stream.content_length,
-            bitrate_bps: stream.bitrate_bps.unwrap_or(ASSUMED_BITRATE_BPS),
         }
     }
 }
@@ -192,7 +186,7 @@ async fn request_window(
     let range = window_range(offset, file.content_length);
 
     let request = file
-        .client
+        .http
         .get(&file.url)
         .headers(file.headers.clone())
         .header(RANGE, range);

@@ -11,9 +11,7 @@ use twilight_model::id::{
     marker::{ApplicationMarker, UserMarker},
 };
 
-use crate::{
-    audio::source::AudioContext, media::importer::Importer, voice::session::SessionManager,
-};
+use crate::{audio::source::AudioContext, media::importer::Importer, session::SessionManager};
 
 pub struct State {
     pub player_tasks: TaskTracker,

@@ -5,18 +5,21 @@ use symphonia_core::codecs::CODEC_TYPE_OPUS;
 
 use super::*;
 use crate::{
-    config::{BufferConfig, YtDlpConfig},
-    media::Metadata,
+    config::YtDlpConfig,
+    media::{Metadata, ytdlp::YtDlpClient},
 };
+
+/// A resolver running yt-dlp as `config` says, without the search cache.
+fn resolver(config: YtDlpConfig) -> YtDlpResolver {
+    YtDlpResolver::new(YtDlpClient::new(config), None)
+}
 
 /// The shared context around `resolver`, with a 5 s buffer.
 fn audio(resolver: YtDlpResolver) -> Arc<AudioContext> {
     Arc::new(AudioContext {
         http: reqwest::Client::new(),
         resolver,
-        buffer: BufferConfig {
-            target: Duration::from_millis(5_000),
-        },
+        buffer: Duration::from_millis(5_000),
     })
 }
 
@@ -36,15 +39,12 @@ async fn youtube_audio_parses_as_opus() {
 
     let url = crate::media::validate_url(&raw_url).expect("test URL should be a YouTube link");
 
-    let (_, resolver) = crate::media::ytdlp::build(
-        YtDlpConfig {
-            program: env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),
-            timeout: Duration::from_secs(60),
-            extra_args: Vec::new(),
-            cookies_file: "secrets/cookies.txt".into(),
-        },
-        None,
-    );
+    let resolver = resolver(YtDlpConfig {
+        program: env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),
+        timeout: Duration::from_secs(60),
+        extra_args: Vec::new(),
+        cookies_file: "secrets/cookies.txt".into(),
+    });
 
     let cancel = CancellationToken::new();
     let mut source = TrackSource::new(url, None, audio(resolver), Id::new(1), cancel.clone());
@@ -89,15 +89,12 @@ async fn youtube_audio_parses_as_opus() {
 
 /// A source whose resolver cannot run: any attempt to resolve fails to spawn.
 fn source_without_ytdlp(stream: Option<StreamInfo>) -> TrackSource {
-    let (_, resolver) = crate::media::ytdlp::build(
-        YtDlpConfig {
-            program: "slap-test-no-such-program".to_owned(),
-            timeout: Duration::from_secs(5),
-            extra_args: Vec::new(),
-            cookies_file: "secrets/cookies.txt".into(),
-        },
-        None,
-    );
+    let resolver = resolver(YtDlpConfig {
+        program: "slap-test-no-such-program".to_owned(),
+        timeout: Duration::from_secs(5),
+        extra_args: Vec::new(),
+        cookies_file: "secrets/cookies.txt".into(),
+    });
     let url: url::Url = "https://www.youtube.com/watch?v=song".parse().unwrap();
     TrackSource::new(
         url,

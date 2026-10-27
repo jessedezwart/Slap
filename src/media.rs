@@ -39,19 +39,14 @@ pub struct StreamInfo {
 }
 
 impl StreamInfo {
-    /// How long `media_url` stays usable, less a safety margin; `None` when
-    /// the host gave no expiry.
-    pub fn time_left(&self) -> Option<Duration> {
-        let expires_at = self.expires_at?;
-        let left = expires_at
-            .duration_since(SystemTime::now())
-            .unwrap_or(Duration::ZERO);
-        Some(left.saturating_sub(EXPIRY_MARGIN))
-    }
-
-    /// Whether `media_url` can still be fetched.
+    /// Whether `media_url` can still be fetched; always, when the host gave
+    /// no expiry.
     pub fn is_fresh(&self) -> bool {
-        self.time_left().is_none_or(|left| !left.is_zero())
+        self.expires_at.is_none_or(|expires_at| {
+            expires_at
+                .duration_since(SystemTime::now())
+                .is_ok_and(|left| left > EXPIRY_MARGIN)
+        })
     }
 }
 
@@ -60,9 +55,18 @@ impl StreamInfo {
 pub struct Metadata {
     pub title: Option<String>,
     pub duration: Option<Duration>,
-    pub uploader: Option<String>,
     pub thumbnail: Option<String>,
     pub webpage_url: Option<Url>,
+}
+
+impl Metadata {
+    /// The title, else the link, else a placeholder.
+    pub fn display_title(&self) -> &str {
+        self.title
+            .as_deref()
+            .or(self.webpage_url.as_ref().map(Url::as_str))
+            .unwrap_or("Unknown track")
+    }
 }
 
 /// One entry of an import.
@@ -123,10 +127,11 @@ impl SearchQuery {
 }
 
 /// Anything that can go wrong between a link and a playable stream URL.
+/// Messages are written for the person who typed the command.
 #[derive(Debug, Error)]
 pub enum MediaError {
-    #[error("`{0}` is not a valid HTTP(S) link")]
-    UnsupportedUrl(String),
+    #[error("That does not look like a valid HTTP(S) link.")]
+    UnsupportedUrl,
 
     #[error("Spotify: {0}")]
     Spotify(#[from] SpotifyError),
@@ -134,7 +139,7 @@ pub enum MediaError {
     #[error(transparent)]
     YtDlp(#[from] YtDlpError),
 
-    #[error("no search result matched `{0}`")]
+    #[error("No search result matched `{0}`.")]
     NoMatch(String),
 }
 
@@ -157,7 +162,7 @@ pub fn http_url(raw: &str) -> Option<Url> {
 }
 
 pub fn validate_url(raw: &str) -> Result<Url, MediaError> {
-    http_url(raw).ok_or_else(|| MediaError::UnsupportedUrl(raw.to_owned()))
+    http_url(raw).ok_or(MediaError::UnsupportedUrl)
 }
 
 /// A playlist's name as shown to users: trimmed, bounded, and `None` when blank.

@@ -1,6 +1,9 @@
 //! The audio source that songbird uses.
 
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use reqwest::Client;
 use songbird::input::{AsyncAdapterStream, AudioStream, AudioStreamError, Compose, Input};
@@ -9,11 +12,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use twilight_model::id::{Id, marker::GuildMarker};
 
-use super::{AudioError, download::RemoteFile, stream::HttpStream};
-use crate::{
-    config::BufferConfig,
-    media::{StreamInfo, Target, ytdlp::YtDlpResolver},
+use super::{
+    AudioError,
+    download::RemoteFile,
+    stream::{HttpStream, budget_bytes},
 };
+use crate::media::{StreamInfo, Target, ytdlp::YtDlpResolver};
 
 /// Bot-wide clients and settings.
 pub struct AudioContext {
@@ -21,7 +25,8 @@ pub struct AudioContext {
     pub http: Client,
     /// Turns a track into audio once the queue reaches it.
     pub resolver: YtDlpResolver,
-    pub buffer: BufferConfig,
+    /// How much audio to hold ahead of the mixer, in playback time.
+    pub buffer: Duration,
 }
 
 pub struct TrackSource {
@@ -93,14 +98,7 @@ impl Compose for TrackSource {
         &mut self,
     ) -> Result<AudioStream<Box<dyn MediaSource>>, AudioStreamError> {
         let resolved = self.resolve().await.map_err(fail)?;
-        tracing::Span::current().record(
-            "title",
-            resolved
-                .metadata
-                .title
-                .as_deref()
-                .unwrap_or("Unknown track"),
-        );
+        tracing::Span::current().record("title", resolved.metadata.display_title());
 
         let started = Instant::now();
         debug!(
@@ -110,15 +108,15 @@ impl Compose for TrackSource {
         );
 
         let file = RemoteFile::new(self.audio.http.clone(), &resolved);
+        let budget_bytes = budget_bytes(self.audio.buffer, resolved.bitrate_bps);
 
         // Returns once the prefill is buffered.
-        let stream = HttpStream::open(file, self.audio.buffer, &self.cancel, 0)
+        let stream = HttpStream::open(file, budget_bytes, &self.cancel, 0)
             .await
             .map_err(fail)?;
         debug!(title = ?resolved.metadata.title, elapsed_ms = started.elapsed().as_millis(), "audio buffer ready");
 
         // songbird's adapter does the read-ahead, so its ring is the buffer.
-        let budget_bytes = stream.budget_bytes();
         Ok(AudioStream {
             input: Box::new(AsyncAdapterStream::new(Box::new(stream), budget_bytes))
                 as Box<dyn MediaSource>,

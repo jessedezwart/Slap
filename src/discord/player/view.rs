@@ -23,7 +23,7 @@ use crate::{
         commands::Action,
         text::{escape, format_duration, link, playlist_link},
     },
-    voice::session::{Control, QueueEntry},
+    session::{Control, QueueEntry},
 };
 
 const ACCENT_PLAYING: u32 = 0x8B5CF6;
@@ -88,13 +88,7 @@ impl View {
     ) -> Self {
         let metadata = &entry.metadata;
         let status = Status::of(info);
-        let title = escape(
-            metadata
-                .title
-                .as_deref()
-                .or(metadata.webpage_url.as_ref().map(url::Url::as_str))
-                .unwrap_or("Unknown track"),
-        );
+        let title = escape(metadata.display_title());
         let mut details = link(&title, metadata.webpage_url.as_ref());
         if let Some(playlist) = entry.playlist.as_deref() {
             let _ = write!(details, "\n- From {}", playlist_link(playlist));
@@ -122,7 +116,7 @@ impl View {
         };
         let mut components = vec![
             text(format!("### {}", status.label())),
-            separator(true),
+            separator(),
             details,
             text(format!(
                 "{} · Queue size: `{upcoming}`",
@@ -137,7 +131,7 @@ impl View {
     pub fn empty(notice: &str) -> Self {
         let mut components = vec![
             text("### Queue finished".into()),
-            separator(true),
+            separator(),
             text("Press Add to queue more music, or Stop to disconnect.".into()),
         ];
         push_notice(&mut components, notice);
@@ -150,7 +144,7 @@ impl View {
             ACCENT_IDLE,
             vec![
                 text("### Playback stopped".into()),
-                separator(true),
+                separator(),
                 text("The queue is cleared and I left the voice channel.".into()),
             ],
         )
@@ -172,10 +166,10 @@ fn text(content: String) -> Component {
     Component::TextDisplay(TextDisplay { id: None, content })
 }
 
-fn separator(divider: bool) -> Component {
+fn separator() -> Component {
     Component::Separator(Separator {
         id: None,
-        divider: Some(divider),
+        divider: Some(true),
         spacing: Some(SeparatorSpacingSize::Small),
     })
 }
@@ -237,7 +231,7 @@ fn buttons(empty: bool, paused: bool) -> Component {
             (Action::Control(toggle), empty),
             (Action::Control(Control::Skip), empty),
             (Action::Control(Control::Stop), false),
-            (Action::Add, false),
+            (Action::OpenForm, false),
             (Action::Queue, false),
         ]
         .into_iter()

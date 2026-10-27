@@ -5,8 +5,11 @@ use std::process::Stdio;
 use tokio::{process::Command, time};
 use url::Url;
 
-use super::YtDlpError;
-use crate::{config::YtDlpConfig, media::PLAYLIST_LIMIT};
+use super::{YtDlpError, parse};
+use crate::{
+    config::YtDlpConfig,
+    media::{Import, PLAYLIST_LIMIT},
+};
 
 /// Best available Opus quality
 const OPUS_FORMAT: &str = "bestaudio[acodec=opus]";
@@ -25,7 +28,14 @@ impl YtDlpClient {
         Self { config }
     }
 
-    pub(super) async fn resolve(&self, input: &str) -> Result<Vec<u8>, YtDlpError> {
+    /// List a link: one video, or the entries of a playlist.
+    pub async fn import(&self, url: &Url) -> Result<Import, YtDlpError> {
+        let output = self.playlist_json(url).await?;
+        // A single video comes back with its stream already attached.
+        parse::parse_list(&output, url)
+    }
+
+    pub(super) async fn video_json(&self, input: &str) -> Result<Vec<u8>, YtDlpError> {
         let mut cmd = Command::new(&self.config.program);
 
         // Output json
@@ -41,7 +51,7 @@ impl YtDlpClient {
         self.run(cmd, input).await
     }
 
-    pub(super) async fn list(&self, url: &Url) -> Result<Vec<u8>, YtDlpError> {
+    async fn playlist_json(&self, url: &Url) -> Result<Vec<u8>, YtDlpError> {
         let mut cmd = Command::new(&self.config.program);
         cmd.args([
             "--dump-single-json",
