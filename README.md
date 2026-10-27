@@ -83,13 +83,6 @@ cargo run
 cargo test
 ```
 
-## Crates
-
-| Crate | What it is |
-| --- | --- |
-| `crates/slap-core` | The bot as a library: `Bot::start`, `Bot::shutdown`. |
-| `crates/slap-headless` | The headless binary, what the Docker image runs. |
-
 ## Configuration
 
 All configuration settings are documented in `.env.example`. Copy that file to `.env`.

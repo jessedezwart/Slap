@@ -16,13 +16,12 @@ RUN apt-get update \
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
-COPY crates ./crates
+COPY src ./src
 
-# Only the headless binary
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p slap-headless \
- && cp target/release/slap-headless /usr/local/bin/slap
+    cargo build --release --locked \
+ && cp target/release/slap /usr/local/bin/slap
 
 ARG YTDLP_VERSION
 RUN set -eux; \

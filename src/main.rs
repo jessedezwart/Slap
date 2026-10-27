@@ -1,8 +1,3 @@
-//! The bot itself, independent of how it is hosted.
-//!
-//! A front end (the headless binary) loads a [`Config`],
-//! starts a [`Bot`] on a Tokio runtime and calls [`Bot::shutdown`] when done.
-
 mod audio;
 mod config;
 mod discord;
@@ -10,17 +5,18 @@ mod error;
 mod media;
 mod voice;
 
-use std::{collections::HashMap, num::NonZeroUsize, sync::Arc, thread};
+use std::{collections::HashMap, num::NonZeroUsize, process::ExitCode, sync::Arc, thread};
 
 use songbird::{Config as SongbirdConfig, Songbird, shards::TwilightMap};
-use tokio::{sync::watch, task::JoinHandle};
-use tracing::{info, warn};
+use tokio::{signal, sync::watch, task::JoinHandle};
+use tracing::{error, info, warn};
+use tracing_subscriber::EnvFilter;
 use twilight_cache_inmemory::{DefaultInMemoryCache, ResourceType};
 use twilight_gateway::{Config as GatewayConfig, Intents};
 use twilight_http::Client as HttpClient;
 
-pub use crate::{config::Config, error::ConfigError};
 use crate::{
+    config::Config,
     discord::{commands, events::dispatcher, player::Panels, state::State},
     media::{
         catalog::Importer,
@@ -31,12 +27,70 @@ use crate::{
     voice::session::{SessionManager, run_command_loop},
 };
 
-pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 const INTENTS: Intents = Intents::GUILDS.union(Intents::GUILD_VOICE_STATES);
 
+fn main() -> ExitCode {
+    let dotenv = dotenvy::dotenv();
+    // After `.env`, so a `RUST_LOG` set there applies.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
+    info!("starting...");
+
+    match dotenv {
+        Ok(path) => info!(path = %path.display(), "loaded .env"),
+        // No `.env` is the normal case in production.
+        Err(error) if error.not_found() => {}
+        Err(error) => warn!(%error, "could not read .env; using the environment as-is"),
+    }
+
+    let config = match Config::from_env() {
+        Ok(config) => config,
+        Err(error) => {
+            error!(%error, "invalid configuration");
+
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let runtime = match build_runtime(config.worker_threads) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            error!(%error, "could not start the tokio runtime");
+
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match runtime.block_on(run(config)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            error!(%error, "fatal error");
+
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(config: Config) -> Result<(), BoxError> {
+    let bot = Bot::start(config).await?;
+    info!("ready");
+
+    signal::ctrl_c().await?;
+    info!("shutting down");
+
+    bot.shutdown().await;
+
+    Ok(())
+}
+
 /// The multi-threaded runtime the bot expects; `None` uses every core.
-pub fn build_runtime(worker_threads: Option<usize>) -> std::io::Result<tokio::runtime::Runtime> {
+fn build_runtime(worker_threads: Option<usize>) -> std::io::Result<tokio::runtime::Runtime> {
     let worker_threads = worker_threads
         .unwrap_or_else(|| thread::available_parallelism().map_or(1, NonZeroUsize::get));
 
@@ -49,7 +103,7 @@ pub fn build_runtime(worker_threads: Option<usize>) -> std::io::Result<tokio::ru
 }
 
 /// A running bot: everything `start` built that `shutdown` takes down again.
-pub struct Bot {
+struct Bot {
     state: Arc<State>,
     shutdown_tx: watch::Sender<bool>,
     dispatchers: Vec<JoinHandle<()>>,
@@ -58,7 +112,7 @@ pub struct Bot {
 
 impl Bot {
     /// Authenticate, register commands and connect every shard.
-    pub async fn start(config: Config) -> Result<Self, BoxError> {
+    async fn start(config: Config) -> Result<Self, BoxError> {
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let config = Arc::new(config);
@@ -156,7 +210,7 @@ impl Bot {
     }
 
     /// Leave every voice channel, stop the dispatchers and let the players clean up.
-    pub async fn shutdown(self) {
+    async fn shutdown(self) {
         let Self {
             state,
             shutdown_tx,

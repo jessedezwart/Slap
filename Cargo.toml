@@ -1,16 +1,7 @@
-[workspace]
-resolver = "3"
-members = ["crates/slap-core", "crates/slap-headless"]
-
-[workspace.package]
+[package]
+name = "slap"
 version = "0.1.0"
 edition = "2024"
-
-[workspace.dependencies]
-slap-core = { path = "crates/slap-core" }
-dotenvy = "0.15"
-serde = { version = "1", features = ["derive"] }
-tracing = "0.1"
 
 [profile.release]
 lto = "fat"
@@ -20,3 +11,61 @@ opt-level = 3
 incremental = false
 debug-assertions = false
 overflow-checks = false
+
+[dependencies]
+songbird = { version = "0.6", default-features = false, features = [
+    "driver",
+    "gateway",
+    "twilight",
+    "rustls",
+    "tws",
+    "builtin-queue",
+] }
+
+# mkv and ogg demuxers are needed
+symphonia = { version = "0.5.4", default-features = false, features = ["mkv", "ogg"] }
+
+twilight-gateway = { version = "0.17", default-features = false, features = [
+    "rustls-native-roots",
+    "twilight-http",
+    "zstd",
+] }
+twilight-http = { version = "0.17", default-features = false, features = [
+    "rustls-native-roots",
+] }
+twilight-model = "0.17"
+twilight-cache-inmemory = "0.17"
+twilight-util = { version = "0.17", features = ["builder"] }
+
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "process",
+    "sync",
+    "time",
+    "signal",
+] }
+tokio-util = { version = "0.7", features = ["rt"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "stream",
+] }
+
+async-trait = "0.1"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+bytes = "1"
+dashmap = "6"
+rand = "0.9"
+dotenvy = "0.15"
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+symphonia-core = "0.5.4"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+redb = "4.3.0"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["net", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
