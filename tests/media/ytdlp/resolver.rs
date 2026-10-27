@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use super::*;
 #[cfg(unix)]
-use crate::media::{catalog::Catalog, ytdlp::YtDlpCatalog};
+use crate::media::ytdlp::{YtDlpClient, import};
 use crate::{config::YtDlpConfig, media::ytdlp::build};
 
 /// A recording to search for. The key only matters to the resolved-track
@@ -54,7 +54,7 @@ esac
 fn fake_ytdlp(
     script: &str,
 ) -> (
-    YtDlpCatalog,
+    YtDlpClient,
     YtDlpResolver,
     impl Fn() -> Vec<String>,
     std::path::PathBuf,
@@ -68,13 +68,13 @@ fn fake_ytdlp(
     let log = path.with_extension("log");
     std::fs::write(&path, script).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let (catalog, resolver) = build(config(&path));
+    let (client, resolver) = build(config(&path), None);
     let calls = move || {
         let calls = std::fs::read_to_string(&log).unwrap_or_default();
         std::fs::remove_file(&log).ok();
         calls.lines().map(str::to_owned).collect::<Vec<_>>()
     };
-    (catalog, resolver, calls, path)
+    (client, resolver, calls, path)
 }
 
 #[cfg(unix)]
@@ -126,10 +126,10 @@ printf '%s\n' '{"title":"Song","duration":181,"webpage_url":"https://www.youtube
 #[cfg(unix)]
 #[tokio::test]
 async fn listing_a_single_link_carries_its_stream() {
-    let (catalog, _, calls, path) = fake_ytdlp(FAKE_SINGLE_VIDEO);
+    let (client, _, calls, path) = fake_ytdlp(FAKE_SINGLE_VIDEO);
     let url = Url::parse("https://www.youtube.com/watch?v=song").unwrap();
 
-    let import = catalog.list(&url).await.unwrap();
+    let import = import(&client, &url).await.unwrap();
     std::fs::remove_file(&path).unwrap();
 
     assert_eq!(import.tracks.len(), 1);
@@ -146,12 +146,15 @@ async fn listing_a_single_link_carries_its_stream() {
 #[tokio::test]
 #[ignore = "requires yt-dlp and network access"]
 async fn live_search_finds_the_requested_recording() {
-    let (_, ytdlp) = build(YtDlpConfig {
-        program: std::env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),
-        timeout: Duration::from_secs(60),
-        extra_args: Vec::new(),
-        cookies_file: "secrets/cookies.txt".into(),
-    });
+    let (_, ytdlp) = build(
+        YtDlpConfig {
+            program: std::env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),
+            timeout: Duration::from_secs(60),
+            extra_args: Vec::new(),
+            cookies_file: "secrets/cookies.txt".into(),
+        },
+        None,
+    );
     for (artists, title, secs) in [
         (
             &["Daft Punk", "Pharrell Williams", "Nile Rodgers"][..],
@@ -177,7 +180,7 @@ async fn live_search_finds_the_requested_recording() {
             resolved.metadata.webpage_url,
             started.elapsed()
         );
-        assert!(matching::matches(&query, &resolved.metadata));
+        assert!(durations_match(&query, &resolved.metadata));
     }
 }
 
@@ -196,14 +199,17 @@ printf '%s\n' '{"url":"https://cdn/audio","acodec":"opus"}'
     let cookie_file = cookie_dir.join(".env.cookies");
     std::fs::write(&cookie_file, "").unwrap();
     let cookie_arg = cookie_file.to_string_lossy().into_owned();
-    let (catalog, resolver) = build(YtDlpConfig {
-        cookies_file: cookie_file.clone(),
-        ..config(&path)
-    });
+    let (client, resolver) = build(
+        YtDlpConfig {
+            cookies_file: cookie_file.clone(),
+            ..config(&path)
+        },
+        None,
+    );
     let url = Url::parse("https://youtube.com/watch?v=test").unwrap();
     resolver.resolve(&Target::Url(url.clone())).await.unwrap();
     let resolve_args = calls();
-    catalog.list(&url).await.unwrap();
+    import(&client, &url).await.unwrap();
     let list_args = calls();
     for args in [resolve_args, list_args] {
         assert!(
@@ -213,4 +219,52 @@ printf '%s\n' '{"url":"https://cdn/audio","acodec":"opus"}'
     }
     std::fs::remove_dir_all(cookie_dir).unwrap();
     std::fs::remove_file(path).unwrap();
+}
+
+fn query_lasting(secs: Option<u64>) -> SearchQuery {
+    SearchQuery {
+        key: "2Foc5Q5nqNiosCNqttzHof".into(),
+        artist: "Daft Punk".into(),
+        title: "Get Lucky".into(),
+        duration: secs.map(Duration::from_secs),
+    }
+}
+
+fn found(secs: Option<u64>) -> Metadata {
+    Metadata {
+        duration: secs.map(Duration::from_secs),
+        ..Metadata::default()
+    }
+}
+
+#[test]
+fn accepts_durations_within_tolerance() {
+    // 7% of 369s is about 25.8s.
+    for secs in [369, 370, 344, 394] {
+        assert!(
+            durations_match(&query_lasting(Some(369)), &found(Some(secs))),
+            "{secs}s"
+        );
+    }
+    // Short tracks get at least 10s.
+    assert!(durations_match(&query_lasting(Some(60)), &found(Some(70))));
+}
+
+#[test]
+fn rejects_other_lengths() {
+    // The radio edit when the album version was asked for, and
+    // SoundCloud's 30-second preview.
+    for secs in [248, 30, 343, 395] {
+        assert!(
+            !durations_match(&query_lasting(Some(369)), &found(Some(secs))),
+            "{secs}s"
+        );
+    }
+    assert!(!durations_match(&query_lasting(Some(60)), &found(Some(71))));
+}
+
+#[test]
+fn unknown_durations_are_accepted() {
+    assert!(durations_match(&query_lasting(None), &found(Some(30))));
+    assert!(durations_match(&query_lasting(Some(369)), &found(None)));
 }

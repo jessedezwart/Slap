@@ -21,10 +21,7 @@ use twilight_model::{
 use super::view::View;
 use crate::{
     discord::state::State,
-    voice::{
-        queue::QueueEntry,
-        session::{GuildSession, PlayerSnapshot},
-    },
+    voice::session::{GuildSession, QueueEntry, QueueHead},
 };
 
 /// How long the task gets to update the message.
@@ -69,21 +66,32 @@ impl PlayerTask {
     }
 
     pub async fn run(self) {
+        match self.follow().await {
+            Stop::Ended => self.stopped().await,
+            // A later /play can claim a new player.
+            Stop::Gone => {
+                self.state
+                    .sessions
+                    .release_player(self.guild_id, self.message_id)
+                    .await;
+            }
+        }
+    }
+
+    /// Redraw on every change until the session ends or the message is gone.
+    async fn follow(&self) -> Stop {
         loop {
-            match self.redraw().await {
-                Ok(()) => {}
-                Err(Stop::Ended) => break,
-                Err(Stop::Gone) => return,
+            if let Err(stop) = self.redraw().await {
+                return stop;
             }
             // Notify stores a single permit, so a burst of events while an
             // edit is in flight costs one more redraw, not one per event.
             tokio::select! {
                 biased;
-                () = self.session.cancel.cancelled() => break,
-                () = self.session.updates.notified() => {},
+                () = self.session.cancel.cancelled() => return Stop::Ended,
+                () = self.session.redraw.notified() => {},
             }
         }
-        self.stopped().await;
     }
 
     /// Rewrite the message from the current state.
@@ -102,13 +110,13 @@ impl PlayerTask {
 
     async fn render(&self) -> Result<Option<View>, Stop> {
         let cancel = &self.session.cancel;
-        let snapshot = tokio::select! {
+        let head = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(Stop::Ended),
-            snapshot = self.state.sessions.player_snapshot(self.guild_id, cancel) => snapshot,
+            head = self.state.sessions.now_playing(self.guild_id, cancel) => head,
         };
-        let PlayerSnapshot { track, upcoming } = snapshot.ok_or(Stop::Ended)?;
-        let Some(track) = track else {
+        let QueueHead { tracks, total } = head.ok_or(Stop::Ended)?;
+        let Some(track) = tracks.into_iter().next() else {
             return Ok(Some(View::empty(&self.notice)));
         };
         // get_info is a driver message/oneshot, not an HTTP request. Never
@@ -124,7 +132,7 @@ impl PlayerTask {
         Ok(Some(View::playing(
             &track.data::<QueueEntry>(),
             &info,
-            upcoming,
+            total.saturating_sub(1),
             &self.notice,
             self.session.channel_id,
             SystemTime::now(),

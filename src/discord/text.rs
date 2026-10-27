@@ -4,23 +4,23 @@ use std::time::Duration;
 
 use url::Url;
 
-use crate::voice::queue::Playlist;
+use crate::voice::session::Playlist;
 
 /// Stop a track title from breaking out of its bold markers or pinging anyone.
 pub(super) fn escape(text: &str) -> String {
-    let trimmed: String = text.chars().take(200).collect();
-
-    trimmed
-        .replace('\\', "\\\\")
-        .replace('*', "\\*")
-        .replace('_', "\\_")
-        .replace('`', "\\`")
-        .replace('~', "\\~")
-        .replace('|', "\\|")
-        .replace('[', "\\[")
-        .replace(']', "\\]")
-        .replace(['\n', '\r'], " ")
-        .replace('@', "@\u{200b}")
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars().take(200) {
+        match c {
+            '\\' | '*' | '_' | '`' | '~' | '|' | '[' | ']' => {
+                escaped.push('\\');
+                escaped.push(c);
+            }
+            '\n' | '\r' => escaped.push(' '),
+            '@' => escaped.push_str("@\u{200b}"),
+            _ => escaped.push(c),
+        }
+    }
+    escaped
 }
 
 pub(super) fn format_duration(duration: Duration) -> String {

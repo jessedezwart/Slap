@@ -2,37 +2,51 @@
 //! [`crate::media::SearchQuery::key`] it was searched for.
 //! Disk-persistent
 
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use redb::{Database, ReadableDatabase, TableDefinition};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Search key → URL of the upload it resolved to.
-const RESOLVED: TableDefinition<&str, &str> = TableDefinition::new("search_results");
+const SEARCH_RESULTS: TableDefinition<&str, &str> = TableDefinition::new("search_results");
 
-pub struct SearchResultCache {
+pub struct SearchCache {
     db: Database,
 }
 
-impl SearchResultCache {
+impl SearchCache {
     pub fn open(path: &Path) -> Result<Self, redb::Error> {
         let db = Database::create(path)?;
         // Create table if it doesn't exist yet.
         let write = db.begin_write()?;
-        write.open_table(RESOLVED)?;
+        write.open_table(SEARCH_RESULTS)?;
         write.commit()?;
         Ok(Self { db })
     }
 
+    /// Open the cache at `path`, or carry on without one when that fails.
+    pub fn open_or_skip(path: &Path) -> Option<Arc<Self>> {
+        match Self::open(path) {
+            Ok(cache) => {
+                info!(path = %path.display(), "search cache opened");
+                Some(Arc::new(cache))
+            }
+            Err(error) => {
+                warn!(path = %path.display(), %error, "could not open search cache; continuing without it");
+                None
+            }
+        }
+    }
+
     pub fn get(&self, key: &str) -> Option<String> {
         let read = || {
-            let table = self.db.begin_read()?.open_table(RESOLVED)?;
+            let table = self.db.begin_read()?.open_table(SEARCH_RESULTS)?;
             Ok::<_, redb::Error>(table.get(key)?.map(|url| url.value().to_owned()))
         };
         match read() {
             Ok(url) => url,
             Err(error) => {
-                warn!(%error, "track cache read failed");
+                warn!(%error, "search cache read failed");
                 None
             }
         }
@@ -42,15 +56,15 @@ impl SearchResultCache {
         let write = || {
             let txn = self.db.begin_write()?;
             {
-                let mut table = txn.open_table(RESOLVED)?;
+                let mut table = txn.open_table(SEARCH_RESULTS)?;
                 table.insert(key, url)?;
             }
             txn.commit()?;
             Ok::<_, redb::Error>(())
         };
         match write() {
-            Ok(()) => debug!(key, url, "cached resolved track"),
-            Err(error) => warn!(%error, "track cache write failed"),
+            Ok(()) => debug!(key, url, "cached search result"),
+            Err(error) => warn!(%error, "search cache write failed"),
         }
     }
 }

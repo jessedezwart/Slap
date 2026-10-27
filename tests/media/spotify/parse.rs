@@ -11,19 +11,28 @@ fn song(name: &str) -> Value {
 #[test]
 fn reads_the_fields_a_search_needs() {
     let parsed = track(&song("Song & punctuation?!")).unwrap();
-    assert_eq!(parsed.id, "4cOdK2wGLETKBW3PvgPWqT");
-    assert_eq!(parsed.artists, ["Artist", "Guest"]);
-    assert_eq!(parsed.artist(), "Artist, Guest");
-    assert_eq!(parsed.title, "Song & punctuation?!");
-    assert_eq!(parsed.duration, Some(Duration::from_millis(123456)));
+    let Target::Search(query) = &parsed.target else {
+        panic!("a Spotify track is searched for");
+    };
+    assert_eq!(query.key, "4cOdK2wGLETKBW3PvgPWqT");
+    assert_eq!(query.artist, "Artist, Guest");
+    assert_eq!(query.title, "Song & punctuation?!");
+    assert_eq!(query.duration, Some(Duration::from_millis(123456)));
+    let metadata = &parsed.metadata;
     assert_eq!(
-        parsed.album_art.as_deref(),
+        metadata.title.as_deref(),
+        Some("Artist, Guest — Song & punctuation?!")
+    );
+    assert_eq!(metadata.uploader.as_deref(), Some("Artist, Guest"));
+    assert_eq!(
+        metadata.thumbnail.as_deref(),
         Some("https://i.scdn.co/image/large")
     );
     assert_eq!(
-        parsed.url.as_deref(),
+        metadata.webpage_url.as_ref().map(url::Url::as_str),
         Some("https://open.spotify.com/track/example")
     );
+    assert!(parsed.stream.is_none());
 }
 
 #[test]

@@ -76,7 +76,7 @@ fn parses_flattened_opus_format() {
     let json = br#"{"title":"Example","duration":212.0,"uploader":"Someone","webpage_url":"https://www.youtube.com/watch?v=x","url":"https://rr1---sn-x.googlevideo.com/videoplayback?x=1","acodec":"opus","abr":160.0,"filesize":4194304,"format_id":"251","http_headers":{"User-Agent":"Mozilla/5.0","Range":"bytes=0-"}}
 "#;
 
-    let resolved = parse_output(json).expect("should parse");
+    let resolved = parse_stream(json).expect("should parse");
 
     assert_eq!(resolved.bitrate_bps, Some(160_000));
     assert_eq!(resolved.content_length, Some(4_194_304));
@@ -87,7 +87,7 @@ fn parses_flattened_opus_format() {
     assert!(!resolved.headers.contains_key(RANGE));
 }
 
-/// Pretty-printed output still parses via the whole-buffer fallback.
+/// Pretty-printed output still parses.
 #[test]
 fn prefers_requested_downloads() {
     let json = br#"{
@@ -99,7 +99,7 @@ fn prefers_requested_downloads() {
             ]
         }"#;
 
-    let resolved = parse_output(json).expect("should parse");
+    let resolved = parse_stream(json).expect("should parse");
 
     assert_eq!(resolved.media_url, "https://example.invalid/chosen");
     assert_eq!(resolved.bitrate_bps, Some(128_000));
@@ -110,25 +110,25 @@ fn rejects_non_opus_audio() {
     let json =
         br#"{"title":"x","url":"https://example.invalid/a","acodec":"mp4a.40.2","abr":128.0}"#;
 
-    assert!(matches!(parse_output(json), Err(YtDlpError::NoOpusFormat)));
+    assert!(matches!(parse_stream(json), Err(YtDlpError::NoOpusFormat)));
 }
 
 #[test]
 fn errors_on_empty_output() {
     assert!(matches!(
-        parse_output(b"\n  \n"),
+        parse_stream(b"\n  \n"),
         Err(YtDlpError::NoMetadata)
     ));
 }
 
 #[test]
 fn estimated_filesize_is_not_a_download_limit() {
-    let resolved = parse_output(
+    let resolved = parse_stream(
         br#"{"url":"https://example.com/audio","acodec":"opus","filesize_approx":131072}"#,
     )
     .unwrap();
     assert_eq!(resolved.content_length, None);
-    let resolved = parse_output(br#"{"url":"https://example.com/audio","acodec":"opus","filesize":524288,"filesize_approx":131072}"#).unwrap();
+    let resolved = parse_stream(br#"{"url":"https://example.com/audio","acodec":"opus","filesize":524288,"filesize_approx":131072}"#).unwrap();
     assert_eq!(resolved.content_length, Some(524288));
 }
 
@@ -165,7 +165,7 @@ fn signed_urls_expire_when_their_signature_does() {
 #[test]
 fn streams_go_stale_a_margin_before_they_expire() {
     let stream = |expires_in: Option<i64>| {
-        let mut stream = parse_output(br#"{"url":"https://cdn/song","acodec":"opus"}"#).unwrap();
+        let mut stream = parse_stream(br#"{"url":"https://cdn/song","acodec":"opus"}"#).unwrap();
         stream.expires_at = expires_in.map(|secs| {
             let now = SystemTime::now();
             if secs >= 0 {

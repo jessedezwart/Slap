@@ -82,6 +82,7 @@ fn slash_command_only_runs_with_a_link() {
 
     // Without a link the command has nothing to run, so it opens the form.
     assert!(command_input(&data(vec![])).is_none());
+    assert!(command_input(&data(vec![("url", "   ")])).is_none());
 
     let input = command_input(&data(vec![("url", "  https://example.com/a  ")])).unwrap();
     assert_eq!(input.url, "https://example.com/a");

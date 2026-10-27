@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 use super::SpotifyError;
 use crate::config::SpotifyConfig;
 
-const REFRESH_TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(60);
+const ACCESS_TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
 struct Auth {
@@ -47,8 +47,11 @@ impl SpotifyClient {
         })
     }
 
-    pub async fn is_authorized_as_user(&self) -> bool {
-        self.auth.lock().await.refresh_token.is_some()
+    /// Whether a user token was configured; rotation never removes it.
+    pub fn is_authorized_as_user(&self) -> bool {
+        self.config
+            .as_ref()
+            .is_some_and(|config| config.refresh_token.is_some())
     }
 
     /// `force` discards the cached token, for when the API has just rejected it as expired.
@@ -96,7 +99,7 @@ impl SpotifyClient {
         let lifetime = Duration::from_secs(token.expires_in.unwrap_or(3600));
         auth.access = Some((
             token.access_token.clone(),
-            Instant::now() + lifetime.saturating_sub(REFRESH_TOKEN_EXPIRY_MARGIN),
+            Instant::now() + lifetime.saturating_sub(ACCESS_TOKEN_EXPIRY_MARGIN),
         ));
         Ok(token.access_token)
     }

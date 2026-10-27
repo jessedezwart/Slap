@@ -34,7 +34,7 @@ pub async fn dispatcher(state: Arc<State>, mut shard: Shard, mut shutdown: watch
             }
         };
 
-        state.cache.update(&event);
+        state.discord_cache.update(&event);
 
         // songbird needs VoiceStateUpdate and VoiceServerUpdate to finish a
         // connection, so it sees every event before we do anything else.
@@ -71,18 +71,24 @@ fn handle_event(state: &Arc<State>, event: Event) {
 /// Recheck the cache under the session lock, so queued gateway work cannot
 /// disconnect a replacement session or race a join still in progress.
 pub fn reconcile_voice(state: Arc<State>, guild_id: Id<GuildMarker>) {
-    if state.sessions.channel_of(guild_id).is_none() {
+    if !state.sessions.may_have_session(guild_id) {
         return;
     }
     tokio::spawn(async move {
         state
             .sessions
-            .teardown_if(guild_id, "channel empty or bot disconnected/moved", || {
-                let Some(channel_id) = state.sessions.channel_of(guild_id) else {
-                    return false;
-                };
-                should_disconnect(&state.cache, guild_id, channel_id, state.user_id)
-            })
+            .teardown_if(
+                guild_id,
+                "channel empty or bot disconnected/moved",
+                |session| {
+                    should_disconnect(
+                        &state.discord_cache,
+                        guild_id,
+                        session.channel_id,
+                        state.user_id,
+                    )
+                },
+            )
             .await;
     });
 }

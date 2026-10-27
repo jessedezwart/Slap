@@ -6,15 +6,11 @@ use serde_json::Value;
 use tracing::info;
 use url::Url;
 
-use super::{
-    SpotifyClient, SpotifyError,
-    models::{self, SpotifyPlaylist},
-    playlist_id,
-};
-use crate::config::SpotifyConfig;
+use super::{SpotifyClient, SpotifyError, parse, playlist_id};
+use crate::{config::SpotifyConfig, media::Import};
 
 /// Max API cap
-const PAGE: usize = 50;
+const PAGE_SIZE: usize = 50;
 
 const IMPORT_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -32,18 +28,18 @@ impl SpotifyService {
         })
     }
 
-    pub async fn playlist(&self, url: &Url) -> Result<SpotifyPlaylist, SpotifyError> {
+    pub async fn playlist(&self, url: &Url) -> Result<Import, SpotifyError> {
         let id = playlist_id(url)?;
         tokio::time::timeout(IMPORT_TIMEOUT, self.playlist_by_id(id))
             .await
             .map_err(|_| SpotifyError::Timeout)?
     }
 
-    pub(super) async fn playlist_by_id(&self, id: &str) -> Result<SpotifyPlaylist, SpotifyError> {
+    pub(super) async fn playlist_by_id(&self, id: &str) -> Result<Import, SpotifyError> {
         // Spotify requires user authentication for `/playlists/{id}/items`, so
         // without it the only tracks we can reach are the first page embedded
         // in the playlist object itself.
-        if self.client.is_authorized_as_user().await {
+        if self.client.is_authorized_as_user() {
             self.paged(id).await
         } else {
             let playlist = self.first_page_only(id).await?;
@@ -65,19 +61,22 @@ impl SpotifyService {
             .await
             // Not worth failing the import for a name lookup failure
             .ok()?;
-        models::playlist_name(&body)
+        parse::playlist_name(&body)
     }
 
     /// Walk `/playlists/{id}/items` until the playlist or our limit runs out.
-    async fn paged(&self, id: &str) -> Result<SpotifyPlaylist, SpotifyError> {
-        let mut playlist = SpotifyPlaylist::default();
+    async fn paged(&self, id: &str) -> Result<Import, SpotifyError> {
+        let mut playlist = Import::default();
         let mut offset = 0;
         loop {
             let page = self
                 .client
                 .get(
                     &format!("playlists/{id}/items"),
-                    &[("limit", PAGE.to_string()), ("offset", offset.to_string())],
+                    &[
+                        ("limit", PAGE_SIZE.to_string()),
+                        ("offset", offset.to_string()),
+                    ],
                 )
                 .await?;
             let entries = entries(&page);
@@ -98,22 +97,22 @@ impl SpotifyService {
             }
         }
         if !playlist.tracks.is_empty() {
-            playlist.name = self.name(id).await;
+            playlist.playlist_name = self.name(id).await;
         }
         Ok(playlist)
     }
 
     /// Read the tracks embedded in the playlist object, which is all client
     /// credentials can see.
-    async fn first_page_only(&self, id: &str) -> Result<SpotifyPlaylist, SpotifyError> {
+    async fn first_page_only(&self, id: &str) -> Result<Import, SpotifyError> {
         let body = self.client.get(&format!("playlists/{id}"), &[]).await?;
         let page = body.get("items").unwrap_or(&Value::Null);
         let entries = entries(page);
         let count = entries.len();
 
-        let mut playlist = SpotifyPlaylist {
-            name: models::playlist_name(&body),
-            ..SpotifyPlaylist::default()
+        let mut playlist = Import {
+            playlist_name: parse::playlist_name(&body),
+            ..Import::default()
         };
         self.collect_into(&mut playlist, entries);
         playlist.truncated = total(page).is_some_and(|total| total > count) || count > self.limit;
@@ -121,12 +120,12 @@ impl SpotifyService {
     }
 
     /// Append entries, stopping at the limit and counting what was unplayable.
-    fn collect_into(&self, playlist: &mut SpotifyPlaylist, entries: &[Value]) {
+    fn collect_into(&self, playlist: &mut Import, entries: &[Value]) {
         let room = self
             .limit
             .saturating_sub(playlist.tracks.len() + playlist.skipped);
         for entry in entries.iter().take(room) {
-            match models::track(entry) {
+            match parse::track(entry) {
                 Some(track) => playlist.tracks.push(track),
                 None => playlist.skipped += 1,
             }

@@ -1,6 +1,6 @@
 //! Runtime configuration, read once from the environment at start-up.
 
-use std::{env, fmt::Display, num::ParseIntError, path::PathBuf, str::FromStr, time::Duration};
+use std::{env, fmt::Display, path::PathBuf, str::FromStr, time::Duration};
 
 use thiserror::Error;
 use tracing::warn;
@@ -26,13 +26,11 @@ pub enum ConfigError {
 
 pub struct Config {
     pub token: String,
-    /// Tokio worker threads, or `None` for one per available core.
-    pub worker_threads: Option<usize>,
     pub ytdlp: YtDlpConfig,
     pub spotify: Option<SpotifyConfig>,
     pub buffer: BufferConfig,
-    /// Where the resolved-track cache lives. `CACHE_PATH=` disables it.
-    pub cache_path: Option<PathBuf>,
+    /// Where the search cache lives. `CACHE_PATH=` disables it.
+    pub search_cache_path: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -52,24 +50,20 @@ impl std::fmt::Debug for SpotifyConfig {
 
 impl SpotifyConfig {
     fn from_env() -> Result<Option<Self>, ConfigError> {
-        let read = |name| env::var(name).unwrap_or_default().trim().to_owned();
-        let refresh_token = read("SPOTIFY_REFRESH_TOKEN");
-        let names = ["SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET"];
-        let values = names.map(read);
-        if values.iter().all(String::is_empty) && refresh_token.is_empty() {
-            return Ok(None);
+        let refresh_token = env_string("SPOTIFY_REFRESH_TOKEN");
+        match (
+            env_string("SPOTIFY_CLIENT_ID"),
+            env_string("SPOTIFY_CLIENT_SECRET"),
+        ) {
+            (None, None) if refresh_token.is_none() => Ok(None),
+            (Some(client_id), Some(client_secret)) => Ok(Some(Self {
+                client_id,
+                client_secret,
+                refresh_token,
+            })),
+            (None, _) => Err(ConfigError::Missing("SPOTIFY_CLIENT_ID")),
+            (_, None) => Err(ConfigError::Missing("SPOTIFY_CLIENT_SECRET")),
         }
-        for (name, value) in names.iter().zip(&values) {
-            if value.is_empty() {
-                return Err(ConfigError::Missing(name));
-            }
-        }
-        let [client_id, client_secret] = values;
-        Ok(Some(Self {
-            client_id,
-            client_secret,
-            refresh_token: Some(refresh_token).filter(|t| !t.is_empty()),
-        }))
     }
 }
 
@@ -89,15 +83,11 @@ pub struct YtDlpConfig {
 pub struct BufferConfig {
     /// Target depth, in playback time.
     pub target: Duration,
-    /// Fraction of `target` that must be buffered before playback starts.
-    pub prefill_ratio: f32,
-    /// Used when yt-dlp reports no bitrate. YouTube's itag 251 is ~160 kbps.
-    pub assumed_bitrate_bps: u32,
 }
 
 impl BufferConfig {
     /// Convert the configured playback time into a byte budget for this track.
-    pub fn bytes_for(&self, bitrate_bps: u32) -> usize {
+    pub fn budget_bytes(&self, bitrate_bps: u32) -> usize {
         let per_second = u64::from(bitrate_bps.max(8_000)) / 8;
         let millis = u64::try_from(self.target.as_millis()).unwrap_or(u64::MAX);
         let bytes = per_second * millis / 1000;
@@ -106,36 +96,14 @@ impl BufferConfig {
             .unwrap_or(MAX_BUFFER_BYTES)
             .clamp(MIN_BUFFER_BYTES, MAX_BUFFER_BYTES)
     }
-
-    /// How many bytes must arrive before we consider the track ready to play.
-    pub fn prefill_bytes(&self, budget_bytes: usize) -> u64 {
-        let ratio = self.prefill_ratio.clamp(0.0, 1.0);
-        #[allow(
-            clippy::cast_precision_loss,
-            clippy::cast_sign_loss,
-            clippy::cast_possible_truncation
-        )]
-        let bytes = (budget_bytes as f32 * ratio) as u64;
-
-        bytes.max(1)
-    }
 }
 
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
-        let token = env::var("DISCORD_TOKEN")
-            .map_err(|_| ConfigError::Missing("DISCORD_TOKEN"))?
-            .trim()
-            .to_owned();
+        let token = env_string("DISCORD_TOKEN").ok_or(ConfigError::Missing("DISCORD_TOKEN"))?;
 
-        if token.is_empty() {
-            return Err(ConfigError::Missing("DISCORD_TOKEN"));
-        }
-
-        let cookies_file = match env::var("YTDLP_COOKIES_FILE") {
-            Ok(path) if !path.trim().is_empty() => PathBuf::from(path.trim()),
-            _ => PathBuf::from("secrets/cookies.txt"),
-        };
+        let cookies_file = env_string("YTDLP_COOKIES_FILE")
+            .map_or_else(|| PathBuf::from("secrets/cookies.txt"), PathBuf::from);
         let extra_args: Vec<String> = env::var("YTDLP_EXTRA_ARGS")
             .unwrap_or_default()
             .split_whitespace()
@@ -152,50 +120,31 @@ impl Config {
 
         Ok(Self {
             token,
-            worker_threads: parse_worker_threads()?,
             spotify: SpotifyConfig::from_env()?,
-            cache_path: match env::var("CACHE_PATH") {
+            // Unlike the other settings, set-but-empty means "off" here.
+            search_cache_path: match env::var("CACHE_PATH") {
                 Ok(path) if path.trim().is_empty() => None,
                 Ok(path) => Some(PathBuf::from(path.trim())),
                 Err(_) => Some(PathBuf::from("cache.redb")),
             },
             ytdlp: YtDlpConfig {
-                program: env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),
+                program: env_string("YTDLP_PATH").unwrap_or_else(|| "yt-dlp".to_owned()),
                 timeout: Duration::from_millis(parse_env("YTDLP_TIMEOUT_MS", 15_000)?),
                 extra_args,
                 cookies_file,
             },
             buffer: BufferConfig {
                 target: Duration::from_millis(parse_env("BUFFER_MS", 2_000)?),
-                prefill_ratio: parse_env("PREFILL_RATIO", 0.5)?,
-                assumed_bitrate_bps: parse_env("ASSUMED_BITRATE_BPS", 160_000)?,
             },
         })
     }
 }
 
-/// `WORKER_THREADS`, where unset, empty, `auto` and `0` all mean "let tokio
-/// size the pool from the available cores".
-fn parse_worker_threads() -> Result<Option<usize>, ConfigError> {
-    let Ok(raw) = env::var("WORKER_THREADS") else {
-        return Ok(None);
-    };
-
-    let trimmed = raw.trim();
-
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
-        return Ok(None);
-    }
-
-    let count: usize = trimmed
-        .parse()
-        .map_err(|e: ParseIntError| ConfigError::Invalid {
-            name: "WORKER_THREADS",
-            value: raw.clone(),
-            reason: e.to_string(),
-        })?;
-
-    Ok((count > 0).then_some(count))
+/// A variable's trimmed value; `None` when it is unset or blank.
+fn env_string(name: &str) -> Option<String> {
+    let value = env::var(name).ok()?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 fn parse_env<T>(name: &'static str, default: T) -> Result<T, ConfigError>

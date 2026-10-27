@@ -69,14 +69,10 @@ install Deno, and run the provider on the loopback interface:
 docker run -d --init --name bgutil-provider -p 127.0.0.1:4416:4416 brainicism/bgutil-ytdlp-pot-provider:2.0.0
 ```
 
-## Development container
+## Development
 
-With Docker running and the VS Code Dev Containers extension installed, open
-this repository and run **Dev Containers: Reopen in Container**. The container
-includes Rust, rustfmt, Clippy, CMake, yt-dlp, and Rust editor extensions.
-
-Copy `.env.example` to `.env` if you have not already done so, then set
-`DISCORD_TOKEN` in `.env`. In the container terminal:
+Install Rust and yt-dlp, copy `.env.example` to `.env`, set `DISCORD_TOKEN`,
+then:
 
 ```sh
 cargo run
@@ -223,7 +219,7 @@ including private and collaborative playlists belonging to the authorized
 account. A rotated refresh token is retained in memory; reauthorize and update
 `.env` if authorization fails after a restart.
 
-### Resolved-track cache
+### Search cache
 
 Searching is the slow part of a playlist import, and the answer never changes,
 so each Spotify track ID and the YouTube upload it resolved to are stored in a

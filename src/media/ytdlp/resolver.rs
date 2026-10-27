@@ -1,35 +1,30 @@
 //! Turning a track into something playable: a media URL plus the headers
 //! needed to fetch it.
 
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use tracing::{debug, warn};
 use url::Url;
 
-use super::{YtDlpClient, dto};
+use super::{YtDlpClient, parse};
 use crate::media::{
-    MediaError, SearchQuery, StreamInfo, Target, matching, search_cache::SearchResultCache,
+    MediaError, Metadata, SearchQuery, StreamInfo, Target, search_cache::SearchCache,
 };
 
 #[derive(Clone)]
 pub struct YtDlpResolver {
     client: YtDlpClient,
     /// Skips the search for tracks resolved on an earlier run.
-    cache: Option<Arc<SearchResultCache>>,
+    cache: Option<Arc<SearchCache>>,
 }
 
 impl YtDlpResolver {
-    /// Built by [`super::build`], which shares `client` with the catalog.
-    pub(super) fn new(client: YtDlpClient) -> Self {
-        Self {
-            client,
-            cache: None,
-        }
-    }
-
-    pub fn with_track_cache(mut self, cache: Option<Arc<SearchResultCache>>) -> Self {
-        self.cache = cache;
-        self
+    /// Built by [`super::build`], which shares `client` with importing.
+    pub(super) fn new(client: YtDlpClient, cache: Option<Arc<SearchCache>>) -> Self {
+        Self { client, cache }
     }
 
     /// Resolve a link, or find and resolve the recording a search asks for.
@@ -71,7 +66,7 @@ impl YtDlpResolver {
                     continue;
                 }
             };
-            if matching::matches(wanted, &resolved.metadata) {
+            if durations_match(wanted, &resolved.metadata) {
                 self.remember(wanted, &resolved).await;
                 return Ok(resolved);
             }
@@ -100,11 +95,27 @@ impl YtDlpResolver {
     async fn resolve_input(&self, input: &str) -> Result<StreamInfo, MediaError> {
         let started = Instant::now();
         let output = self.client.resolve(input).await?;
-        let resolved = dto::parse_output(&output)?;
+        let resolved = parse::parse_stream(&output)?;
         debug!(title = ?resolved.metadata.title, duration_secs = resolved.metadata.duration.map(|d| d.as_secs()),
             elapsed_ms = started.elapsed().as_millis(), "audio source resolved");
         Ok(resolved)
     }
+}
+
+/// Decides whether a search result is the recording that was asked for.
+/// Compares duration of requested track and ytdlp search result of the same track.
+fn durations_match(wanted: &SearchQuery, found: &Metadata) -> bool {
+    match (wanted.duration, found.duration) {
+        // If both durations are known, check if they are within tolerance. When no duration is known, we assume it matches.
+        (Some(wanted), Some(found)) => wanted.abs_diff(found) <= duration_tolerance(wanted),
+        _ => true,
+    }
+}
+
+/// Uploads vary a few seconds in padding (music video intros for example)
+fn duration_tolerance(wanted: Duration) -> Duration {
+    // Multiply by 0.07 to allow for a 7% difference in duration, but always allow at least 10 seconds of tolerance.
+    Duration::from_secs(10).max(wanted.mul_f64(0.07))
 }
 
 /// Where searches look, best source first.

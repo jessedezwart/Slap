@@ -4,7 +4,7 @@ mod discord;
 mod media;
 mod voice;
 
-use std::{collections::HashMap, num::NonZeroUsize, process::ExitCode, sync::Arc, thread};
+use std::{collections::HashMap, process::ExitCode, sync::Arc};
 
 use songbird::{Config as SongbirdConfig, Songbird, shards::TwilightMap};
 use tokio::{signal, sync::watch, task::JoinHandle};
@@ -15,15 +15,14 @@ use twilight_gateway::{Config as GatewayConfig, Intents};
 use twilight_http::Client as HttpClient;
 
 use crate::{
+    audio::source::AudioContext,
     config::Config,
-    discord::{commands, events::dispatcher, player::Panels, state::State},
+    discord::{commands, events::dispatcher, state::State},
     media::{
-        catalog::Importer,
-        search_cache::SearchResultCache,
-        spotify::{SpotifyCatalog, SpotifyService},
-        ytdlp::{self, PLAYLIST_LIMIT},
+        PLAYLIST_LIMIT, importer::Importer, search_cache::SearchCache, spotify::SpotifyService,
+        ytdlp,
     },
-    voice::session::{SessionManager, run_command_loop},
+    voice::session::SessionManager,
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -57,7 +56,11 @@ fn main() -> ExitCode {
         }
     };
 
-    let runtime = match build_runtime(config.worker_threads) {
+    // Sized from `TOKIO_WORKER_THREADS`, or one worker per core.
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(runtime) => runtime,
         Err(error) => {
             error!(%error, "could not start the tokio runtime");
@@ -88,25 +91,11 @@ async fn run(config: Config) -> Result<(), BoxError> {
     Ok(())
 }
 
-/// The multi-threaded runtime the bot expects; `None` uses every core.
-fn build_runtime(worker_threads: Option<usize>) -> std::io::Result<tokio::runtime::Runtime> {
-    let worker_threads = worker_threads
-        .unwrap_or_else(|| thread::available_parallelism().map_or(1, NonZeroUsize::get));
-
-    info!(worker_threads, "starting the tokio runtime");
-
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(worker_threads)
-        .enable_all()
-        .build()
-}
-
 /// A running bot: everything `start` built that `shutdown` takes down again.
 struct Bot {
     state: Arc<State>,
     shutdown_tx: watch::Sender<bool>,
     dispatchers: Vec<JoinHandle<()>>,
-    command_loop: JoinHandle<()>,
 }
 
 impl Bot {
@@ -114,7 +103,6 @@ impl Bot {
     async fn start(config: Config) -> Result<Self, BoxError> {
         let _ = rustls::crypto::ring::default_provider().install_default();
 
-        let config = Arc::new(config);
         let http = Arc::new(HttpClient::new(config.token.clone()));
 
         let application_id = http.current_user_application().await?.model().await?.id;
@@ -147,53 +135,38 @@ impl Bot {
             SongbirdConfig::default().preallocated_tracks(2),
         ));
 
-        let (sessions, commands_rx) = SessionManager::new(Arc::clone(&songbird));
+        let sessions = SessionManager::new(Arc::clone(&songbird));
 
-        let track_cache = config.cache_path.as_deref().and_then(|path| {
-            match SearchResultCache::open(path) {
-                Ok(cache) => {
-                    info!(path = %path.display(), "track cache opened");
-                    Some(Arc::new(cache))
-                }
-                Err(error) => {
-                    warn!(path = %path.display(), %error, "could not open track cache; continuing without it");
-                    None
-                }
-            }
-        });
+        let search_cache = config
+            .search_cache_path
+            .as_deref()
+            .and_then(SearchCache::open_or_skip);
 
-        let cache = Arc::new(
-            DefaultInMemoryCache::builder()
-                .resource_types(ResourceType::GUILD | ResourceType::VOICE_STATE)
-                .build(),
-        );
-
-        let (ytdlp_catalog, resolver) = ytdlp::build(config.ytdlp.clone());
+        let (ytdlp, resolver) = ytdlp::build(config.ytdlp.clone(), search_cache);
         let spotify = SpotifyService::new(config.spotify.clone(), PLAYLIST_LIMIT)?;
-        // Spotify first: yt-dlp takes any link that is left.
-        let importer = Importer::new(vec![
-            Box::new(SpotifyCatalog::new(spotify)),
-            Box::new(ytdlp_catalog),
-        ]);
+        let importer = Importer::new(spotify, ytdlp);
 
         let state = Arc::new(State {
             player_tasks: tokio_util::task::TaskTracker::new(),
-            config: Arc::clone(&config),
             http: Arc::clone(&http),
-            cache,
+            discord_cache: Arc::new(
+                DefaultInMemoryCache::builder()
+                    .resource_types(ResourceType::VOICE_STATE)
+                    .build(),
+            ),
             songbird,
-            sessions: Arc::clone(&sessions),
-            panels: Panels::default(),
+            sessions,
             importer,
-            resolver: resolver.with_track_cache(track_cache),
-            client: reqwest::Client::builder().user_agent("slap").build()?,
+            audio: Arc::new(AudioContext {
+                http: reqwest::Client::builder().user_agent("slap").build()?,
+                resolver,
+                buffer: config.buffer,
+            }),
             application_id,
             user_id,
         });
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-
-        let command_loop = tokio::spawn(run_command_loop(Arc::clone(&sessions), commands_rx));
 
         let dispatchers: Vec<_> = shards
             .into_iter()
@@ -204,7 +177,6 @@ impl Bot {
             state,
             shutdown_tx,
             dispatchers,
-            command_loop,
         })
     }
 
@@ -214,10 +186,9 @@ impl Bot {
             state,
             shutdown_tx,
             dispatchers,
-            command_loop,
         } = self;
         info!("leaving voice channels");
-        for guild_id in state.sessions.active_guilds() {
+        for guild_id in state.sessions.known_guilds() {
             state.sessions.teardown(guild_id, "shutdown").await;
         }
 
@@ -235,7 +206,5 @@ impl Bot {
             state.player_tasks.wait(),
         )
         .await;
-
-        command_loop.abort();
     }
 }

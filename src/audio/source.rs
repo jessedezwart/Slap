@@ -1,6 +1,6 @@
 //! The audio source that songbird uses.
 
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 use reqwest::Client;
 use songbird::input::{AsyncAdapterStream, AudioStream, AudioStreamError, Compose, Input};
@@ -9,50 +9,45 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use twilight_model::id::{Id, marker::GuildMarker};
 
-use super::{
-    AudioError,
-    stream::{HttpSource, RemoteFile},
-};
+use super::{AudioError, download::RemoteFile, stream::HttpStream};
 use crate::{
     config::BufferConfig,
     media::{StreamInfo, Target, ytdlp::YtDlpResolver},
 };
 
-pub struct StreamSource {
-    guild_id: Option<Id<GuildMarker>>,
+/// Bot-wide clients and settings.
+pub struct AudioContext {
+    /// Shared connection pool for every audio fetch.
+    pub http: Client,
+    /// Turns a track into audio once the queue reaches it.
+    pub resolver: YtDlpResolver,
+    pub buffer: BufferConfig,
+}
+
+pub struct TrackSource {
+    guild_id: Id<GuildMarker>,
     target: Target,
     stream: Option<StreamInfo>,
-    client: Client,
-    resolver: YtDlpResolver,
-    buffer_config: BufferConfig,
+    audio: Arc<AudioContext>,
     /// Cancellation token, used for the complete guild.
     cancel: CancellationToken,
 }
 
-impl StreamSource {
+impl TrackSource {
     pub fn new(
         target: impl Into<Target>,
         stream: Option<StreamInfo>,
-        client: Client,
-        resolver: YtDlpResolver,
-        buffer_config: BufferConfig,
+        audio: Arc<AudioContext>,
+        guild_id: Id<GuildMarker>,
         cancel: CancellationToken,
     ) -> Self {
         Self {
-            guild_id: None,
+            guild_id,
             target: target.into(),
             stream,
-            client,
-            resolver,
-            buffer_config,
+            audio,
             cancel,
         }
-    }
-
-    /// Set the guild ID for this source.
-    pub fn in_guild(mut self, guild_id: Id<GuildMarker>) -> Self {
-        self.guild_id = Some(guild_id);
-        self
     }
 
     async fn resolve(&mut self) -> Result<StreamInfo, AudioError> {
@@ -68,8 +63,8 @@ impl StreamSource {
         // This is done at the start of the poll and when the future is polled again after being woken up, so that we don't wait for yt-dlp to finish if the cancellation token is triggered while yt-dlp is running.
         let resolved = tokio::select! {
             biased;
-            () =self.cancel.cancelled() => return Err(AudioError::Cancelled),
-            result = self.resolver.resolve(&self.target) => result?,
+            () = self.cancel.cancelled() => return Err(AudioError::Cancelled),
+            result = self.audio.resolver.resolve(&self.target) => result?,
         };
 
         // Later re-resolves (expired URL, seek) must reach the same upload
@@ -87,13 +82,13 @@ impl StreamSource {
 
 #[async_trait::async_trait]
 /// Everything here is async; songbird will use `create_async`.
-impl Compose for StreamSource {
+impl Compose for TrackSource {
     fn create(&mut self) -> Result<AudioStream<Box<dyn MediaSource>>, AudioStreamError> {
         Err(AudioStreamError::Unsupported)
     }
 
     // Don't log all arguments
-    #[tracing::instrument(skip_all, fields(guild_id = self.guild_id.map(|id| id.get()), title = tracing::field::Empty))]
+    #[tracing::instrument(skip_all, fields(guild_id = self.guild_id.get(), title = tracing::field::Empty))]
     async fn create_async(
         &mut self,
     ) -> Result<AudioStream<Box<dyn MediaSource>>, AudioStreamError> {
@@ -114,14 +109,10 @@ impl Compose for StreamSource {
             "opening audio stream"
         );
 
-        let file = RemoteFile::new(
-            self.client.clone(),
-            &resolved,
-            self.buffer_config.assumed_bitrate_bps,
-        );
+        let file = RemoteFile::new(self.audio.http.clone(), &resolved);
 
         // Returns once the prefill is buffered.
-        let stream = HttpSource::open(file, self.buffer_config, &self.cancel, 0)
+        let stream = HttpStream::open(file, self.audio.buffer, &self.cancel, 0)
             .await
             .map_err(fail)?;
         debug!(title = ?resolved.metadata.title, elapsed_ms = started.elapsed().as_millis(), "audio buffer ready");
@@ -139,9 +130,9 @@ impl Compose for StreamSource {
     }
 }
 
-/// Convert a `StreamSource` into a songbird `Input`. This is the type songbird expects to be returned from the `Compose` trait.
-impl From<StreamSource> for Input {
-    fn from(source: StreamSource) -> Self {
+/// Convert a `TrackSource` into a songbird `Input`. This is the type songbird expects to be returned from the `Compose` trait.
+impl From<TrackSource> for Input {
+    fn from(source: TrackSource) -> Self {
         Input::Lazy(Box::new(source))
     }
 }

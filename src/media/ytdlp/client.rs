@@ -5,8 +5,8 @@ use std::process::Stdio;
 use tokio::{process::Command, time};
 use url::Url;
 
-use super::{PLAYLIST_LIMIT, YtDlpError};
-use crate::config::YtDlpConfig;
+use super::YtDlpError;
+use crate::{config::YtDlpConfig, media::PLAYLIST_LIMIT};
 
 /// Best available Opus quality
 const OPUS_FORMAT: &str = "bestaudio[acodec=opus]";
@@ -35,30 +35,27 @@ impl YtDlpClient {
             .arg("-f")
             .arg(OPUS_FORMAT)
             // Searches resolve their top result only; no-op for a video.
-            .args(["--playlist-end", "1"]);
-
-        for arg in &self.config.extra_args {
-            cmd.arg(arg);
-        }
+            .args(["--playlist-end", "1"])
+            .args(&self.config.extra_args);
 
         self.run(cmd, input).await
     }
 
     pub(super) async fn list(&self, url: &Url) -> Result<Vec<u8>, YtDlpError> {
         let mut cmd = Command::new(&self.config.program);
-        cmd.args(&self.config.extra_args)
-            .args([
-                "--dump-single-json",
-                "--flat-playlist",
-                "--yes-playlist",
-                // --ignore-errors is needed to get a partial listing for a playlist
-                "--ignore-errors",
-                "--no-warnings",
-                "--skip-download",
-                "--playlist-end",
-            ])
-            .arg((PLAYLIST_LIMIT + 1).to_string())
-            .args(["-f", OPUS_FORMAT]);
+        cmd.args([
+            "--dump-single-json",
+            "--flat-playlist",
+            "--yes-playlist",
+            // --ignore-errors is needed to get a partial listing for a playlist
+            "--ignore-errors",
+            "--no-warnings",
+            "--skip-download",
+            "--playlist-end",
+        ])
+        .arg((PLAYLIST_LIMIT + 1).to_string())
+        .args(["-f", OPUS_FORMAT])
+        .args(&self.config.extra_args);
         self.run(cmd, url.as_str()).await
     }
 
@@ -99,7 +96,7 @@ impl YtDlpClient {
                     .status
                     .code()
                     .map_or_else(|| "signal".to_owned(), |c| c.to_string()),
-                stderr: last_line(&output.stderr),
+                stderr: last_error_line(&output.stderr),
             });
         }
 
@@ -107,7 +104,7 @@ impl YtDlpClient {
     }
 }
 
-fn last_line(stderr: &[u8]) -> String {
+fn last_error_line(stderr: &[u8]) -> String {
     String::from_utf8_lossy(stderr)
         .lines()
         .rev()

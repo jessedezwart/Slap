@@ -7,95 +7,53 @@ use std::{
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, RANGE};
 use serde::Deserialize;
+use serde_json::Value;
 use tracing::debug;
 use url::Url;
 
-use super::{PLAYLIST_LIMIT, YtDlpError, http_url};
-use crate::media::{Import, Metadata, StreamInfo, Track};
+use super::YtDlpError;
+use crate::media::{
+    Import, ImportedTrack, Metadata, PLAYLIST_LIMIT, StreamInfo, http_url, playlist_name,
+};
 
 pub fn parse_list(stdout: &[u8], original: &Url) -> Result<Import, YtDlpError> {
-    let value: serde_json::Value = serde_json::from_slice(stdout)?;
+    let listing: Listing = serde_json::from_slice(stdout)?;
     // A playlist has `entries`; a single video is its own full record, audio
     // URL included, so it comes back ready to play.
-    let Some(entries) = value.get("entries").and_then(serde_json::Value::as_array) else {
-        // A single video comes back with its stream already attached
-        let stream = parse_output(stdout)?;
+    let Some(entries) = listing.entries else {
+        let stream = parse_stream(stdout)?;
         return Ok(Import {
-            tracks: vec![Track {
+            tracks: vec![ImportedTrack {
                 target: original.clone().into(),
                 metadata: stream.metadata.clone(),
                 stream: Some(stream),
             }],
-            skipped: 0,
-            truncated: false,
             // A lone track belongs to no playlist.
-            playlist_name: None,
+            ..Import::default()
         });
     };
-    let mut tracks = Vec::new();
-    let mut skipped = 0;
-    for entry in entries.iter().take(PLAYLIST_LIMIT) {
-        let unavailable = matches!(
-            entry.get("availability").and_then(|v| v.as_str()),
-            Some("private" | "premium_only" | "subscriber_only" | "needs_auth")
-        );
-        let url = ["webpage_url", "url"]
-            .into_iter()
-            .filter_map(|key| entry.get(key).and_then(|v| v.as_str()))
-            .find_map(http_url);
-        let Some(url) = url.filter(|_| !unavailable) else {
-            skipped += 1;
-            continue;
-        };
-        tracks.push(Track {
-            metadata: Metadata {
-                title: entry
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned),
-                duration: entry
-                    .get("duration")
-                    .and_then(|v| v.as_f64())
-                    .filter(|d| d.is_finite() && *d > 0.0)
-                    .and_then(|d| Duration::try_from_secs_f64(d).ok()),
-                // Flat entries list thumbnails smallest first.
-                thumbnail: entry
-                    .get("thumbnails")
-                    .and_then(|v| v.as_array())
-                    .and_then(|thumbnails| thumbnails.last())
-                    .and_then(|thumbnail| thumbnail.get("url"))
-                    .or_else(|| entry.get("thumbnail"))
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned),
-                webpage_url: Some(url.clone()),
-                ..Metadata::default()
-            },
-            target: url.into(),
-            // Flat entries carry no audio URL; the resolver finds it later.
-            stream: None,
-        });
-    }
-    Ok(Import {
-        tracks,
-        skipped,
+    let mut import = Import {
         truncated: entries.len() > PLAYLIST_LIMIT,
-        playlist_name: playlist_title(&value),
-    })
+        playlist_name: listing.title.as_deref().and_then(playlist_name),
+        ..Import::default()
+    };
+    for entry in entries.iter().take(PLAYLIST_LIMIT) {
+        match Entry::deserialize(entry).ok().and_then(Entry::into_track) {
+            Some(track) => import.tracks.push(track),
+            None => import.skipped += 1,
+        }
+    }
+    Ok(import)
 }
 
 /// Parse a single `yt-dlp -j` record.
-pub fn parse_output(stdout: &[u8]) -> Result<StreamInfo, YtDlpError> {
-    let line = stdout
-        .split(|b| *b == b'\n')
-        .find(|l| !l.iter().all(u8::is_ascii_whitespace))
-        .ok_or(YtDlpError::NoMetadata)?;
-
-    // `-j` emits one object per line, so the first line is the record. Fall
-    // back to the whole buffer in case the output is ever pretty-printed.
-    let output: Output = match serde_json::from_slice(line) {
-        Ok(output) => output,
-        Err(line_error) => serde_json::from_slice(stdout).map_err(|_| line_error)?,
-    };
+pub fn parse_stream(stdout: &[u8]) -> Result<StreamInfo, YtDlpError> {
+    // `-j` emits one object per line, so the first value is the record. This
+    // also reads it when the output is pretty-printed.
+    let output = serde_json::Deserializer::from_slice(stdout)
+        .into_iter::<Output>()
+        .next()
+        .ok_or(YtDlpError::NoMetadata)??;
 
     // With `-f` selecting one format, yt-dlp reports it either under
     // `requested_downloads` or flattened onto the top level.
@@ -168,15 +126,6 @@ pub(super) fn signed_url_expiry(media_url: &str) -> Option<SystemTime> {
     UNIX_EPOCH.checked_add(Duration::from_secs(secs))
 }
 
-/// The playlist's own name, ignoring the placeholders yt-dlp falls back to.
-fn playlist_title(value: &serde_json::Value) -> Option<String> {
-    let title = value
-        .get("title")
-        .and_then(serde_json::Value::as_str)?
-        .trim();
-    (!title.is_empty()).then(|| title.chars().take(100).collect())
-}
-
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn kbps_to_bps(kbps: f64) -> u32 {
     (kbps * 1000.0).clamp(0.0, f64::from(u32::MAX)) as u32
@@ -210,6 +159,69 @@ fn build_headers(raw: Option<&BTreeMap<String, String>>) -> HeaderMap {
     headers
 }
 
+/// What `--dump-single-json --flat-playlist` prints: a playlist, or a lone
+/// video's full record.
+#[derive(Deserialize)]
+struct Listing {
+    title: Option<String>,
+    /// Kept loose, so one odd entry is skipped rather than failing the list.
+    entries: Option<Vec<Value>>,
+}
+
+/// One flat playlist entry.
+#[derive(Deserialize)]
+struct Entry {
+    url: Option<String>,
+    webpage_url: Option<String>,
+    title: Option<String>,
+    duration: Option<f64>,
+    thumbnail: Option<String>,
+    thumbnails: Option<Vec<Thumbnail>>,
+    availability: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Thumbnail {
+    url: Option<String>,
+}
+
+impl Entry {
+    /// The entry as a track, or `None` when it cannot be played.
+    fn into_track(self) -> Option<ImportedTrack> {
+        let unavailable = matches!(
+            self.availability.as_deref(),
+            Some("private" | "premium_only" | "subscriber_only" | "needs_auth")
+        );
+        if unavailable {
+            return None;
+        }
+        let url = [self.webpage_url.as_deref(), self.url.as_deref()]
+            .into_iter()
+            .flatten()
+            .find_map(http_url)?;
+        Some(ImportedTrack {
+            metadata: Metadata {
+                title: self.title,
+                duration: self
+                    .duration
+                    .filter(|d| d.is_finite() && *d > 0.0)
+                    .and_then(|d| Duration::try_from_secs_f64(d).ok()),
+                // Flat entries list thumbnails smallest first.
+                thumbnail: self
+                    .thumbnails
+                    .and_then(|thumbnails| thumbnails.into_iter().last())
+                    .and_then(|thumbnail| thumbnail.url)
+                    .or(self.thumbnail),
+                webpage_url: Some(url.clone()),
+                ..Metadata::default()
+            },
+            target: url.into(),
+            // Flat entries carry no audio URL; the resolver finds it later.
+            stream: None,
+        })
+    }
+}
+
 #[derive(Deserialize)]
 struct Output {
     title: Option<String>,
@@ -235,5 +247,5 @@ struct Format {
 }
 
 #[cfg(test)]
-#[path = "../../../tests/media/ytdlp/dto.rs"]
+#[path = "../../../tests/media/ytdlp/parse.rs"]
 mod tests;

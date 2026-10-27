@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::UNIX_EPOCH};
 
 use super::*;
-use crate::{discord::player::button_command, media::Metadata, voice::queue::Playlist};
+use crate::{discord::player::button_action, media::Metadata, voice::session::Playlist};
 
 /// A queue entry for `metadata`, queued by user 30 outside any playlist.
 fn entry(metadata: Metadata) -> QueueEntry {
@@ -42,17 +42,17 @@ fn buttons_of(view: &View) -> Vec<&Button> {
 }
 
 #[test]
-fn time_handles_unknown_zero_and_overrun() {
+fn static_position_handles_unknown_zero_and_overrun() {
     assert_eq!(
-        time(Duration::from_secs(10), Some(Duration::from_secs(300))),
+        static_position(Duration::from_secs(10), Some(Duration::from_secs(300))),
         "`0:10 / 5:00`"
     );
     assert_eq!(
-        time(Duration::from_secs(90), Some(Duration::from_secs(60))),
+        static_position(Duration::from_secs(90), Some(Duration::from_secs(60))),
         "`1:00 / 1:00`"
     );
     for duration in [None, Some(Duration::ZERO)] {
-        assert_eq!(time(Duration::from_secs(30), duration), "`0:30`");
+        assert_eq!(static_position(Duration::from_secs(30), duration), "`0:30`");
     }
 }
 
@@ -191,7 +191,7 @@ fn controls_disable_for_empty_queues() {
         assert_eq!(button.disabled, disabled);
         assert_eq!(button.style, ButtonStyle::Secondary);
         assert!(button.emoji.is_some());
-        assert!(button_command(button.custom_id.as_deref().unwrap()).is_some());
+        assert!(button_action(button.custom_id.as_deref().unwrap()).is_some());
     }
     assert!(
         texts(&View::empty(" Skipped 2 unavailable entries.").components)

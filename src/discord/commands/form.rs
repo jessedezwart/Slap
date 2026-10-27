@@ -44,6 +44,7 @@ pub fn play_command() -> Command {
 }
 
 /// What the user passed to `/play` directly.
+/// `None` without a link, so the form opens instead.
 pub(super) fn command_input(data: &CommandData) -> Option<PlayInput> {
     let value = |name: &str| {
         data.options
@@ -52,7 +53,7 @@ pub(super) fn command_input(data: &CommandData) -> Option<PlayInput> {
             .map(|option| &option.value)
     };
     let url = match value("url") {
-        Some(CommandOptionValue::String(url)) => url.trim().to_owned(),
+        Some(CommandOptionValue::String(url)) if !url.trim().is_empty() => url.trim().to_owned(),
         _ => return None,
     };
     Some(PlayInput {

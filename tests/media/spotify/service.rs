@@ -87,8 +87,11 @@ async fn imports_pages_in_order_skips_unavailable_and_refreshes_authorization() 
     assert_eq!(list.tracks.len(), 2);
     assert_eq!(list.skipped, 1);
     assert!(!list.truncated);
-    assert_eq!(list.tracks[1].title, "Last");
-    assert_eq!(list.name.as_deref(), Some("Late Night"));
+    assert_eq!(
+        list.tracks[1].metadata.title.as_deref(),
+        Some("Artist, Guest — Last")
+    );
+    assert_eq!(list.playlist_name.as_deref(), Some("Late Night"));
 
     let requests = task.await.unwrap();
     assert!(requests[0].contains("grant_type=refresh_token&refresh_token=refresh"));
@@ -147,7 +150,7 @@ async fn client_credentials_reads_only_the_embedded_first_page() {
         .await
         .unwrap();
     assert_eq!(list.tracks.len(), 2);
-    assert_eq!(list.name.as_deref(), Some("LEVELING"));
+    assert_eq!(list.playlist_name.as_deref(), Some("LEVELING"));
     // `total` exceeds what was returned, so the user is told it was cut short.
     assert!(list.truncated);
 
@@ -211,10 +214,8 @@ async fn live_public_playlist() {
     );
     let first = &user.tracks[0];
     println!(
-        "first: {} — {} ({:?})",
-        first.artist(),
-        first.title,
-        first.duration
+        "first: {:?} ({:?})",
+        first.metadata.title, first.metadata.duration
     );
 }
 

@@ -1,36 +1,168 @@
-mod download;
-mod http;
-mod request;
+//! The byte stream songbird reads a track from.
 
-use reqwest::{Client, header::HeaderMap};
+use std::{
+    io::{self, SeekFrom},
+    pin::Pin,
+    task::{Context, Poll},
+};
 
-pub use http::HttpSource;
+use bytes::Bytes;
+use futures_util::{
+    StreamExt,
+    stream::{self, BoxStream},
+};
+use songbird::input::{AsyncMediaSource, AudioStreamError};
+use sync_wrapper::SyncWrapper;
+use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
+use tokio_util::{io::StreamReader, sync::CancellationToken};
+use tracing::debug;
 
-use crate::media::StreamInfo;
+use super::{
+    AudioError,
+    download::{RangedDownload, RemoteFile},
+};
+use crate::config::BufferConfig;
 
-#[derive(Clone)]
-pub struct RemoteFile {
-    // The shared HTTP client
-    pub client: Client,
-    // The URL to request from
-    pub url: String,
-    // The headers to send with the request
-    pub headers: HeaderMap,
-    /// Length of complete file. Optional since not always provided.
-    pub content_length: Option<u64>,
-    // Bitrate of the audio stream in bits per second. Falls back to the configured assumed bitrate when yt-dlp reports none.
-    pub bitrate_bps: u32,
+pub struct HttpStream {
+    file: RemoteFile,
+    buffer: BufferConfig,
+    cancel: CancellationToken,
+    /// The downloaded bytes, readable by songbird:
+    /// - `BoxStream` because the stream is named by Rust.
+    /// - `StreamReader`, because songbird reads with `AsyncRead`, not `Stream`.
+    /// - `SyncWrapper`, because songbird requires `Sync`.
+    reader: SyncWrapper<StreamReader<BoxStream<'static, io::Result<Bytes>>, Bytes>>,
+    /// How much songbird's adapter should buffer ahead of the mixer.
+    budget_bytes: usize,
+    pos: u64,
 }
 
-impl RemoteFile {
-    /// `assumed_bitrate_bps` is used when the resolver reported no bitrate.
-    pub fn new(client: Client, stream: &StreamInfo, assumed_bitrate_bps: u32) -> Self {
-        Self {
-            client,
-            url: stream.media_url.clone(),
-            headers: stream.headers.clone(),
-            content_length: stream.content_length,
-            bitrate_bps: stream.bitrate_bps.unwrap_or(assumed_bitrate_bps),
+impl HttpStream {
+    pub async fn open(
+        file: RemoteFile,
+        buffer: BufferConfig,
+        cancel: &CancellationToken,
+        offset: u64,
+    ) -> Result<Self, AudioError> {
+        let budget_bytes = buffer.budget_bytes(file.bitrate_bps);
+        // Playback starts once half the budget is buffered.
+        let prefill_bytes = budget_bytes as u64 / 2;
+
+        let mut download = RangedDownload::open(file, cancel.clone(), offset).await?;
+        let file = download.file().clone();
+
+        // Prefill the buffer
+        let mut prefilled = Vec::new();
+        let mut buffered = 0;
+        while buffered < prefill_bytes {
+            // Only load the next chunk if not cancelled.
+            let next = tokio::select! {
+                () = cancel.cancelled() => return Err(AudioError::Cancelled),
+                next = download.next() => next?,
+            };
+            // If no more bytes are available, stop buffering.
+            let Some(bytes) = next else { break };
+
+            buffered += bytes.len() as u64;
+            prefilled.push(Ok(bytes));
         }
+
+        // Turn byte vector into a stream, chain it with the rest of the download.
+        let bytes = stream::iter(prefilled)
+            .chain(download.into_stream())
+            .boxed();
+
+        Ok(Self {
+            file,
+            buffer,
+            cancel: cancel.clone(),
+            reader: SyncWrapper::new(StreamReader::new(bytes)),
+            budget_bytes,
+            pos: offset,
+        })
+    }
+
+    /// Ring buffer size to give songbird's `AsyncAdapterStream`, which does
+    /// the actual read-ahead.
+    pub fn budget_bytes(&self) -> usize {
+        self.budget_bytes
     }
 }
+
+impl AsyncRead for HttpStream {
+    /// Called by songbird's `AsyncAdapterStream` to fill its ring buffer.
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let me = self.get_mut();
+        let before = buf.filled().len();
+        let result = Pin::new(me.reader.get_mut()).poll_read(cx, buf);
+
+        me.pos += (buf.filled().len() - before) as u64;
+
+        result
+    }
+}
+
+impl AsyncSeek for HttpStream {
+    /// Called by songbird when the decoder seeks.
+    /// Since seeking is not supported, return an error unless the seek is to the current position.
+    fn start_seek(self: Pin<&mut Self>, position: SeekFrom) -> io::Result<()> {
+        let at_current = match position {
+            SeekFrom::Current(0) => true,
+            SeekFrom::Start(target) => target == self.pos,
+            SeekFrom::End(_) | SeekFrom::Current(_) => false,
+        };
+
+        if at_current {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "audio stream is not seekable",
+            ))
+        }
+    }
+
+    /// Called by songbird after `start_seek`, to get the resulting position.
+    fn poll_complete(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<u64>> {
+        Poll::Ready(Ok(self.pos))
+    }
+}
+
+#[async_trait::async_trait]
+impl AsyncMediaSource for HttpStream {
+    /// Called by songbird to check if it can seek.
+    fn is_seekable(&self) -> bool {
+        false
+    }
+
+    /// Called by songbird to learn the file size, if known.
+    async fn byte_len(&self) -> Option<u64> {
+        self.file.content_length
+    }
+
+    /// Called by songbird after a read error, to continue from `offset`.
+    async fn try_resume(
+        &mut self,
+        offset: u64,
+    ) -> Result<Box<dyn AsyncMediaSource>, AudioStreamError> {
+        debug!(offset, expected_bytes = ?self.file.content_length, "resuming audio stream after error");
+
+        let stream = Self::open(self.file.clone(), self.buffer, &self.cancel, offset)
+            .await
+            .map_err(|error| {
+                debug!(offset, %error, "audio stream resume failed");
+                AudioStreamError::Fail(Box::new(error))
+            })?;
+
+        debug!(offset, "audio stream resumed");
+        Ok(Box::new(stream))
+    }
+}
+
+#[cfg(test)]
+#[path = "../../tests/audio/stream.rs"]
+mod tests;

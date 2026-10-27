@@ -23,7 +23,7 @@ use crate::{
         commands::Action,
         text::{escape, format_duration, link, playlist_link},
     },
-    voice::{queue::QueueEntry, session::Control},
+    voice::session::{Control, QueueEntry},
 };
 
 const ACCENT_PLAYING: u32 = 0x8B5CF6;
@@ -193,12 +193,11 @@ fn progress(
     duration: Option<Duration>,
     now: SystemTime,
 ) -> String {
-    let duration = duration.filter(|duration| !duration.is_zero());
     if status != Status::Playing {
-        return time(position, duration);
+        return static_position(position, duration);
     }
     let now = now.duration_since(UNIX_EPOCH).unwrap_or_default();
-    match duration {
+    match duration.filter(|duration| !duration.is_zero()) {
         Some(duration) => {
             let end = now + duration.saturating_sub(position);
             format!(
@@ -213,7 +212,7 @@ fn progress(
 }
 
 /// A position that is not moving, against the length when it is known.
-fn time(position: Duration, duration: Option<Duration>) -> String {
+fn static_position(position: Duration, duration: Option<Duration>) -> String {
     let Some(duration) = duration.filter(|duration| !duration.is_zero()) else {
         return format!("`{}`", format_duration(position));
     };
@@ -238,7 +237,7 @@ fn buttons(empty: bool, paused: bool) -> Component {
             (Action::Control(toggle), empty),
             (Action::Control(Control::Skip), empty),
             (Action::Control(Control::Stop), false),
-            (Action::Play, false),
+            (Action::Add, false),
             (Action::Queue, false),
         ]
         .into_iter()

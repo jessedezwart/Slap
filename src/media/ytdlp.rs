@@ -1,53 +1,74 @@
-//! yt-dlp: a client that runs the program, DTOs for the JSON it prints, and
-//! the two roles built on top: a catalog that lists links and a resolver that
-//! turns tracks into audio. Everything it hands out is a
+//! yt-dlp: a client that runs the program, a parser for the JSON it prints,
+//! and the two roles built on top: importing links, and a resolver
+//! that turns tracks into audio. Everything it hands out is a
 //! [`crate::media`] type.
 //!
 //! yt-dlp is only ever used to *resolve* a video into a direct media URL plus
 //! the headers needed to fetch it; the bytes themselves are pulled by
-//! [`crate::audio::stream`]. The process is spawned as argv — there is no shell
+//! [`crate::audio`]. The process is spawned as argv — there is no shell
 //! anywhere in this path.
 
-pub mod catalog;
 pub mod client;
-mod dto;
-pub mod error;
+mod parse;
 pub mod resolver;
 
+use std::{sync::Arc, time::Duration};
+
+use thiserror::Error;
 use url::Url;
 
-pub use catalog::YtDlpCatalog;
 pub use client::YtDlpClient;
-pub use error::YtDlpError;
 pub use resolver::YtDlpResolver;
 
-use super::MediaError;
+use super::{Import, search_cache::SearchCache};
 use crate::config::YtDlpConfig;
 
-/// Limit imports so accidental channel/radio links cannot create an unbounded queue.
-pub const PLAYLIST_LIMIT: usize = 1000;
+#[derive(Debug, Error)]
+pub enum YtDlpError {
+    #[error("could not run `{program}`: {source}")]
+    Spawn {
+        program: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("yt-dlp did not respond within {0:?}")]
+    Timeout(Duration),
+
+    #[error("yt-dlp failed ({code}): {stderr}")]
+    Failed { code: String, stderr: String },
+
+    #[error("yt-dlp returned no metadata")]
+    NoMetadata,
+
+    #[error("could not parse yt-dlp output: {0}")]
+    Json(#[from] serde_json::Error),
+
+    #[error("this video has no Opus audio track")]
+    NoOpusFormat,
+
+    #[error("yt-dlp did not return a media URL")]
+    NoMediaUrl,
+}
+
+impl YtDlpError {
+    /// Mark yt-dlp errors as fatal if they indicate that yt-dlp itself is broken/misconfigured.
+    pub fn is_fatal(&self) -> bool {
+        matches!(self, Self::Spawn { .. } | Self::Timeout(_))
+    }
+}
 
 /// yt-dlp plays two roles: listing links, and resolving tracks into audio.
-/// Both run the same program, so they share one client.
-pub fn build(config: YtDlpConfig) -> (YtDlpCatalog, YtDlpResolver) {
+/// Both run the same program, so they share one client. `cache` lets the
+/// resolver skip searches resolved on an earlier run.
+pub fn build(config: YtDlpConfig, cache: Option<Arc<SearchCache>>) -> (YtDlpClient, YtDlpResolver) {
     let client = YtDlpClient::new(config);
-    (
-        YtDlpCatalog::new(client.clone()),
-        YtDlpResolver::new(client),
-    )
+    (client.clone(), YtDlpResolver::new(client, cache))
 }
 
-pub fn http_url(raw: &str) -> Option<Url> {
-    let url = Url::parse(raw.trim()).ok()?;
-
-    let scheme_ok = matches!(url.scheme(), "http" | "https");
-    (scheme_ok && url.host_str().is_some()).then_some(url)
+/// List a link: one video, or the entries of a playlist.
+pub async fn import(client: &YtDlpClient, url: &Url) -> Result<Import, YtDlpError> {
+    let output = client.list(url).await?;
+    // A single video comes back with its stream already attached.
+    parse::parse_list(&output, url)
 }
-
-pub fn validate_url(raw: &str) -> Result<Url, MediaError> {
-    http_url(raw).ok_or_else(|| MediaError::UnsupportedUrl(raw.to_owned()))
-}
-
-#[cfg(test)]
-#[path = "../../tests/media/ytdlp/url.rs"]
-mod tests;

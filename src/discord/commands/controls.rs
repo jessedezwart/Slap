@@ -3,55 +3,39 @@
 use std::{fmt::Write as _, sync::Arc};
 
 use songbird::tracks::TrackHandle;
-use tokio_util::sync::CancellationToken;
 use twilight_model::{
-    application::interaction::{Interaction, InteractionData},
-    id::{Id, marker::GuildMarker},
+    application::interaction::Interaction,
+    id::{Id, marker::MessageMarker},
 };
 
-use super::{PlayError, caller_channel};
+use super::{CommandError, caller_channel};
 use crate::{
     discord::{
         state::State,
         text::{escape, format_duration},
     },
     media::Metadata,
-    voice::{
-        queue::QueueEntry,
-        session::{Control, QueueHead},
-    },
+    voice::session::{Control, QueueEntry, QueueHead, SessionError},
 };
 
 /// Upcoming tracks listed by the queue command.
 const QUEUE_LEN: usize = 10;
 
-/// The voice session a player button belongs to
-fn panel_session(
-    state: &State,
-    interaction: &Interaction,
-    guild_id: Id<GuildMarker>,
-) -> Result<Option<CancellationToken>, PlayError> {
-    if !matches!(interaction.data, Some(InteractionData::MessageComponent(_))) {
-        return Ok(None);
-    }
-    let message = interaction.message.as_ref().ok_or(PlayError::StalePanel)?;
-    state
-        .panels
-        .session(guild_id, message.id)
-        .map(Some)
-        .ok_or(PlayError::StalePanel)
+/// The player message a button was pressed on.
+fn player_message(interaction: &Interaction) -> Result<Id<MessageMarker>, CommandError> {
+    let message = interaction.message.as_ref().ok_or(SessionError::Ended)?;
+    Ok(message.id)
 }
 
 pub(super) async fn control_playback(
     state: &Arc<State>,
     interaction: &Interaction,
     control: Control,
-) -> Result<String, PlayError> {
+) -> Result<String, CommandError> {
     let (guild_id, channel_id) = caller_channel(state, interaction)?;
-    let session = panel_session(state, interaction, guild_id)?;
     state
         .sessions
-        .control(guild_id, channel_id, session.as_ref(), control)
+        .control(guild_id, channel_id, player_message(interaction)?, control)
         .await?;
     Ok(match control {
         Control::Pause => "Paused. Press Resume to continue.",
@@ -65,12 +49,16 @@ pub(super) async fn control_playback(
 pub(super) async fn queue(
     state: &Arc<State>,
     interaction: &Interaction,
-) -> Result<String, PlayError> {
+) -> Result<String, CommandError> {
     let (guild_id, channel_id) = caller_channel(state, interaction)?;
-    let session = panel_session(state, interaction, guild_id)?;
     let QueueHead { tracks, total } = state
         .sessions
-        .queue_head(guild_id, channel_id, session.as_ref(), QUEUE_LEN)
+        .queue_head(
+            guild_id,
+            channel_id,
+            player_message(interaction)?,
+            QUEUE_LEN,
+        )
         .await?;
     let entries: Vec<_> = tracks.iter().map(TrackHandle::data::<QueueEntry>).collect();
     let metadata: Vec<_> = entries.iter().map(|entry| &entry.metadata).collect();
@@ -103,8 +91,13 @@ fn format_queue(tracks: &[&Metadata], total: usize) -> String {
         total.saturating_sub(1)
     );
     for (index, track) in tracks.iter().skip(1).take(QUEUE_LEN).enumerate() {
-        let _ = write!(message, "
-{}. {}", index + 1, label(track));
+        let _ = write!(
+            message,
+            "
+{}. {}",
+            index + 1,
+            label(track)
+        );
     }
     message
 }

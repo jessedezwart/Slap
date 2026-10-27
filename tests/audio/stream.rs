@@ -15,6 +15,7 @@ use tokio::{
 use reqwest::{Client, header::HeaderMap};
 
 use super::*;
+use crate::audio::download::WINDOW_BYTES;
 
 /// A body comfortably larger than the smallest buffer we will allocate, so it
 /// cannot arrive in the prefill alone.
@@ -24,15 +25,7 @@ fn test_buffer_config() -> BufferConfig {
     BufferConfig {
         // Clamped up to the 64 KiB floor, which is well under BODY_LEN.
         target: Duration::from_millis(1),
-        prefill_ratio: 0.5,
-        assumed_bitrate_bps: 160_000,
     }
-}
-
-/// The window the test config produces, so the fixtures track the real
-/// sizing rather than a hard-coded constant.
-fn test_window() -> u64 {
-    window_bytes(test_buffer_config().bytes_for(160_000))
 }
 
 fn body() -> Vec<u8> {
@@ -88,7 +81,7 @@ async fn serve(body: Vec<u8>, first: usize, release: oneshot::Receiver<()>) -> S
     format!("http://{addr}/audio")
 }
 
-async fn open_stream(url: String, cancel: &CancellationToken) -> HttpSource {
+async fn open_stream(url: String, cancel: &CancellationToken) -> HttpStream {
     let file = RemoteFile {
         client: Client::new(),
         url,
@@ -97,7 +90,7 @@ async fn open_stream(url: String, cancel: &CancellationToken) -> HttpSource {
         bitrate_bps: 160_000,
     };
 
-    HttpSource::open(file, test_buffer_config(), cancel, 0)
+    HttpStream::open(file, test_buffer_config(), cancel, 0)
         .await
         .expect("stream should open")
 }
@@ -259,7 +252,7 @@ fn parse_range(request: &str) -> Option<(usize, usize)> {
 /// behaviour under test, not an implementation detail.
 #[tokio::test]
 async fn fetches_a_long_body_in_windows() {
-    let len = test_window() as usize * 2 + 1024;
+    let len = WINDOW_BYTES as usize * 2 + 1024;
     let expected: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
     let (url, requests) = serve_ranges(expected.clone()).await;
 
@@ -272,7 +265,7 @@ async fn fetches_a_long_body_in_windows() {
         bitrate_bps: 160_000,
     };
 
-    let mut stream = HttpSource::open(file, test_buffer_config(), &cancel, 0)
+    let mut stream = HttpStream::open(file, test_buffer_config(), &cancel, 0)
         .await
         .expect("stream should open");
 
@@ -295,7 +288,7 @@ async fn fetches_a_long_body_in_windows() {
 /// `Content-Length` — otherwise every long track would look 2 MiB long.
 #[tokio::test]
 async fn byte_len_reports_the_whole_file_not_the_window() {
-    let len = test_window() as usize + 4096;
+    let len = WINDOW_BYTES as usize + 4096;
     let (url, _) = serve_ranges(vec![0u8; len]).await;
 
     let cancel = CancellationToken::new();
@@ -308,7 +301,7 @@ async fn byte_len_reports_the_whole_file_not_the_window() {
         bitrate_bps: 160_000,
     };
 
-    let stream = HttpSource::open(file, test_buffer_config(), &cancel, 0)
+    let stream = HttpStream::open(file, test_buffer_config(), &cancel, 0)
         .await
         .expect("stream should open");
 
@@ -331,7 +324,7 @@ async fn short_partial_responses_do_not_end_the_file() {
             content_length: None,
             bitrate_bps: 160_000,
         };
-        let mut stream = HttpSource::open(file, test_buffer_config(), &cancel, 0)
+        let mut stream = HttpStream::open(file, test_buffer_config(), &cancel, 0)
             .await
             .unwrap();
         assert_eq!(
@@ -366,7 +359,7 @@ async fn http_total_overrides_metadata_for_all_windows() {
             content_length: Some(reported_size as u64),
             bitrate_bps: 160_000,
         };
-        let mut stream = HttpSource::open(file, test_buffer_config(), &cancel, 0)
+        let mut stream = HttpStream::open(file, test_buffer_config(), &cancel, 0)
             .await
             .unwrap();
         assert_eq!(stream.byte_len().await, Some(BODY_LEN as u64));
@@ -396,7 +389,7 @@ async fn rejected_range_before_known_end_is_an_error() {
         content_length: Some(BODY_LEN as u64 * 2),
         bitrate_bps: 160_000,
     };
-    let mut stream = HttpSource::open(file, test_buffer_config(), &cancel, 0)
+    let mut stream = HttpStream::open(file, test_buffer_config(), &cancel, 0)
         .await
         .unwrap();
     let mut actual = Vec::new();

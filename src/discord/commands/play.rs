@@ -6,18 +6,15 @@ use rand::seq::SliceRandom;
 use tracing::debug;
 use twilight_model::application::interaction::Interaction;
 
-use super::{Panel, PlayError, PlayReply};
+use super::{CommandError, NewPlayer, Reply, caller_channel};
 use crate::{
-    audio::source::StreamSource,
+    audio::source::TrackSource,
     discord::{
         state::State,
         text::{escape, format_duration, playlist_link},
     },
-    media::ytdlp::{PLAYLIST_LIMIT, validate_url},
-    voice::{
-        queue::{Playlist, QueueEntry},
-        session::QueueMode,
-    },
+    media::{PLAYLIST_LIMIT, validate_url},
+    voice::session::{Playlist, QueueEntry, QueueMode, SessionError},
 };
 
 pub(super) async fn play(
@@ -25,18 +22,12 @@ pub(super) async fn play(
     interaction: &Interaction,
     raw_url: &str,
     mode: QueueMode,
-) -> Result<PlayReply, PlayError> {
-    let guild_id = interaction.guild_id.ok_or(PlayError::NotInGuild)?;
-    let user_id = interaction.author_id().ok_or(PlayError::NotInGuild)?;
-
+) -> Result<Reply, CommandError> {
     // Reject the link before spawning anything.
     let url = validate_url(raw_url)?;
 
-    let channel_id = state
-        .cache
-        .voice_state(user_id, guild_id)
-        .map(|voice_state| voice_state.channel_id())
-        .ok_or(PlayError::NotInVoice)?;
+    let (guild_id, channel_id) = caller_channel(state, interaction)?;
+    let user_id = interaction.author_id().ok_or(CommandError::NotInGuild)?;
 
     let cancel = state.sessions.join(guild_id, channel_id).await?;
 
@@ -44,27 +35,27 @@ pub(super) async fn play(
     crate::discord::events::reconcile_voice(Arc::clone(state), guild_id);
     debug!(?mode, "loading track or playlist metadata");
     let started = Instant::now();
-    let mut listing = tokio::select! {
-        () = cancel.cancelled() => return Err(PlayError::Cancelled),
+    let mut import = tokio::select! {
+        () = cancel.cancelled() => return Err(SessionError::Ended.into()),
         result = state.importer.import(&url) => result?,
     };
     debug!(
-        tracks = listing.tracks.len(),
-        skipped = listing.skipped,
-        truncated = listing.truncated,
+        tracks = import.tracks.len(),
+        skipped = import.skipped,
+        truncated = import.truncated,
         elapsed_ms = started.elapsed().as_millis(),
         "media import completed"
     );
-    if listing.tracks.is_empty() {
-        return Ok(PlayReply::message(
+    if import.tracks.is_empty() {
+        return Ok(Reply::message(
             "That playlist contains no accessible tracks.",
         ));
     }
     // Imports are always shuffled.
-    listing.tracks.shuffle(&mut rand::rng());
-    let count = listing.tracks.len();
+    import.tracks.shuffle(&mut rand::rng());
+    let count = import.tracks.len();
     // One allocation for the whole import, shared by every track of it.
-    let playlist = listing
+    let playlist = import
         .playlist_name
         .take()
         .filter(|_| count > 1)
@@ -74,26 +65,24 @@ pub(super) async fn play(
                 url: url.clone(),
             })
         });
-    let title = listing.tracks[0]
+    let title = import.tracks[0]
         .metadata
         .title
         .clone()
         .unwrap_or_else(|| raw_url.to_owned());
-    let duration = listing.tracks[0].metadata.duration;
-    let tracks = listing
+    let duration = import.tracks[0].metadata.duration;
+    let tracks = import
         .tracks
         .into_iter()
         .map(|track| {
             // The source plays the audio; the queue entry is what gets shown.
-            let source = StreamSource::new(
+            let source = TrackSource::new(
                 track.target,
                 track.stream,
-                state.client.clone(),
-                state.resolver.clone(),
-                state.config.buffer,
+                Arc::clone(&state.audio),
+                guild_id,
                 cancel.clone(),
-            )
-            .in_guild(guild_id);
+            );
             let entry = QueueEntry {
                 metadata: track.metadata,
                 requester: user_id,
@@ -141,18 +130,18 @@ pub(super) async fn play(
         )
     };
     let mut notice = String::new();
-    if listing.skipped > 0 {
-        let _ = write!(notice, " Skipped {} unavailable entries.", listing.skipped);
+    if import.skipped > 0 {
+        let _ = write!(notice, " Skipped {} unavailable entries.", import.skipped);
     }
-    if listing.truncated {
+    if import.truncated {
         let _ = write!(
             notice,
             " Import limited to the first {PLAYLIST_LIMIT} playlist entries."
         );
     }
     message.push_str(&notice);
-    Ok(PlayReply {
+    Ok(Reply {
         message,
-        player: Some(Panel { cancel, notice }),
+        player: Some(NewPlayer { cancel, notice }),
     })
 }

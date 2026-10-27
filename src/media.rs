@@ -1,4 +1,4 @@
-//! Finding what to play: catalogs turn links into [`Track`]s, the resolver
+//! Finding what to play: the importer turns links into [`ImportedTrack`]s, the resolver
 //! turns a track into a [`StreamInfo`]. Nothing here touches audio bytes;
 //! that is [`crate::audio`]'s job.
 //!
@@ -6,19 +6,21 @@
 //! and Spotify both produce them; they know nothing about either source, or
 //! about the queue.
 
-pub mod catalog;
-pub mod error;
-pub mod matching;
+pub mod importer;
 pub mod search_cache;
 pub mod spotify;
 pub mod ytdlp;
 
 use std::time::{Duration, SystemTime};
 
-pub use error::MediaError;
-
 use reqwest::header::HeaderMap;
+use thiserror::Error;
 use url::Url;
+
+use self::{spotify::SpotifyError, ytdlp::YtDlpError};
+
+/// Limit imports so accidental channel/radio links cannot create an unbounded queue.
+pub const PLAYLIST_LIMIT: usize = 1000;
 
 /// A stream URL this close to expiring is treated as expired already, so it
 /// cannot run out while it is being fetched.
@@ -65,20 +67,22 @@ pub struct Metadata {
 
 /// One entry of an import.
 #[derive(Debug)]
-pub struct Track {
+pub struct ImportedTrack {
     /// How to find the audio, now or again later.
     pub target: Target,
     pub metadata: Metadata,
-    /// Ready to play, when the catalog got it for free while listing. Without
+    /// Ready to play, when the source got it for free while listing. Without
     /// one, or once it expires, the resolver looks the track up from `target`.
     pub stream: Option<StreamInfo>,
 }
 
 /// The result of importing a link: one track, or the entries of a playlist.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Import {
-    pub tracks: Vec<Track>,
+    pub tracks: Vec<ImportedTrack>,
+    /// Entries that were local files, podcasts, or otherwise unplayable.
     pub skipped: usize,
+    /// More tracks exist than were returned.
     pub truncated: bool,
     /// Set only when the link was a playlist, and it had a name.
     pub playlist_name: Option<String>,
@@ -117,3 +121,51 @@ impl SearchQuery {
         format!("{} {}", self.artist, self.title)
     }
 }
+
+/// Anything that can go wrong between a link and a playable stream URL.
+#[derive(Debug, Error)]
+pub enum MediaError {
+    #[error("`{0}` is not a valid HTTP(S) link")]
+    UnsupportedUrl(String),
+
+    #[error("Spotify: {0}")]
+    Spotify(#[from] SpotifyError),
+
+    #[error(transparent)]
+    YtDlp(#[from] YtDlpError),
+
+    #[error("no search result matched `{0}`")]
+    NoMatch(String),
+}
+
+impl MediaError {
+    /// Whether yt-dlp itself is unusable, so retrying with another input would
+    /// only fail the same way.
+    pub fn is_fatal(&self) -> bool {
+        match self {
+            Self::YtDlp(error) => error.is_fatal(),
+            _ => false,
+        }
+    }
+}
+
+pub fn http_url(raw: &str) -> Option<Url> {
+    let url = Url::parse(raw.trim()).ok()?;
+
+    let scheme_ok = matches!(url.scheme(), "http" | "https");
+    (scheme_ok && url.host_str().is_some()).then_some(url)
+}
+
+pub fn validate_url(raw: &str) -> Result<Url, MediaError> {
+    http_url(raw).ok_or_else(|| MediaError::UnsupportedUrl(raw.to_owned()))
+}
+
+/// A playlist's name as shown to users: trimmed, bounded, and `None` when blank.
+pub fn playlist_name(raw: &str) -> Option<String> {
+    let name = raw.trim();
+    (!name.is_empty()).then(|| name.chars().take(100).collect())
+}
+
+#[cfg(test)]
+#[path = "../tests/media/url.rs"]
+mod tests;
