@@ -1,5 +1,3 @@
-//! Playlist, album and track lookups, in Spotify's own terms.
-
 use std::time::Duration;
 
 use serde_json::Value;
@@ -12,7 +10,7 @@ use crate::{
     media::{Import, ImportedTrack, PLAYLIST_LIMIT},
 };
 
-/// Max API cap
+// Max page size allowed by the Spotify API.
 const PAGE_SIZE: usize = 50;
 
 const IMPORT_TIMEOUT: Duration = Duration::from_secs(120);

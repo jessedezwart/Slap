@@ -7,15 +7,13 @@ use serde_json::Value;
 
 use crate::media::{ImportedTrack, Metadata, SearchQuery, Target, http_url};
 
-/// The playlist's own name, from a playlist object.
 pub fn playlist_name(body: &Value) -> Option<String> {
     body.get("name")
         .and_then(Value::as_str)
         .and_then(crate::media::playlist_name)
 }
 
-/// A playlist entry as a track to search for, or `None` when it is a local
-/// file, a podcast episode or otherwise unplayable.
+/// Parse a Spotify playlist entry (a track) into an [`ImportedTrack`]
 pub fn entry(entry: &Value) -> Option<ImportedTrack> {
     let item = entry.get("item").or_else(|| entry.get("track"))?;
     if entry.get("is_local").and_then(Value::as_bool) == Some(true) {
@@ -24,8 +22,7 @@ pub fn entry(entry: &Value) -> Option<ImportedTrack> {
     track(item)
 }
 
-/// A track from an album's track list, which leaves out the album, so its
-/// cover comes from `album`.
+/// Parse a Spotify album track into an [`ImportedTrack`], adding the album's thumbnail.
 pub fn album_track(item: &Value, album: &Value) -> Option<ImportedTrack> {
     let mut parsed = track(item)?;
     parsed.metadata.thumbnail = album
@@ -35,8 +32,7 @@ pub fn album_track(item: &Value, album: &Value) -> Option<ImportedTrack> {
     Some(parsed)
 }
 
-/// A track object as a track to search for, or `None` when it is a local
-/// file, a podcast episode or otherwise unplayable.
+/// Parse a Spotify track into an [`ImportedTrack`].
 pub fn track(track: &Value) -> Option<ImportedTrack> {
     if track.get("is_local").and_then(Value::as_bool) == Some(true)
         || track.get("type").and_then(Value::as_str) != Some("track")

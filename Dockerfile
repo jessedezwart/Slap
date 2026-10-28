@@ -5,22 +5,37 @@ ARG YTDLP_VERSION=2026.08.19
 ARG BGUTIL_VERSION=2.0.0
 ARG DENO_VERSION=2.9.7
 ARG RUST_VERSION=1
+ARG CARGO_CHEF_VERSION=0.1.71
 
 FROM denoland/deno:bin-${DENO_VERSION} AS deno
 
-FROM rust:${RUST_VERSION}-bookworm AS build
+FROM rust:${RUST_VERSION}-bookworm AS chef
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends cmake \
  && rm -rf /var/lib/apt/lists/*
 
+ARG CARGO_CHEF_VERSION
+RUN cargo install cargo-chef --locked --version ${CARGO_CHEF_VERSION}
+
 WORKDIR /src
+
+FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+RUN cargo chef prepare --recipe-path recipe.json
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
-    cargo build --release --locked \
+FROM chef AS build
+
+# Dependencies get their own layer, keyed on the recipe (manifest + lockfile),
+# so the registry cache reuses it when only Slap's own source changes.
+# No cache mounts here: their contents never reach the exported layer cache.
+COPY --from=planner /src/recipe.json recipe.json
+RUN cargo chef cook --release --locked --recipe-path recipe.json
+
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo build --release --locked \
  && cp target/release/slap /usr/local/bin/slap
 
 ARG YTDLP_VERSION

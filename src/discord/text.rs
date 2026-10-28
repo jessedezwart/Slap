@@ -21,9 +21,7 @@ pub(super) fn escape(text: &str) -> String {
     escaped
 }
 
-/// Keep `text` on one line inside a code block, at most `max_chars` long
-/// when given. Markdown does not render there, so only a newline or a
-/// backtick could break out of it.
+/// Keep `text` on one line inside a code block, at most `max_chars` long when given.
 pub(super) fn code_line(text: &str, max_chars: Option<usize>) -> String {
     text.chars()
         .take(max_chars.unwrap_or(usize::MAX))

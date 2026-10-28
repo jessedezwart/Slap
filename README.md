@@ -46,10 +46,17 @@ Spotify is supported when the Spotify API credentials are set. The name and arti
 
 ### Docker (recommended)
 
-Set the token in .env and optionally secrets and run:
+Copy the `compose.yaml` file. This uses `ghcr.io/jessedezwart/slap`.
 
 ```sh
 docker compose up
+```
+
+To build from source instead:
+
+```sh
+git clone https://github.com/jessedezwart/Slap
+docker compose -f compose.yaml -f compose.dev.yaml up --build
 ```
 
 ### Prebuilt binaries

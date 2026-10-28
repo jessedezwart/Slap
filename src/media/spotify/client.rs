@@ -1,6 +1,4 @@
-//! Spotify client. Handles authorization and API requests.
-//!
-//! If no refresh token is provided, client credentials are used. This limits search results for playlists to the first 100 tracks.
+//! Spotify client.
 
 use std::time::{Duration, Instant};
 

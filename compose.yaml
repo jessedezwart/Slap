@@ -1,7 +1,7 @@
 services:
   bot:
-    build: .
-    image: slap
+    # Published image. To build from source, add compose.dev.yaml (see README).
+    image: ghcr.io/jessedezwart/slap:latest
     restart: unless-stopped
     init: true
     env_file:
