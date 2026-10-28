@@ -1,0 +1,154 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Never let two pushes race to create releases.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: tag
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version-build.$GITHUB_RUN_NUMBER.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: slap-windows-x86_64.exe
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset: slap-linux-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: slap-macos-aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+
+      # Windows links the static CRT via .cargo/config.toml.
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Collect binary
+        shell: bash
+        run: |
+          mkdir dist
+          ext=""
+          [ "$RUNNER_OS" = Windows ] && ext=".exe"
+          cp "target/${{ matrix.target }}/release/slap$ext" "dist/${{ matrix.asset }}"
+
+      - name: Fetch installer bundle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Bundled tools stay in step with the Docker image.
+          function Arg($name) {
+            (Select-String -Path Dockerfile -Pattern "^ARG $name=(.+)$").Matches[0].Groups[1].Value
+          }
+          $ytdlp = Arg YTDLP_VERSION
+          $bgutil = Arg BGUTIL_VERSION
+          $deno = Arg DENO_VERSION
+
+          New-Item -ItemType Directory bundle | Out-Null
+          Invoke-WebRequest "https://github.com/yt-dlp/yt-dlp/releases/download/$ytdlp/yt-dlp.exe" -OutFile bundle\yt-dlp.exe
+
+          # The rest is only used by the full installer.
+          Invoke-WebRequest "https://github.com/denoland/deno/releases/download/v$deno/deno-x86_64-pc-windows-msvc.zip" -OutFile deno.zip
+          Expand-Archive deno.zip -DestinationPath bundle
+          Invoke-WebRequest "https://github.com/Brainicism/bgutil-ytdlp-pot-provider/releases/download/$bgutil/bgutil-ytdlp-pot-provider.zip" -OutFile bundle\bgutil-ytdlp-pot-provider.zip
+
+          # Only the server source; the installer fetches its npm dependencies.
+          git clone --depth 1 --branch $bgutil https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git bgutil
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item -Recurse bgutil\server bundle\bgutil-server
+
+      - name: Build installers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+
+          $common = @(
+            "/DAppVersion=${{ needs.version.outputs.tag }}",
+            "/DNumericVersion=${{ needs.version.outputs.version }}",
+            "/DBinDir=$PWD\dist",
+            "/DBundleDir=$PWD\bundle",
+            "/DRepoDir=$PWD",
+            "/O$PWD\dist"
+          )
+          & $iscc @common "/Fslap-windows-x86_64-setup" installer\slap.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $iscc @common /DFull "/Fslap-windows-x86_64-setup-full" installer\slap.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat > notes.md <<'EOF'
+          ### Running
+
+          - **Windows:** run `slap-windows-x86_64-setup.exe`. It bundles yt-dlp and can start Slap when you sign in. `slap-windows-x86_64-setup-full.exe` also bundles Deno and the bgutil PO token provider, so YouTube keeps serving audio without extra setup. Or use the portable `slap-windows-x86_64.exe`.
+          - **Linux / macOS:** `chmod +x` the binary. On macOS, also run `xattr -d com.apple.quarantine slap-macos-aarch64`.
+
+          The portable binaries need [yt-dlp](https://github.com/yt-dlp/yt-dlp) on `PATH` and a `.env` in the working directory (see `.env.example`). Deno and the bgutil PO token plugin are optional.
+          EOF
+          gh release create "$TAG" slap-* SHA256SUMS \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --notes-file notes.md \
+            --generate-notes \
+            --latest

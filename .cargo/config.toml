@@ -1,0 +1,8 @@
+# Static MSVC runtime, so slap.exe runs without the VC++ redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[env]
+# libopus_sys builds Opus with CMake, which defaults to the DLL runtime and
+# then fails to link against the static one.
+CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc = { value = ".cargo/msvc-static-runtime.cmake", relative = true }
