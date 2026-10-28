@@ -12,8 +12,8 @@ Highly performant Discord music bot that plays music **without transcode** using
 | --- | --- |
 | [twilight](https://github.com/twilight-rs/twilight) | Discord gateway, REST and slash commands. |
 | [songbird](https://github.com/serenity-rs/songbird) | Songbird provides a complete music playback solution, only the driver and gateway parts are used. |
-| [symphonia](https://github.com/pdeljanov/Symphonia) | MKV/WebM and Ogg demuxing, so Opus packets go to Discord without being decoded. |
 | [yt-dlp](https://github.com/yt-dlp/yt-dlp) (external process) | Resolve media URLs. |
+| [tokio](https://github.com/tokio-rs/tokio) | Async runtime for IO, tasks and process management. |
 
 ### Why not use Songbird's built-in YouTube source?
 
@@ -120,7 +120,7 @@ Configure `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` in `.env`, then restar
 
 #### Get the bot token
 
-1. Go to [Discord Developer Portal]<https://discord.com/developers/home>
+1. Go to [Discord Developer Portal](https://discord.com/developers/home>)
 2. Create an application
 3. Go to **Overview** > **Bot**
 4. Get the token (might need to click **Reset Token**)
@@ -136,8 +136,8 @@ Replace the Client ID in this url with the application's client ID (can be found
 The permissions as set above resolve to:
 
 - connect, for joining voice channel.
-- speak, needed for playing the voice
-- view channel
-- send messages, 
+- speak, for playing the audio.
+- view channel, for seeing what voice channel a user is in.
+- send messages, for showing the player.
 
 The invite also includes the `applications.commands` scope for slash commands.
