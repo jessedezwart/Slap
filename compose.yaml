@@ -10,9 +10,9 @@ services:
     stop_grace_period: 10s
     volumes:
       - cache:/app/data
-      # Optional YouTube cookies; see README. Writable because yt-dlp saves
-      # its cookie jar back.
-      - secrets:/app/secrets
+      # Optional YouTube cookies; see README. The bot runs as the owner of
+      # this dir, so yt-dlp can save its cookie jar back.
+      - ./secrets:/app/secrets
     configs:
       - source: ytdlp
         target: /etc/yt-dlp.conf
@@ -34,4 +34,3 @@ configs:
 
 volumes:
   cache:
-  secrets:

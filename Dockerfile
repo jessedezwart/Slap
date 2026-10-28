@@ -69,13 +69,14 @@ COPY --from=build /etc/yt-dlp/plugins /etc/yt-dlp/plugins
 # yt-dlp needs a JS runtime to solve YouTube's player challenges.
 COPY --from=deno /deno /usr/local/bin/deno
 COPY --from=build /usr/local/bin/slap /usr/local/bin/slap
+COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint
 
 RUN install -d -o bot -g bot /app/data /app/secrets
 ENV CACHE_PATH=/app/data/cache.redb
 
-USER bot
+# No USER: the entrypoint drops from root to the owner of secrets/ (or bot).
 WORKDIR /app
 
 STOPSIGNAL SIGINT
 
-ENTRYPOINT ["/usr/local/bin/slap"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint", "/usr/local/bin/slap"]
