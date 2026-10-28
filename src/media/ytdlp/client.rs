@@ -3,6 +3,7 @@
 use std::process::Stdio;
 
 use tokio::{process::Command, time};
+use tracing::warn;
 use url::Url;
 
 use super::{YtDlpError, parse};
@@ -101,13 +102,13 @@ impl YtDlpClient {
             })?;
 
         if !output.status.success() {
-            return Err(YtDlpError::Failed {
-                code: output
-                    .status
-                    .code()
-                    .map_or_else(|| "signal".to_owned(), |c| c.to_string()),
-                stderr: last_error_line(&output.stderr),
-            });
+            let code = output
+                .status
+                .code()
+                .map_or_else(|| "signal".to_owned(), |c| c.to_string());
+            let stderr = last_error_line(&output.stderr);
+            warn!(%code, %stderr, input, "yt-dlp failed");
+            return Err(YtDlpError::Failed);
         }
 
         Ok(output.stdout)

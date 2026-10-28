@@ -22,10 +22,11 @@ pub enum YtDlpError {
     #[error("yt-dlp did not answer within {0:?}. Try again.")]
     Timeout(Duration),
 
-    #[error("yt-dlp failed ({code}): {stderr}")]
-    Failed { code: String, stderr: String },
+    /// The details are logged where it happens; users only need to know it failed.
+    #[error("Something went wrong getting the media. Try again later.")]
+    Failed,
 
-    #[error("yt-dlp returned no metadata")]
+    #[error("Something went wrong getting the media. Try again later.")]
     NoMetadata,
 
     #[error("could not parse yt-dlp output: {0}")]
@@ -34,7 +35,7 @@ pub enum YtDlpError {
     #[error("That video has no Opus audio track, so I cannot stream it.")]
     NoOpusFormat,
 
-    #[error("yt-dlp did not return a media URL")]
+    #[error("Something went wrong getting the media. Try again later.")]
     NoMediaUrl,
 }
 
