@@ -68,7 +68,7 @@ impl PlayerTask {
             Stop::Gone => {
                 self.state
                     .sessions
-                    .release_player(self.guild_id, self.message_id)
+                    .release_player_component(self.guild_id, self.message_id)
                     .await;
             }
         }

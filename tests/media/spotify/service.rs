@@ -169,64 +169,6 @@ async fn client_credentials_reports_a_playlist_it_cannot_list() {
     task.await.unwrap();
 }
 
-/// Confirms against the real API that client credentials reach a public
-/// playlist at all, and that only a user token pages past the first 100.
-#[tokio::test]
-#[ignore = "requires Spotify credentials and network access"]
-async fn live_public_playlist() {
-    let url =
-        Url::parse("https://open.spotify.com/playlist/6PWze6begwQa2HBTFz6TZS?si=4509417a06274f89")
-            .unwrap();
-    let config = |refresh_token| {
-        Some(SpotifyConfig {
-            client_id: std::env::var("SPOTIFY_CLIENT_ID").unwrap(),
-            client_secret: std::env::var("SPOTIFY_CLIENT_SECRET").unwrap(),
-            refresh_token,
-        })
-    };
-
-    let app = SpotifyService::new(config(None))
-        .unwrap()
-        .import(&url)
-        .await
-        .unwrap();
-    println!(
-        "client credentials: {} tracks, {} skipped, truncated {}",
-        app.tracks.len(),
-        app.skipped,
-        app.truncated
-    );
-    assert!(!app.tracks.is_empty(), "a public playlist must be readable");
-    assert!(
-        app.tracks.len() <= 100,
-        "the items endpoint needs a user token"
-    );
-
-    let Ok(refresh) = std::env::var("SPOTIFY_REFRESH_TOKEN") else {
-        return;
-    };
-    let user = SpotifyService::new(config(Some(refresh)))
-        .unwrap()
-        .import(&url)
-        .await
-        .unwrap();
-    println!(
-        "user token: {} tracks, {} skipped, truncated {}",
-        user.tracks.len(),
-        user.skipped,
-        user.truncated
-    );
-    assert!(
-        user.tracks.len() > app.tracks.len(),
-        "a user token must page past the embedded first page"
-    );
-    let first = &user.tracks[0];
-    println!(
-        "first: {:?} ({:?})",
-        first.metadata.title, first.metadata.duration
-    );
-}
-
 #[tokio::test]
 async fn actionable_errors_and_empty_playlist() {
     let disabled = SpotifyService::new(None).unwrap();

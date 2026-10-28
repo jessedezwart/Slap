@@ -22,7 +22,7 @@ async fn insert(
         channel_id: channel,
         cancel: cancel.clone(),
         redraw: Arc::new(Notify::new()),
-        player_message: message,
+        player_component_id: message,
     });
     cancel
 }
@@ -111,7 +111,7 @@ async fn controls_from_an_ended_session_cannot_stop_its_replacement() {
     assert!(manager.now_playing(guild, 0, &cancel).await.is_none());
     assert!(
         manager
-            .claim_player(guild, &cancel, Id::new(300))
+            .claim_player_component(guild, &cancel, Id::new(300))
             .await
             .is_none()
     );
@@ -131,32 +131,32 @@ async fn each_session_has_one_player() {
 
     assert!(
         manager
-            .claim_player(guild, &cancel, Id::new(100))
+            .claim_player_component(guild, &cancel, Id::new(100))
             .await
             .is_some()
     );
     assert!(
         manager
-            .claim_player(guild, &cancel, Id::new(200))
+            .claim_player_component(guild, &cancel, Id::new(200))
             .await
             .is_none(),
         "one player per session"
     );
 
     // Cleanup by another message must not release the current player.
-    manager.release_player(guild, Id::new(200)).await;
+    manager.release_player_component(guild, Id::new(200)).await;
     assert!(
         manager
-            .claim_player(guild, &cancel, Id::new(300))
+            .claim_player_component(guild, &cancel, Id::new(300))
             .await
             .is_none()
     );
 
     // Once the player is gone, a fresh /play response takes over.
-    manager.release_player(guild, Id::new(100)).await;
+    manager.release_player_component(guild, Id::new(100)).await;
     assert!(
         manager
-            .claim_player(guild, &cancel, Id::new(300))
+            .claim_player_component(guild, &cancel, Id::new(300))
             .await
             .is_some()
     );

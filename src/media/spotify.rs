@@ -1,9 +1,3 @@
-//! Spotify: a small Web API client that reads playlists, albums and tracks into
-//! [`crate::media`] tracks.
-//!
-//! Spotify only describes tracks; it has no audio. The resolver searches for
-//! something playable once the queue reaches a track.
-
 pub mod client;
 mod parse;
 pub mod service;
@@ -90,7 +84,6 @@ pub fn is_spotify_url(url: &Url) -> bool {
     )
 }
 
-/// What a share link points at.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Link<'a> {
     Playlist(&'a str),

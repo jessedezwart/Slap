@@ -1,13 +1,9 @@
-//! Remembers which upload a search resolved to, keyed by the
-//! [`crate::media::SearchQuery::key`] it was searched for.
-//! Disk-persistent
-
+//! Disk persistent cache for resolved searches
 use std::{path::Path, sync::Arc};
 
 use redb::{Database, ReadableDatabase, TableDefinition};
 use tracing::{debug, info, warn};
 
-/// Search key → URL of the upload it resolved to.
 const SEARCH_RESULTS: TableDefinition<&str, &str> = TableDefinition::new("search_results");
 
 pub struct SearchCache {

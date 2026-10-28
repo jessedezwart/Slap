@@ -1,13 +1,3 @@
-//! yt-dlp: a client that runs the program, a parser for the JSON it prints,
-//! and the two roles built on top: importing links, and a resolver
-//! that turns tracks into audio. Everything it hands out is a
-//! [`crate::media`] type.
-//!
-//! yt-dlp is only ever used to *resolve* a video into a direct media URL plus
-//! the headers needed to fetch it; the bytes themselves are pulled by
-//! [`crate::audio`]. The process is spawned as argv — there is no shell
-//! anywhere in this path.
-
 mod client;
 mod parse;
 mod resolver;

@@ -75,7 +75,7 @@ pub async fn start(
 ) {
     let Some(session) = state
         .sessions
-        .claim_player(guild_id, cancel, message.id)
+        .claim_player_component(guild_id, cancel, message.id)
         .await
     else {
         // A stop can race with Discord returning the initial /play reply.

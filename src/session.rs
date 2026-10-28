@@ -1,13 +1,4 @@
-//! Per-guild voice sessions and their teardown.
-//!
-//! Each guild gets one [`CancellationToken`]. Every yt-dlp invocation, every
-//! HTTP fetch task and every buffer below it holds a child of that token, so
-//! tearing a guild down is a single `cancel()` rather than a walk over
-//! per-track state.
-//!
-//! The token doubles as the session's identity: it is cancelled exactly when
-//! the session leaves the map, so a caller holding one can tell whether the
-//! session it started with is still the current one.
+//! Per-guild voice sessions.
 
 mod events;
 
@@ -33,28 +24,24 @@ use url::Url;
 use self::events::{DisconnectHandler, TrackEventHandler};
 use crate::media::Metadata;
 
-/// How far into a track the next one starts loading, matching the lead
-/// songbird's own `enqueue` would have picked.
-const PRELOAD_LEAD: Duration = Duration::from_secs(5);
+/// How far into a track the next one starts loading. Due to PO token generation, ytdlp might take a while.
+const PRELOAD_LEAD: Duration = Duration::from_secs(10);
 
-/// A track in a guild's queue. Stored as songbird track data, so every
-/// `TrackHandle::data::<QueueEntry>()` reads it back.
+/// A track
 #[derive(Debug)]
 pub struct QueueEntry {
     pub metadata: Metadata,
-    /// The import this track came from
     pub origin: Arc<Origin>,
 }
 
 /// Details about the track import request
 #[derive(Debug)]
 pub struct Origin {
-    /// Who queued the track; shown on the player.
     pub requester: Id<UserMarker>,
-    /// The requester's name as it was when they queued the track.
     pub requester_name: String,
     pub url: Url,
     pub playlist_name: Option<String>,
+    /// Entries skipped for a request
     pub skipped: usize,
     /// More entries existed than were imported.
     pub truncated: bool,
@@ -67,7 +54,7 @@ pub struct GuildSession {
     /// Wakes the player task to redraw.
     pub redraw: Arc<Notify>,
     /// The message showing this session's player, once one has claimed it.
-    pub player_message: Option<Id<MessageMarker>>,
+    pub player_component_id: Option<Id<MessageMarker>>,
 }
 
 /// User facing messages
@@ -94,8 +81,9 @@ pub enum SessionError {
     Ended,
 }
 
-/// A guild's session behind the lock that orders its joins, enqueues,
-/// controls and teardown: holding the guard is holding the session.
+/// Optional since session might not exist when torn down.
+/// Is a mutex to prevent raceconditions (e.g. /play and a /disconnect will trigger after each other)
+/// Is arc since getting just the mutex will hold a DashMaps "shard". A shard can hold multiple guilds.
 type Slot = Arc<Mutex<Option<GuildSession>>>;
 
 pub struct SessionManager {
@@ -122,39 +110,47 @@ impl SessionManager {
             .ok_or(SessionError::NotConnected)
     }
 
-    /// Join `channel_id`, reusing the existing connection when it is already
-    /// the right one.
-    ///
-    /// Returns the guild's cancellation token, which callers hand to every
-    /// task they spawn for this guild.
+    /// Join `channel_id`, reusing the existing connection when it is already the right one.
+    /// Returns the guild's cancellation token, which callers hand to every task they spawn for this guild.
     pub async fn join(
         self: &Arc<Self>,
         guild_id: Id<GuildMarker>,
         channel_id: Id<ChannelMarker>,
     ) -> Result<CancellationToken, SessionError> {
         let mut session = self.lock(guild_id).await;
-        // Reject requests from another channel; recover stale sessions in place.
+        // Does session already exist?
         if let Some(current) = session.as_ref() {
+            // Ran from a different channel?
             if current.channel_id != channel_id {
                 return Err(SessionError::WrongChannel);
             }
+            // Already in a channel, return the existing session token
             if !current.cancel.is_cancelled() && self.songbird.get(guild_id).is_some() {
                 return Ok(current.cancel.clone());
             }
         }
 
+        // Create a fresh session by tearing down any potential leftovers
         self.teardown_locked(guild_id, &mut session, "reconnecting")
             .await;
 
+        // Create session token
         let cancel = CancellationToken::new();
+        // Create notification for a render of the player component
         let redraw = Arc::new(Notify::new());
-        let call = self.songbird.get_or_insert(guild_id);
 
+        // Create the call
+        let call = self.songbird.get_or_insert(guild_id);
+        // Modify the call
         {
+            // Get the lock, call is shadowed to prevent unintentional edits
             let mut call = call.lock().await;
 
+            // Set to deafen for privacy and bitrate
             call.deafen(true).await?;
+            // Events are set explicitly
             call.remove_all_global_events();
+            // Handle disconnect
             call.add_global_event(
                 CoreEvent::DriverDisconnect.into(),
                 DisconnectHandler {
@@ -163,6 +159,7 @@ impl SessionManager {
                     cancel: cancel.clone(),
                 },
             );
+            // Handle track events
             for event in [
                 TrackEvent::Play,
                 TrackEvent::Pause,
@@ -178,13 +175,14 @@ impl SessionManager {
                     },
                 );
             }
+            // Lock goes out of scope and is dropped
         }
 
         *session = Some(GuildSession {
             channel_id,
             cancel: cancel.clone(),
             redraw,
-            player_message: None,
+            player_component_id: None,
         });
 
         if let Err(error) = self.songbird.join(guild_id, channel_id).await {
@@ -198,7 +196,6 @@ impl SessionManager {
         Ok(cancel)
     }
 
-    /// Add a complete import atomically, rejecting work cancelled by stop/leave.
     pub async fn enqueue(
         &self,
         guild_id: Id<GuildMarker>,
@@ -206,16 +203,21 @@ impl SessionManager {
         tracks: Vec<(Input, QueueEntry)>,
         mode: QueueMode,
     ) -> Result<(), SessionError> {
+        // Get session and call locks
         let session = self.lock(guild_id).await;
-        let session = current(&session, cancel).ok_or(SessionError::Ended)?;
+        let session = still_current(&session, cancel).ok_or(SessionError::Ended)?;
         let call = self.call(guild_id)?;
         let mut call = call.lock().await;
+        
+        // Remove existing queue in case of replace
         if mode == QueueMode::Replace {
-            // Stops the current track and drops the rest, freeing their buffers.
             call.queue().stop();
         }
+
+        // Queue the tracks
         let count = tracks.len();
         let was_playing = !call.queue().is_empty();
+
         for (input, entry) in tracks {
             let preload = entry
                 .metadata
@@ -227,25 +229,22 @@ impl SessionManager {
         if mode == QueueMode::Next && was_playing {
             call.queue().modify_queue(|queue| play_next(queue, count));
         }
-        // Wake the player for a change songbird has no event for, like the
-        // queue growing.
+        
+        // Trigger player component redraw
         session.redraw.notify_one();
         Ok(())
     }
 
-    /// Voice controls share the lifecycle lock with joins, enqueues and teardown.
-    ///
-    /// `player_message` is the player the control was pressed on; a control
-    /// from a player that is no longer current is refused.
+    /// Handles interactions
     pub async fn control(
         &self,
         guild_id: Id<GuildMarker>,
         channel_id: Id<ChannelMarker>,
-        player_message: Id<MessageMarker>,
+        player_component: Id<MessageMarker>,
         control: Control,
     ) -> Result<(), SessionError> {
         let mut session = self.lock(guild_id).await;
-        check_player(&session, channel_id, player_message)?;
+        check_player(&session, channel_id, player_component)?;
         let apply: fn(&TrackQueue) -> _ = match control {
             Control::Stop => {
                 self.teardown_locked(guild_id, &mut session, "stop command")
@@ -263,14 +262,11 @@ impl SessionManager {
             return Err(SessionError::EmptyQueue);
         }
         apply(queue).map_err(|_| SessionError::TrackFinished)?;
-        // No player notify: songbird's own track events report the change.
         debug!(%guild_id, %channel_id, ?control, remaining = queue.len(), "playback control applied");
         Ok(())
     }
 
-    /// The playing track, then up to `len` upcoming ones, of the session
-    /// `cancel` belongs to; all locks are released before querying the
-    /// driver or making a Discord request.
+    /// The playing track
     pub async fn now_playing(
         &self,
         guild_id: Id<GuildMarker>,
@@ -278,41 +274,39 @@ impl SessionManager {
         cancel: &CancellationToken,
     ) -> Option<QueueHead> {
         let session = self.lock(guild_id).await;
-        current(&session, cancel)?;
+        still_current(&session, cancel)?;
         let call = self.songbird.get(guild_id)?;
         let call = call.lock().await;
         Some(head_of(&call, len))
     }
 
-    /// Make `message_id` the player of the session `cancel` belongs to,
-    /// unless that session already has one.
-    pub async fn claim_player(
+    /// Link player component to session
+    pub async fn claim_player_component(
         &self,
         guild_id: Id<GuildMarker>,
         cancel: &CancellationToken,
-        message_id: Id<MessageMarker>,
+        player_component_id: Id<MessageMarker>,
     ) -> Option<GuildSession> {
         let mut session = self.lock(guild_id).await;
         let session = session
             .as_mut()
-            .filter(|session| !cancel.is_cancelled() && session.player_message.is_none())?;
-        session.player_message = Some(message_id);
+            .filter(|session| !cancel.is_cancelled() && session.player_component_id.is_none())?;
+        session.player_component_id = Some(player_component_id);
         Some(session.clone())
     }
 
-    /// Let a later /play claim the player, unless another message has
-    /// taken it over since.
-    pub async fn release_player(&self, guild_id: Id<GuildMarker>, message_id: Id<MessageMarker>) {
+    pub async fn release_player_component(&self, guild_id: Id<GuildMarker>, message_id: Id<MessageMarker>) {
         let mut session = self.lock(guild_id).await;
         if let Some(session) = session
             .as_mut()
-            .filter(|session| session.player_message == Some(message_id))
+            .filter(|session| session.player_component_id == Some(message_id))
         {
-            session.player_message = None;
+            session.player_component_id = None;
         }
     }
 
-    /// Evaluate against current state after acquiring the lifecycle lock.
+    /// Evaluates a condition, if passes: teardown
+    /// This is done in a function so a lock can be acquired first to prevent race conditions.
     pub async fn teardown_if(
         &self,
         guild_id: Id<GuildMarker>,
@@ -325,10 +319,6 @@ impl SessionManager {
         }
     }
 
-    /// Drop everything belonging to `guild_id`.
-    ///
-    /// Idempotent: the session is removed from the map first, so the
-    /// disconnect our own `leave` provokes does not recurse.
     pub async fn teardown(&self, guild_id: Id<GuildMarker>, reason: &str) {
         let mut session = self.lock(guild_id).await;
         self.teardown_locked(guild_id, &mut session, reason).await;
@@ -340,12 +330,11 @@ impl SessionManager {
         session: &mut Option<GuildSession>,
         reason: &str,
     ) {
+        // Remove the session from the slot to prevent retriggering teardowns after events.
         let Some(session) = session.take() else {
             return;
         };
 
-        // One cancel aborts every fetch task, closes every connection and frees
-        // every buffer for this guild.
         session.cancel.cancel();
 
         if let Some(call) = self.songbird.get(guild_id) {
@@ -362,37 +351,32 @@ impl SessionManager {
         debug!(%guild_id, reason, "tore down voice pipeline");
     }
 
-    /// Cheap pre-check: `false` only for a guild that never had a session.
-    pub fn may_have_session(&self, guild_id: Id<GuildMarker>) -> bool {
+    pub fn is_known_guild(&self, guild_id: Id<GuildMarker>) -> bool {
         self.guilds.contains_key(&guild_id)
     }
 
-    /// Every guild that has had a session.
     pub fn known_guilds(&self) -> Vec<Id<GuildMarker>> {
         self.guilds.iter().map(|entry| *entry.key()).collect()
     }
 }
 
-/// The session `cancel` belongs to, while it is still the current one.
-fn current<'a>(
+/// Returns the session if it matches the cancellation token (so whether it's still current)
+fn still_current<'a>(
     session: &'a Option<GuildSession>,
     cancel: &CancellationToken,
 ) -> Option<&'a GuildSession> {
     session.as_ref().filter(|_| !cancel.is_cancelled())
 }
 
-/// Refuse a caller whose player has ended or who is in another channel.
-/// Call with the lifecycle lock held, so the answer holds for the action.
+/// Check whether the player component is on the current session and linked to the current channel.
 fn check_player(
     session: &Option<GuildSession>,
     channel_id: Id<ChannelMarker>,
-    player_message: Id<MessageMarker>,
+    player_component: Id<MessageMarker>,
 ) -> Result<(), SessionError> {
-    // An old player must never control a replacement session, even after
-    // a reconnect to the same channel.
     let session = session
         .as_ref()
-        .filter(|session| session.player_message == Some(player_message))
+        .filter(|session| session.player_component_id == Some(player_component))
         .ok_or(SessionError::Ended)?;
     if session.channel_id != channel_id {
         return Err(SessionError::WrongChannel);
@@ -402,7 +386,6 @@ fn check_player(
 
 fn head_of(call: &Call, len: usize) -> QueueHead {
     call.queue().modify_queue(|queue| QueueHead {
-        // Clone only the listed tracks, regardless of playlist size.
         tracks: queue
             .iter()
             .take(1 + len)
@@ -412,7 +395,6 @@ fn head_of(call: &Call, len: usize) -> QueueHead {
     })
 }
 
-/// Where a fresh import lands relative to what is already queued.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum QueueMode {
     /// Append after everything already queued.
@@ -424,7 +406,6 @@ pub enum QueueMode {
     Replace,
 }
 
-/// A playback control from the player.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Control {
     Pause,
@@ -434,7 +415,6 @@ pub enum Control {
     Stop,
 }
 
-/// The front of the queue, from [`SessionManager::now_playing`].
 pub struct QueueHead {
     /// The playing track first, then the requested upcoming ones.
     pub tracks: Vec<TrackHandle>,

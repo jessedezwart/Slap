@@ -93,7 +93,7 @@ fn handle_event(state: &Arc<State>, event: Event) {
 /// Recheck the cache under the session lock, so queued gateway work cannot
 /// disconnect a replacement session or race a join still in progress.
 pub fn reconcile_voice(state: Arc<State>, guild_id: Id<GuildMarker>) {
-    if !state.sessions.may_have_session(guild_id) {
+    if !state.sessions.is_known_guild(guild_id) {
         return;
     }
     tokio::spawn(async move {

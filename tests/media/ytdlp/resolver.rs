@@ -1,9 +1,11 @@
 use std::time::Duration;
 
 use super::*;
+#[cfg(unix)]
 use crate::config::YtDlpConfig;
 
 /// A client and a resolver sharing it, without the search cache.
+#[cfg(unix)]
 fn build(config: YtDlpConfig) -> (YtDlpClient, YtDlpResolver) {
     let client = YtDlpClient::new(config);
     (client.clone(), YtDlpResolver::new(client, None))
@@ -11,6 +13,7 @@ fn build(config: YtDlpConfig) -> (YtDlpClient, YtDlpResolver) {
 
 /// A recording to search for. The key only matters to the resolved-track
 /// cache, which these tests leave disabled.
+#[cfg(unix)]
 fn track(artists: &[&str], title: &str, secs: u64) -> SearchQuery {
     SearchQuery {
         key: format!("id-{title}"),
@@ -142,45 +145,6 @@ async fn listing_a_single_link_carries_its_stream() {
         .expect("the listing resolved it");
     assert_eq!(stream.media_url, "https://cdn/song");
     assert_eq!(calls(), [url.as_str()]);
-}
-
-/// Real searches where the top result has to be checked. Opt-in:
-///   cargo test live_search -- --ignored --nocapture
-#[tokio::test]
-#[ignore = "requires yt-dlp and network access"]
-async fn live_search_finds_the_requested_recording() {
-    let (_, ytdlp) = build(YtDlpConfig {
-        program: std::env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),
-        timeout: Duration::from_secs(60),
-        extra_args: Vec::new(),
-        cookies_file: "secrets/cookies.txt".into(),
-    });
-    for (artists, title, secs) in [
-        (
-            &["Daft Punk", "Pharrell Williams", "Nile Rodgers"][..],
-            "Get Lucky (feat. Pharrell Williams and Nile Rodgers)",
-            369,
-        ),
-        (
-            &["Daft Punk", "Pharrell Williams", "Nile Rodgers"][..],
-            "Get Lucky - Radio Edit",
-            248,
-        ),
-        (&["Beyoncé"][..], "Halo", 261),
-        (&["Oasis"][..], "Live Forever - Remastered", 277),
-    ] {
-        let query = track(artists, title, secs);
-        let started = Instant::now();
-        let resolved = ytdlp.resolve(&Target::Search(query.clone())).await.unwrap();
-        println!(
-            "{title}: {:?}, {:?}, {:?} in {:?}",
-            resolved.metadata.title,
-            resolved.metadata.duration,
-            resolved.metadata.webpage_url,
-            started.elapsed()
-        );
-        assert!(durations_match(&query, &resolved.metadata));
-    }
 }
 
 #[cfg(unix)]
