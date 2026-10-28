@@ -63,7 +63,9 @@ fn play_modal() -> InteractionResponse {
     let query = Component::Label(Label {
         id: None,
         label: "Link or search".into(),
-        description: Some("A Spotify, YouTube, SoundCloud etc. link, or a song to search for".into()),
+        description: Some(
+            "A Spotify, YouTube, SoundCloud etc. link, or a song to search for".into(),
+        ),
         component: Box::new(Component::TextInput(TextInput {
             id: None,
             custom_id: "query".into(),

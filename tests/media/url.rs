@@ -32,7 +32,11 @@ fn links_are_imported_and_anything_else_is_searched() {
         Ok(Input::Link(url)) if url.as_str() == "https://youtu.be/dQw4w9WgXcQ"
     ));
     // `Artist: Title` parses as a URL with an `artist` scheme.
-    for text in ["daft punk one more time", "Artist: Title", "file:///etc/passwd"] {
+    for text in [
+        "daft punk one more time",
+        "Artist: Title",
+        "file:///etc/passwd",
+    ] {
         assert_eq!(
             Input::parse(&format!("  {text} ")).unwrap(),
             Input::Search(text.to_owned())

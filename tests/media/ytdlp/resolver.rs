@@ -134,7 +134,9 @@ async fn free_text_search_queues_the_top_result() {
     let import = found.unwrap();
     assert_eq!(import.tracks.len(), 1);
     let track = &import.tracks[0];
-    assert!(matches!(&track.target, Target::Url(url) if url.as_str() == "https://www.youtube.com/watch?v=song"));
+    assert!(
+        matches!(&track.target, Target::Url(url) if url.as_str() == "https://www.youtube.com/watch?v=song")
+    );
     assert_eq!(track.stream.as_ref().unwrap().media_url, "https://cdn/song");
     assert_eq!(
         found_calls,
