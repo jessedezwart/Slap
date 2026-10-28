@@ -37,7 +37,7 @@ async fn youtube_audio_parses_as_opus() {
     let raw_url = env::var("YTDLP_TEST_URL")
         .unwrap_or_else(|_| "https://www.youtube.com/watch?v=dQw4w9WgXcQ".to_owned());
 
-    let url = crate::media::validate_url(&raw_url).expect("test URL should be a YouTube link");
+    let url = crate::media::http_url(&raw_url).expect("test URL should be a YouTube link");
 
     let resolver = resolver(YtDlpConfig {
         program: env::var("YTDLP_PATH").unwrap_or_else(|_| "yt-dlp".to_owned()),

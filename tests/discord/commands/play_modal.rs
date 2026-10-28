@@ -17,7 +17,7 @@ fn modal_submissions_default_to_appending() {
     let url = |value: &str| {
         label(ModalInteractionComponent::TextInput(
             ModalInteractionTextInput {
-                custom_id: "url".into(),
+                custom_id: "query".into(),
                 id: 1,
                 value: value.into(),
             },
@@ -42,7 +42,7 @@ fn modal_submissions_default_to_appending() {
     // An untouched select submits no value, which must leave the import at
     // the back of the queue.
     let input = play_input(&data(vec![url("https://example.com/a")]));
-    assert_eq!(input.url, "https://example.com/a");
+    assert_eq!(input.query, "https://example.com/a");
     assert_eq!(input.mode, QueueMode::Append);
     for (value, expected) in [
         ("append", QueueMode::Append),
@@ -59,7 +59,7 @@ fn modal_submissions_default_to_appending() {
 }
 
 #[test]
-fn slash_command_only_runs_with_a_link() {
+fn slash_command_only_runs_with_input() {
     use twilight_model::application::interaction::application_command::CommandDataOption;
 
     let data = |options: Vec<(&str, &str)>| CommandData {
@@ -78,11 +78,11 @@ fn slash_command_only_runs_with_a_link() {
         target_id: None,
     };
 
-    // Without a link the command has nothing to run, so it opens the form.
+    // Without input the command has nothing to run, so it opens the form.
     assert!(command_input(&data(vec![])).is_none());
-    assert!(command_input(&data(vec![("url", "   ")])).is_none());
+    assert!(command_input(&data(vec![("query", "   ")])).is_none());
 
-    let input = command_input(&data(vec![("url", "https://example.com/a")])).unwrap();
-    assert_eq!(input.url, "https://example.com/a");
+    let input = command_input(&data(vec![("query", "https://example.com/a")])).unwrap();
+    assert_eq!(input.query, "https://example.com/a");
     assert_eq!(input.mode, QueueMode::Append);
 }

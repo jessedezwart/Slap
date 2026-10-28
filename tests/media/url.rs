@@ -9,7 +9,7 @@ fn accepts_http_urls_from_any_host() {
         "https://example.com/watch?v=x",
         "http://example.com/audio.opus",
     ] {
-        assert!(validate_url(url).is_ok(), "{url} should be accepted");
+        assert!(http_url(url).is_some(), "{url} should be accepted");
     }
 }
 
@@ -21,6 +21,22 @@ fn rejects_invalid_urls_and_other_schemes() {
         "ftp://example.com/audio.opus",
         "https://",
     ] {
-        assert!(validate_url(url).is_err(), "{url} should be rejected");
+        assert!(http_url(url).is_none(), "{url} should be rejected");
     }
+}
+
+#[test]
+fn links_are_imported_and_anything_else_is_searched() {
+    assert!(matches!(
+        Input::parse(" https://youtu.be/dQw4w9WgXcQ "),
+        Ok(Input::Link(url)) if url.as_str() == "https://youtu.be/dQw4w9WgXcQ"
+    ));
+    // `Artist: Title` parses as a URL with an `artist` scheme.
+    for text in ["daft punk one more time", "Artist: Title", "file:///etc/passwd"] {
+        assert_eq!(
+            Input::parse(&format!("  {text} ")).unwrap(),
+            Input::Search(text.to_owned())
+        );
+    }
+    assert!(matches!(Input::parse("   "), Err(MediaError::EmptyInput)));
 }

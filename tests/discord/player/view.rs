@@ -10,7 +10,7 @@ fn entry(metadata: Metadata) -> QueueEntry {
         origin: Arc::new(Origin {
             requester: Id::new(30),
             requester_name: "Ada".into(),
-            url: "https://youtu.be/x".parse().unwrap(),
+            url: Some("https://youtu.be/x".parse().unwrap()),
             playlist_name: None,
             skipped: 0,
             truncated: false,
@@ -92,7 +92,7 @@ fn paused_views_are_stable_and_titles_are_bounded() {
         origin: Arc::new(Origin {
             requester: Id::new(30),
             requester_name: "Ada".into(),
-            url: "https://www.youtube.com/playlist?list=PL1".parse().unwrap(),
+            url: Some("https://www.youtube.com/playlist?list=PL1".parse().unwrap()),
             playlist_name: Some("Late Night".into()),
             skipped: 2,
             truncated: false,

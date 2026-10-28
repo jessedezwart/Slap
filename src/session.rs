@@ -50,7 +50,8 @@ pub struct QueueEntry {
 pub struct Origin {
     pub requester: Id<UserMarker>,
     pub requester_name: String,
-    pub url: Url,
+    /// The link imported, or `None` for a search.
+    pub url: Option<Url>,
     pub playlist_name: Option<String>,
     /// Entries skipped for a request
     pub skipped: usize,

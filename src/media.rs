@@ -127,8 +127,8 @@ impl SearchQuery {
 /// Messages are written for the person who typed the command.
 #[derive(Debug, Error)]
 pub enum MediaError {
-    #[error("That does not look like a valid HTTP(S) link.")]
-    UnsupportedUrl,
+    #[error("Give a link, or something to search for.")]
+    EmptyInput,
 
     #[error("Spotify: {0}")]
     Spotify(#[from] SpotifyError),
@@ -158,8 +158,24 @@ pub fn http_url(raw: &str) -> Option<Url> {
     (scheme_ok && url.host_str().is_some()).then_some(url)
 }
 
-pub fn validate_url(raw: &str) -> Result<Url, MediaError> {
-    http_url(raw).ok_or(MediaError::UnsupportedUrl)
+/// What the user asked to play: a link, or free text to search for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Input {
+    Link(Url),
+    Search(String),
+}
+
+impl Input {
+    pub fn parse(raw: &str) -> Result<Self, MediaError> {
+        if let Some(url) = http_url(raw) {
+            return Ok(Self::Link(url));
+        }
+        let text = raw.trim();
+        if text.is_empty() {
+            return Err(MediaError::EmptyInput);
+        }
+        Ok(Self::Search(text.to_owned()))
+    }
 }
 
 /// A playlist's name as shown to users: trimmed, bounded, and `None` when blank.

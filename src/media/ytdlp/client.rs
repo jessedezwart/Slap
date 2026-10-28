@@ -3,13 +3,13 @@
 use std::process::Stdio;
 
 use tokio::{process::Command, time};
-use tracing::warn;
+use tracing::{debug, warn};
 use url::Url;
 
-use super::{YtDlpError, parse};
+use super::{YtDlpError, parse, resolver::SearchSource};
 use crate::{
     config::YtDlpConfig,
-    media::{Import, PLAYLIST_LIMIT},
+    media::{Import, ImportedTrack, MediaError, PLAYLIST_LIMIT},
 };
 
 /// Best available Opus quality
@@ -34,6 +34,37 @@ impl YtDlpClient {
         let output = self.playlist_json(url).await?;
         // A single video comes back with its stream already attached.
         parse::parse_list(&output, url)
+    }
+
+    pub async fn search(&self, text: &str) -> Result<Import, MediaError> {
+        for source in SearchSource::ORDER {
+            debug!(query = ?text, source = source.name(), "searching for audio");
+            let stream = match self
+                .video_json(&source.input(text))
+                .await
+                .and_then(|output| parse::parse_stream(&output))
+            {
+                Ok(stream) => stream,
+                Err(error) if error.is_fatal() => return Err(error.into()),
+                Err(error) => {
+                    warn!(source = source.name(), error = %error, "search failed");
+                    continue;
+                }
+            };
+            let Some(url) = stream.metadata.webpage_url.clone() else {
+                warn!(source = source.name(), "search result has no page link");
+                continue;
+            };
+            return Ok(Import {
+                tracks: vec![ImportedTrack {
+                    target: url.into(),
+                    metadata: stream.metadata.clone(),
+                    stream: Some(stream),
+                }],
+                ..Import::default()
+            });
+        }
+        Err(MediaError::NoMatch(text.to_owned()))
     }
 
     pub(super) async fn video_json(&self, input: &str) -> Result<Vec<u8>, YtDlpError> {

@@ -120,7 +120,7 @@ fn duration_tolerance(wanted: Duration) -> Duration {
 
 /// Where searches look, best source first.
 #[derive(Clone, Copy)]
-enum SearchSource {
+pub(super) enum SearchSource {
     /// Label releases and official audio, without video intros.
     YoutubeMusic,
     /// Everything else: fan uploads, lyric videos, music videos.
@@ -128,9 +128,9 @@ enum SearchSource {
 }
 
 impl SearchSource {
-    const ORDER: [Self; 2] = [Self::YoutubeMusic, Self::Youtube];
+    pub(super) const ORDER: [Self; 2] = [Self::YoutubeMusic, Self::Youtube];
 
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Self::YoutubeMusic => "YouTube Music",
             Self::Youtube => "YouTube",
@@ -138,7 +138,7 @@ impl SearchSource {
     }
 
     /// The yt-dlp input; still one argv entry, so the text stays literal.
-    fn input(self, text: &str) -> String {
+    pub(super) fn input(self, text: &str) -> String {
         match self {
             Self::YoutubeMusic => {
                 let mut url =

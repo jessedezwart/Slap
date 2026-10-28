@@ -95,7 +95,7 @@ impl View {
         let mut details = link(metadata.display_title(), metadata.webpage_url.as_ref());
         let origin = &entry.origin;
         if let Some(name) = origin.playlist_name.as_deref() {
-            let _ = write!(details, "\n- From {}", link(name, Some(&origin.url)));
+            let _ = write!(details, "\n- From {}", link(name, origin.url.as_ref()));
         }
         let _ = write!(details, "\n- Added by <@{}>", origin.requester);
         let _ = write!(details, "\n- <#{voice_channel}>");

@@ -32,11 +32,11 @@ pub(super) const PLAY_MODAL: &str = "play:modal";
 pub fn play_command() -> Command {
     CommandBuilder::new(
         "play",
-        "Play a track or add a playlist to your voice channel",
+        "Play a track, playlist, or search result in your voice channel",
         CommandType::ChatInput,
     )
     .option(
-        StringBuilder::new("url", "A track or playlist link")
+        StringBuilder::new("query", "A link, or what to search for")
             .required(false)
             .max_length(1024),
     )
@@ -45,14 +45,14 @@ pub fn play_command() -> Command {
 
 /// What the user passed to `/play` directly.
 pub(super) fn command_input(data: &CommandData) -> Option<PlayInput> {
-    let option = data.options.iter().find(|option| option.name == "url");
-    let url = match option.map(|option| &option.value) {
-        // Open the form when no link supplied.
-        Some(CommandOptionValue::String(url)) if !url.trim().is_empty() => url.clone(),
+    let option = data.options.iter().find(|option| option.name == "query");
+    let query = match option.map(|option| &option.value) {
+        // Open the form when nothing was supplied.
+        Some(CommandOptionValue::String(query)) if !query.trim().is_empty() => query.clone(),
         _ => return None,
     };
     Some(PlayInput {
-        url,
+        query,
         mode: QueueMode::Append,
     })
 }
@@ -60,17 +60,17 @@ pub(super) fn command_input(data: &CommandData) -> Option<PlayInput> {
 /// The form `/play` opens
 #[allow(deprecated)] // The `SelectMenu` component is deprecated, but has no replacement yet.
 fn play_modal() -> InteractionResponse {
-    let url = Component::Label(Label {
+    let query = Component::Label(Label {
         id: None,
-        label: "Track or playlist link".into(),
-        description: Some("Can be Spotify, YouTube, SoundCloud etc.".into()),
+        label: "Link or search".into(),
+        description: Some("A Spotify, YouTube, SoundCloud etc. link, or a song to search for".into()),
         component: Box::new(Component::TextInput(TextInput {
             id: None,
-            custom_id: "url".into(),
+            custom_id: "query".into(),
             label: None,
             max_length: Some(1024),
             min_length: Some(1),
-            placeholder: Some("https://…".into()),
+            placeholder: Some("https://… or artist - title".into()),
             required: Some(true),
             style: TextInputStyle::Short,
             value: None,
@@ -122,7 +122,7 @@ fn play_modal() -> InteractionResponse {
             InteractionResponseDataBuilder::new()
                 .custom_id(PLAY_MODAL)
                 .title("Play")
-                .components([url, mode])
+                .components([query, mode])
                 .build(),
         ),
     }
@@ -131,13 +131,14 @@ fn play_modal() -> InteractionResponse {
 /// What the user typed into the modal.
 #[derive(Debug)]
 pub(super) struct PlayInput {
-    pub url: String,
+    /// A link, or text to search for.
+    pub query: String,
     pub mode: QueueMode,
 }
 
 pub(super) fn play_input(data: &ModalInteractionData) -> PlayInput {
     let mut input = PlayInput {
-        url: String::new(),
+        query: String::new(),
         mode: QueueMode::Append,
     };
     // Loop over the components to find the user inputs.
@@ -147,9 +148,9 @@ pub(super) fn play_input(data: &ModalInteractionData) -> PlayInput {
             continue;
         };
         match &*label.component {
-            // URL field
-            ModalInteractionComponent::TextInput(text) if text.custom_id == "url" => {
-                input.url.clone_from(&text.value);
+            // Link or search field
+            ModalInteractionComponent::TextInput(text) if text.custom_id == "query" => {
+                input.query.clone_from(&text.value);
             }
             // Queue mode field
             ModalInteractionComponent::StringSelect(select) if select.custom_id == "mode" => {

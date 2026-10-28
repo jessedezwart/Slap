@@ -1,4 +1,4 @@
-//! Importing a link into the queue.
+//! Importing a link or search result into the queue.
 
 use std::{fmt::Write as _, sync::Arc};
 
@@ -8,7 +8,7 @@ use twilight_model::application::interaction::Interaction;
 use super::{CommandError, Reply, caller_channel};
 use crate::{
     audio::source::TrackSource,
-    media::{PLAYLIST_LIMIT, validate_url},
+    media::{Input, PLAYLIST_LIMIT},
     session::{Origin, QueueEntry, QueueMode, SessionError},
     state::State,
 };
@@ -16,10 +16,10 @@ use crate::{
 pub(super) async fn play(
     state: &Arc<State>,
     interaction: &Interaction,
-    raw_url: &str,
+    query: &str,
     mode: QueueMode,
 ) -> Result<Reply, CommandError> {
-    let url = validate_url(raw_url)?;
+    let input = Input::parse(query)?;
 
     let (guild_id, channel_id) = caller_channel(state, interaction)?;
     let user_id = interaction
@@ -47,7 +47,7 @@ pub(super) async fn play(
 
     let mut import = tokio::select! {
         () = cancel.cancelled() => return Err(SessionError::Ended.into()),
-        result = state.importer.import(&url) => result?,
+        result = state.importer.import(&input) => result?,
     };
     if import.tracks.is_empty() {
         return Ok(Reply::message(
@@ -62,7 +62,10 @@ pub(super) async fn play(
     let origin = Arc::new(Origin {
         requester: user_id,
         requester_name: user_name,
-        url,
+        url: match input {
+            Input::Link(url) => Some(url),
+            Input::Search(_) => None,
+        },
         playlist_name: import.playlist_name.take(),
         skipped: import.skipped,
         truncated: import.truncated,

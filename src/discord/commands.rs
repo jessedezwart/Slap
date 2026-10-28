@@ -78,7 +78,7 @@ pub async fn handle_interaction(state: Arc<State>, interaction: Interaction) {
     let (state, interaction) = (&state, &interaction);
     match request {
         Request::Play(input) => {
-            let work = play::play(state, interaction, &input.url, input.mode);
+            let work = play::play(state, interaction, &input.query, input.mode);
             run(state, interaction, ReplyMode::Public, work).await;
         }
         Request::Button(Action::Control(control)) => {

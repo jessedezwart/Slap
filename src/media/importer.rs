@@ -2,12 +2,12 @@ use tracing::debug;
 use url::Url;
 
 use super::{
-    Import, MediaError,
+    Import, Input, MediaError,
     spotify::{SpotifyService, is_spotify_url},
     ytdlp::YtDlpClient,
 };
 
-/// Hands each link to the source that understands it.
+/// Hands each link to the source that understands it, and searches to yt-dlp.
 pub struct Importer {
     spotify: SpotifyService,
     ytdlp: YtDlpClient,
@@ -18,7 +18,17 @@ impl Importer {
         Self { spotify, ytdlp }
     }
 
-    pub async fn import(&self, url: &Url) -> Result<Import, MediaError> {
+    pub async fn import(&self, input: &Input) -> Result<Import, MediaError> {
+        match input {
+            Input::Link(url) => self.import_link(url).await,
+            Input::Search(text) => {
+                debug!(source = "search", "importing search");
+                self.ytdlp.search(text).await
+            }
+        }
+    }
+
+    async fn import_link(&self, url: &Url) -> Result<Import, MediaError> {
         if is_spotify_url(url) {
             debug!(source = "Spotify", "importing link");
             return Ok(self.spotify.import(url).await?);

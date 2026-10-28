@@ -118,6 +118,32 @@ async fn search_prefers_youtube_music_and_falls_back_on_wrong_duration() {
     assert_eq!(missing_calls.len(), 2);
 }
 
+/// A free-text search falls back to YouTube, and keeps its stream and link.
+#[cfg(unix)]
+#[tokio::test]
+async fn free_text_search_queues_the_top_result() {
+    let (client, _, calls, path) = fake_ytdlp(FAKE_YTDLP);
+
+    let found = client.search("Artist Song $(literal);").await;
+    let found_calls = calls();
+    // No page link on either result, so nothing can be queued.
+    let rare = client.search("Artist Rare").await;
+    let rare_calls = calls();
+    std::fs::remove_file(&path).unwrap();
+
+    let import = found.unwrap();
+    assert_eq!(import.tracks.len(), 1);
+    let track = &import.tracks[0];
+    assert!(matches!(&track.target, Target::Url(url) if url.as_str() == "https://www.youtube.com/watch?v=song"));
+    assert_eq!(track.stream.as_ref().unwrap().media_url, "https://cdn/song");
+    assert_eq!(
+        found_calls,
+        ["https://music.youtube.com/search?q=Artist+Song+%24%28literal%29%3B#songs"]
+    );
+    assert!(matches!(rare, Err(MediaError::NoMatch(ref q)) if q == "Artist Rare"));
+    assert_eq!(rare_calls.len(), 2);
+}
+
 /// Answers the listing with a single video, logging every input it is handed.
 #[cfg(unix)]
 const FAKE_SINGLE_VIDEO: &str = r#"#!/bin/sh
