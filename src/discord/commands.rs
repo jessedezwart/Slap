@@ -146,7 +146,13 @@ async fn respond(
             if let Some(cancel) = reply.player
                 && let Some(guild_id) = interaction.guild_id
             {
-                player::start(Arc::clone(state), guild_id, &cancel, response.model().await?).await;
+                player::start(
+                    Arc::clone(state),
+                    guild_id,
+                    &cancel,
+                    response.model().await?,
+                )
+                .await;
             }
         }
     }
@@ -175,7 +181,9 @@ fn caller_channel(
     interaction: &Interaction,
 ) -> Result<(Id<GuildMarker>, Id<ChannelMarker>), CommandError> {
     let guild_id = interaction.guild_id.ok_or(CommandError::NotRanFromGuild)?;
-    let user_id = interaction.author_id().ok_or(CommandError::NotRanFromGuild)?;
+    let user_id = interaction
+        .author_id()
+        .ok_or(CommandError::NotRanFromGuild)?;
     let channel_id = state
         .discord_cache
         .voice_state(user_id, guild_id)

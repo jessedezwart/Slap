@@ -28,7 +28,12 @@ pub(super) async fn apply_control(
     // Send the control to the session
     state
         .sessions
-        .control(guild_id, channel_id, component_message_id(interaction)?, control)
+        .control(
+            guild_id,
+            channel_id,
+            component_message_id(interaction)?,
+            control,
+        )
         .await?;
     Ok(())
 }

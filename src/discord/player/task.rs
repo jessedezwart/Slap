@@ -8,10 +8,7 @@ use std::{
 use tokio::time;
 use tracing::warn;
 use twilight_model::{
-    channel::{
-        Message,
-        message::{MessageFlags},
-    },
+    channel::{Message, message::MessageFlags},
     id::{
         Id,
         marker::{ChannelMarker, GuildMarker, MessageMarker},
@@ -147,13 +144,18 @@ impl PlayerTask {
 
     async fn stopped(&self) {
         // Try to edit the player to say the session ended.
-        let result = edit(&self.state, self.channel_id, self.message_id, &View::stopped()).await;
+        let result = edit(
+            &self.state,
+            self.channel_id,
+            self.message_id,
+            &View::stopped(),
+        )
+        .await;
         // If can't edit, delete the message.
         if let Err(EditError::Failed) = result {
             delete_player(&self.state, self.channel_id, self.message_id).await;
         }
     }
-
 }
 
 pub(super) async fn delete_player(

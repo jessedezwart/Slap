@@ -159,7 +159,10 @@ async fn client_credentials_reads_only_the_embedded_first_page() {
 async fn client_credentials_reports_a_playlist_it_cannot_list() {
     let (base, task) = server(vec![
         (200, json!({"access_token":"app"})),
-        (200, json!({"name":"Jazz House Vibes", "owner":{"id":"someone"}})),
+        (
+            200,
+            json!({"name":"Jazz House Vibes", "owner":{"id":"someone"}}),
+        ),
     ])
     .await;
     assert!(matches!(
@@ -256,9 +259,12 @@ async fn imports_an_albums_first_page_with_its_cover_and_name() {
     assert_eq!(album.playlist_name.as_deref(), Some("Debut"));
     assert_eq!(album.tracks.len(), 2);
     assert!(album.truncated);
-    assert!(album.tracks.iter().all(
-        |t| t.metadata.thumbnail.as_deref() == Some("https://i.scdn.co/image/cover")
-    ));
+    assert!(
+        album
+            .tracks
+            .iter()
+            .all(|t| t.metadata.thumbnail.as_deref() == Some("https://i.scdn.co/image/cover"))
+    );
     assert!(matches!(
         spotify.album_by_id("missing").await,
         Err(SpotifyError::AlbumNotFound)

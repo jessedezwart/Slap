@@ -69,7 +69,9 @@ impl SpotifyService {
             playlist_name: parse::playlist_name(&album),
             ..Import::default()
         };
-        collect_into(&mut import, entries, |item| parse::album_track(item, &album));
+        collect_into(&mut import, entries, |item| {
+            parse::album_track(item, &album)
+        });
         import.truncated = total(page).is_some_and(|total| total > count);
         Ok(import)
     }

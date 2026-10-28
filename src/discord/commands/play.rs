@@ -22,7 +22,9 @@ pub(super) async fn play(
     let url = validate_url(raw_url)?;
 
     let (guild_id, channel_id) = caller_channel(state, interaction)?;
-    let user_id = interaction.author_id().ok_or(CommandError::NotRanFromGuild)?;
+    let user_id = interaction
+        .author_id()
+        .ok_or(CommandError::NotRanFromGuild)?;
     // Server nickname, else display name, else username.
     let user_name = interaction
         .member
@@ -30,7 +32,11 @@ pub(super) async fn play(
         .and_then(|member| member.nick.clone())
         .or_else(|| {
             let user = interaction.author()?;
-            Some(user.global_name.clone().unwrap_or_else(|| user.name.clone()))
+            Some(
+                user.global_name
+                    .clone()
+                    .unwrap_or_else(|| user.name.clone()),
+            )
         })
         .unwrap_or_default();
 

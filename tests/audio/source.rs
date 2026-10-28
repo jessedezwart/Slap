@@ -96,12 +96,7 @@ fn source_without_ytdlp(stream: Option<StreamInfo>) -> TrackSource {
         cookies_file: "secrets/cookies.txt".into(),
     });
     let url: url::Url = "https://www.youtube.com/watch?v=song".parse().unwrap();
-    TrackSource::new(
-        url,
-        stream,
-        audio(resolver),
-        CancellationToken::new(),
-    )
+    TrackSource::new(url, stream, audio(resolver), CancellationToken::new())
 }
 
 fn listed_stream(expires_at: Option<std::time::SystemTime>) -> StreamInfo {

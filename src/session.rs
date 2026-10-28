@@ -208,7 +208,7 @@ impl SessionManager {
         let session = still_current(&session, cancel).ok_or(SessionError::Ended)?;
         let call = self.call(guild_id)?;
         let mut call = call.lock().await;
-        
+
         // Remove existing queue in case of replace
         if mode == QueueMode::Replace {
             call.queue().stop();
@@ -229,7 +229,7 @@ impl SessionManager {
         if mode == QueueMode::Next && was_playing {
             call.queue().modify_queue(|queue| play_next(queue, count));
         }
-        
+
         // Trigger player component redraw
         session.redraw.notify_one();
         Ok(())
@@ -295,7 +295,11 @@ impl SessionManager {
         Some(session.clone())
     }
 
-    pub async fn release_player_component(&self, guild_id: Id<GuildMarker>, message_id: Id<MessageMarker>) {
+    pub async fn release_player_component(
+        &self,
+        guild_id: Id<GuildMarker>,
+        message_id: Id<MessageMarker>,
+    ) {
         let mut session = self.lock(guild_id).await;
         if let Some(session) = session
             .as_mut()

@@ -42,10 +42,14 @@ pub enum SpotifyError {
     )]
     PlaylistNotOwned,
 
-    #[error("track not found — make sure the link is a full https://open.spotify.com/track/... link")]
+    #[error(
+        "track not found — make sure the link is a full https://open.spotify.com/track/... link"
+    )]
     TrackNotFound,
 
-    #[error("album not found — make sure the link is a full https://open.spotify.com/album/... link")]
+    #[error(
+        "album not found — make sure the link is a full https://open.spotify.com/album/... link"
+    )]
     AlbumNotFound,
 
     #[error("rate limit reached; try again {}", retry_hint(*.0))]

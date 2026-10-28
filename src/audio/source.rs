@@ -1,9 +1,6 @@
 //! The audio source that songbird uses.
 
-use std::{
-    sync::Arc,
-    time::{Duration},
-};
+use std::{sync::Arc, time::Duration};
 
 use reqwest::Client;
 use songbird::input::{AsyncAdapterStream, AudioStream, AudioStreamError, Compose, Input};

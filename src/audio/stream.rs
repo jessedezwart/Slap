@@ -43,7 +43,7 @@ pub fn budget_bytes(buffer: Duration, bitrate_bps: Option<u32>) -> usize {
 pub struct HttpStream {
     file: RemoteFile,
     cancel: CancellationToken,
-    /// The stream reader that songbird reads from. 
+    /// The stream reader that songbird reads from.
     /// It is a wrapper around a `StreamReader` that reads from a `BoxStream` of `Bytes`.
     reader: SyncWrapper<StreamReader<BoxStream<'static, io::Result<Bytes>>, Bytes>>,
     /// How much songbird's adapter should buffer ahead of the mixer.
@@ -161,9 +161,7 @@ impl AsyncMediaSource for HttpStream {
     ) -> Result<Box<dyn AsyncMediaSource>, AudioStreamError> {
         let stream = Self::open(self.file.clone(), self.budget_bytes, &self.cancel, offset)
             .await
-            .map_err(|error| {
-                AudioStreamError::Fail(Box::new(error))
-            })?;
+            .map_err(|error| AudioStreamError::Fail(Box::new(error)))?;
         Ok(Box::new(stream))
     }
 }
