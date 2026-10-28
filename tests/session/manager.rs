@@ -7,7 +7,7 @@ fn test_manager() -> Arc<SessionManager> {
         Id::<UserMarker>::new(100),
         songbird::Config::default(),
     );
-    SessionManager::new(Arc::new(songbird))
+    SessionManager::new(Arc::new(songbird), Duration::from_secs(300))
 }
 
 /// Install a session in `channel`, shown on the player `message`.

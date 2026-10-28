@@ -2,7 +2,11 @@
 
 mod events;
 
-use std::{collections::VecDeque, sync::Arc, time::Duration};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Weak},
+    time::Duration,
+};
 
 use dashmap::DashMap;
 use songbird::{
@@ -10,9 +14,12 @@ use songbird::{
     error::JoinError,
     events::{CoreEvent, TrackEvent},
     input::Input,
-    tracks::{Track, TrackHandle, TrackQueue},
+    tracks::{PlayMode, Track, TrackHandle, TrackQueue},
 };
-use tokio::sync::{Mutex, Notify, OwnedMutexGuard};
+use tokio::{
+    sync::{Mutex, Notify, OwnedMutexGuard},
+    time,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use twilight_model::id::{
@@ -26,6 +33,10 @@ use crate::media::Metadata;
 
 /// How far into a track the next one starts loading. Due to PO token generation, ytdlp might take a while.
 const PRELOAD_LEAD: Duration = Duration::from_secs(10);
+/// How often a session checks whether it is idle.
+const IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(15);
+/// How long the driver gets to report whether the current track is paused.
+const INFO_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// A track
 #[derive(Debug)]
@@ -89,13 +100,16 @@ type Slot = Arc<Mutex<Option<GuildSession>>>;
 pub struct SessionManager {
     songbird: Arc<Songbird>,
     guilds: DashMap<Id<GuildMarker>, Slot>,
+    /// Leave the voice channel after nothing has played for this long.
+    idle_timeout: Duration,
 }
 
 impl SessionManager {
-    pub fn new(songbird: Arc<Songbird>) -> Arc<Self> {
+    pub fn new(songbird: Arc<Songbird>, idle_timeout: Duration) -> Arc<Self> {
         Arc::new(Self {
             songbird,
             guilds: DashMap::new(),
+            idle_timeout,
         })
     }
 
@@ -193,7 +207,66 @@ impl SessionManager {
 
         debug!(%guild_id, %channel_id, "joined voice channel");
 
+        tokio::spawn(Self::leave_when_idle(
+            Arc::downgrade(self),
+            guild_id,
+            cancel.clone(),
+        ));
+
         Ok(cancel)
+    }
+
+    /// Tear the session down once nothing has played for `idle_timeout`.
+    async fn leave_when_idle(
+        sessions: Weak<Self>,
+        guild_id: Id<GuildMarker>,
+        cancel: CancellationToken,
+    ) {
+        let mut idle_for = Duration::ZERO;
+        loop {
+            let interval = match sessions.upgrade() {
+                Some(sessions) => sessions.idle_timeout.min(IDLE_CHECK_INTERVAL),
+                None => return,
+            };
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return,
+                () = time::sleep(interval) => {}
+            }
+            let Some(sessions) = sessions.upgrade() else {
+                return;
+            };
+            // Checked under the session lock, so a concurrent /play cannot be torn down.
+            let mut session = sessions.lock(guild_id).await;
+            if still_current(&session, &cancel).is_none() {
+                return;
+            }
+            if !sessions.is_idle(guild_id).await {
+                idle_for = Duration::ZERO;
+                continue;
+            }
+            idle_for += interval;
+            if idle_for >= sessions.idle_timeout {
+                sessions
+                    .teardown_locked(guild_id, &mut session, "idle timeout")
+                    .await;
+                return;
+            }
+        }
+    }
+
+    /// Nothing queued, or the current track is paused.
+    async fn is_idle(&self, guild_id: Id<GuildMarker>) -> bool {
+        let Some(call) = self.songbird.get(guild_id) else {
+            return true;
+        };
+        let Some(track) = call.lock().await.queue().current() else {
+            return true;
+        };
+        // A track still loading counts as playing.
+        time::timeout(INFO_TIMEOUT, track.get_info())
+            .await
+            .is_ok_and(|info| info.is_ok_and(|info| info.playing == PlayMode::Pause))
     }
 
     pub async fn enqueue(

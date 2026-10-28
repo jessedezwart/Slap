@@ -147,7 +147,7 @@ impl Bot {
             SongbirdConfig::default().preallocated_tracks(2),
         ));
 
-        let sessions = SessionManager::new(Arc::clone(&songbird));
+        let sessions = SessionManager::new(Arc::clone(&songbird), config.idle_timeout);
 
         let search_cache = config
             .search_cache_path
