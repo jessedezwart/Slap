@@ -78,7 +78,6 @@ git clone https://github.com/jessedezwart/Slap
 cargo run --release
 ```
 
-
 ## Configuration
 
 All configuration settings are documented in `.env.example`. Copy that file to `.env`.
@@ -99,14 +98,16 @@ If YouTube asks to sign in to confirm you are not a bot, export YouTube cookies 
 
 ### Spotify API
 
-Since Februari 2026, only your own playlists can be found using the Spotify API.
+Since Februari 2026, only your own playlists can be found using the Spotify API. When the refresh token is not configured, it can only fetch 100 tracks from that playlist.
+
+A potential feature was allowing users to sign in via their own account, this is only possible with a non-development Spotify app, which are only given out now to registered partners.
 
 To use the playlists, you need to create a Spotify app and authorize an account.
 Configure `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` in `.env`, then restart the bot.
 
 1. Create an app in the [Spotify developer dashboard](https://developer.spotify.com/dashboard).
-2. Put the client ID and secret in `.env`. This is enough to import **public** playlists, up to their first 100 tracks.
-3. To use public playlists and increase the playlist limit, set `SPOTIFY_REFRESH_TOKEN`. Use Spotify's [Authorization Code flow](https://developer.spotify.com/documentation/web-api/tutorials/code-flow) to authorize an account, registering the redirect URI in the dashboard and requesting `playlist-read-private` and `playlist-read-collaborative`. `scripts/spotify-get-refresh-token` walks through this.
+2. Put the client ID and secret in `.env`.
+3. To increase the playlist limit, set `SPOTIFY_REFRESH_TOKEN`. The `scripts/spotify-get-refresh-token` script fetches it.
 
 ### Discord
 
