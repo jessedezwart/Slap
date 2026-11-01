@@ -156,6 +156,8 @@ jobs:
 
       # amd64 only: building Rust for arm64 under QEMU takes far too long.
       - uses: docker/build-push-action@v6
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: .
           platforms: linux/amd64
