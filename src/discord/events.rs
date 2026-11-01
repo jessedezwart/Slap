@@ -11,10 +11,10 @@ use twilight_model::id::{
     marker::{ChannelMarker, GuildMarker, UserMarker},
 };
 
-use crate::{discord::commands, state::State};
+use crate::{bot::BotContext, discord::commands};
 
 /// Receive events for one shard until the shard closes or shutdown is signalled.
-pub async fn run_shard(state: Arc<State>, mut shard: Shard, shutdown: CancellationToken) {
+pub async fn run_shard(state: Arc<BotContext>, mut shard: Shard, shutdown: CancellationToken) {
     loop {
         let item = tokio::select! {
             () = shutdown.cancelled() => {
@@ -68,7 +68,7 @@ async fn close(shard: &mut Shard) {
     }
 }
 
-fn handle_event(state: &Arc<State>, event: Event) {
+fn handle_event(state: &Arc<BotContext>, event: Event) {
     match event {
         Event::InteractionCreate(interaction) => {
             // Spawned so a slow yt-dlp resolve never holds up the gateway.
@@ -92,7 +92,7 @@ fn handle_event(state: &Arc<State>, event: Event) {
 
 /// Recheck the cache under the session lock, so queued gateway work cannot
 /// disconnect a replacement session or race a join still in progress.
-pub fn reconcile_voice(state: Arc<State>, guild_id: Id<GuildMarker>) {
+pub fn reconcile_voice(state: Arc<BotContext>, guild_id: Id<GuildMarker>) {
     if !state.sessions.is_known_guild(guild_id) {
         return;
     }

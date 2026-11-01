@@ -9,8 +9,8 @@ use twilight_model::{
 
 use super::{CommandError, caller_channel};
 use crate::{
+    bot::BotContext,
     session::{Control, SessionError},
-    state::State,
 };
 
 /// The component a button was pressed on.
@@ -20,7 +20,7 @@ fn component_message_id(interaction: &Interaction) -> Result<Id<MessageMarker>, 
 }
 
 pub(super) async fn apply_control(
-    state: &Arc<State>,
+    state: &Arc<BotContext>,
     interaction: &Interaction,
     control: Control,
 ) -> Result<(), CommandError> {

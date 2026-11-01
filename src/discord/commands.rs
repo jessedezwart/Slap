@@ -24,7 +24,7 @@ use self::{
     error::CommandError,
     play_modal::{PLAY_MODAL, PlayInput, command_input, open_modal, play_input},
 };
-use crate::{discord::player, session::Control, state::State};
+use crate::{bot::BotContext, discord::player, session::Control};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -69,7 +69,7 @@ enum ReplyMode {
     guild_id = interaction.guild_id.map(|id| id.get()), user_id = interaction.author_id().map(|id| id.get()),
     interaction_id = %interaction.id, command = tracing::field::Empty,
 ))]
-pub async fn handle_interaction(state: Arc<State>, interaction: Interaction) {
+pub async fn handle_interaction(state: Arc<BotContext>, interaction: Interaction) {
     let Some(request) = Request::read(&interaction) else {
         warn!(%interaction.id, "unhandled interaction");
         return;
@@ -98,7 +98,7 @@ pub async fn handle_interaction(state: Arc<State>, interaction: Interaction) {
 
 /// Acknowledge the interaction, do `work`, then answer as `mode` says.
 async fn run(
-    state: &Arc<State>,
+    state: &Arc<BotContext>,
     interaction: &Interaction,
     mode: ReplyMode,
     work: impl Future<Output = Result<Reply, CommandError>>,
@@ -119,7 +119,7 @@ async fn run(
 }
 
 async fn respond(
-    state: &Arc<State>,
+    state: &Arc<BotContext>,
     interaction: &Interaction,
     mode: ReplyMode,
     result: Result<Reply, CommandError>,
@@ -177,7 +177,7 @@ impl Reply {
 
 /// The caller's guild and voice channel.
 fn caller_channel(
-    state: &State,
+    state: &BotContext,
     interaction: &Interaction,
 ) -> Result<(Id<GuildMarker>, Id<ChannelMarker>), CommandError> {
     let guild_id = interaction.guild_id.ok_or(CommandError::NotRanFromGuild)?;
@@ -194,7 +194,7 @@ fn caller_channel(
 
 // Acknowledge interaction to Discord
 async fn defer(
-    state: &Arc<State>,
+    state: &Arc<BotContext>,
     interaction: &Interaction,
     mode: ReplyMode,
 ) -> Result<(), twilight_http::Error> {

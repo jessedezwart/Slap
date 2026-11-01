@@ -24,7 +24,7 @@ use twilight_util::builder::{
     command::{CommandBuilder, StringBuilder},
 };
 
-use crate::{session::QueueMode, state::State};
+use crate::{bot::BotContext, session::QueueMode};
 
 /// Identifies both the modal `/play` opens and the submission it sends back.
 pub(super) const PLAY_MODAL: &str = "play:modal";
@@ -170,7 +170,7 @@ pub(super) fn play_input(data: &ModalInteractionData) -> PlayInput {
 
 /// A slash `/play` answers with the form instead of a deferred reply.
 pub(super) async fn open_modal(
-    state: &Arc<State>,
+    state: &Arc<BotContext>,
     interaction: &Interaction,
 ) -> Result<(), twilight_http::Error> {
     state

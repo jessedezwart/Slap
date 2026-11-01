@@ -17,8 +17,8 @@ use twilight_model::{
 
 use super::view::{UP_NEXT_LEN, View};
 use crate::{
+    bot::BotContext,
     session::{GuildSession, QueueEntry, QueueHead},
-    state::State,
 };
 
 /// How long the task gets to update the message.
@@ -27,7 +27,7 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const INFO_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub(super) struct PlayerTask {
-    state: Arc<State>,
+    state: Arc<BotContext>,
     guild_id: Id<GuildMarker>,
     channel_id: Id<ChannelMarker>,
     message_id: Id<MessageMarker>,
@@ -44,7 +44,7 @@ enum Stop {
 
 impl PlayerTask {
     pub fn new(
-        state: Arc<State>,
+        state: Arc<BotContext>,
         guild_id: Id<GuildMarker>,
         message: &Message,
         session: GuildSession,
@@ -159,7 +159,7 @@ impl PlayerTask {
 }
 
 pub(super) async fn delete_player(
-    state: &State,
+    state: &BotContext,
     channel_id: Id<ChannelMarker>,
     message_id: Id<MessageMarker>,
 ) {
@@ -177,7 +177,7 @@ enum EditError {
 }
 
 async fn edit(
-    state: &State,
+    state: &BotContext,
     channel_id: Id<ChannelMarker>,
     message_id: Id<MessageMarker>,
     view: &View,

@@ -13,7 +13,7 @@ use twilight_model::{
 
 use self::task::{PlayerTask, delete_player};
 use super::commands::Action;
-use crate::{session::Control, state::State};
+use crate::{bot::BotContext, session::Control};
 
 /// A button the player can show.
 struct PlayerButton {
@@ -68,7 +68,7 @@ pub fn button_action(custom_id: &str) -> Option<Action> {
 }
 
 pub async fn start(
-    state: Arc<State>,
+    state: Arc<BotContext>,
     guild_id: Id<GuildMarker>,
     cancel: &CancellationToken,
     message: Message,

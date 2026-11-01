@@ -8,13 +8,13 @@ use twilight_model::application::interaction::Interaction;
 use super::{CommandError, Reply, caller_channel};
 use crate::{
     audio::source::TrackSource,
+    bot::BotContext,
     media::{Input, PLAYLIST_LIMIT},
     session::{Origin, QueueEntry, QueueMode, SessionError},
-    state::State,
 };
 
 pub(super) async fn play(
-    state: &Arc<State>,
+    state: &Arc<BotContext>,
     interaction: &Interaction,
     query: &str,
     mode: QueueMode,
