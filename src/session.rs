@@ -5,7 +5,13 @@ mod idle;
 mod ownership;
 mod queue;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use dashmap::DashMap;
 use songbird::{Call, Songbird, error::JoinError};
@@ -54,6 +60,9 @@ pub enum SessionError {
     /// been torn down.
     #[error("That voice session has ended; use the current player, or /play to start again.")]
     Ended,
+
+    #[error("Bot is shutting down, try again in a moment.")]
+    Closed,
 }
 
 /// Optional since session might not exist when torn down.
@@ -66,6 +75,8 @@ pub struct SessionManager {
     guilds: DashMap<Id<GuildMarker>, Slot>,
     /// Leave the voice channel after nothing has played for this long.
     idle_timeout: Duration,
+    /// Set at shutdown, after which no session can start.
+    closed: AtomicBool,
 }
 
 impl SessionManager {
@@ -74,7 +85,12 @@ impl SessionManager {
             songbird,
             guilds: DashMap::new(),
             idle_timeout,
+            closed: AtomicBool::new(false),
         })
+    }
+
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
     }
 
     async fn lock(&self, guild_id: Id<GuildMarker>) -> OwnedMutexGuard<Option<GuildSession>> {
@@ -96,6 +112,9 @@ impl SessionManager {
         channel_id: Id<ChannelMarker>,
     ) -> Result<CancellationToken, SessionError> {
         let mut session = self.lock(guild_id).await;
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(SessionError::Closed);
+        }
         // Does session already exist?
         if let Some(current) = session.as_ref() {
             // Ran from a different channel?

@@ -128,6 +128,8 @@ impl Bot {
             shards,
         } = self;
         info!("leaving voice channels");
+        // Shards still deliver /play until they close below.
+        state.sessions.close();
         for guild_id in state.sessions.known_guilds() {
             state.sessions.teardown(guild_id, "shutdown").await;
         }

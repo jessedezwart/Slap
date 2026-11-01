@@ -107,6 +107,33 @@ async fn controls_from_an_ended_session_cannot_stop_its_replacement() {
 }
 
 #[tokio::test]
+async fn closing_refuses_joins_and_leaves_teardown_to_shutdown() {
+    let manager = test_manager();
+    let guild = Id::new(1);
+    let channel = Id::new(10);
+    let cancel = insert(&manager, guild, channel, None).await;
+
+    manager.close();
+
+    assert!(matches!(
+        manager.join(guild, channel).await,
+        Err(SessionError::Closed)
+    ));
+    assert!(matches!(
+        manager.join(Id::new(2), channel).await,
+        Err(SessionError::Closed)
+    ));
+    assert!(manager.lock(Id::new(2)).await.is_none());
+
+    // Every guild a refused join touched is still found by shutdown.
+    assert!(!cancel.is_cancelled());
+    for guild_id in manager.known_guilds() {
+        manager.teardown(guild_id, "test cleanup").await;
+    }
+    assert!(cancel.is_cancelled());
+}
+
+#[tokio::test]
 async fn each_session_has_one_player() {
     let manager = test_manager();
     let guild = Id::new(1);

@@ -36,9 +36,6 @@ pub async fn run_shard(state: Arc<BotContext>, mut shard: Shard, shutdown: Cance
         };
 
         state.discord_cache.update(&event);
-
-        // songbird needs VoiceStateUpdate and VoiceServerUpdate to finish a
-        // connection, so it sees every event before we do anything else.
         state.songbird.process(&event).await;
 
         handle_event(&state, event);
