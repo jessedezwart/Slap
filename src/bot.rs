@@ -15,7 +15,7 @@ use crate::{
     BoxError,
     audio::source::AudioContext,
     config::Config,
-    discord::{connection::Discord, events::run_shard},
+    discord::{connection::Discord, gateway::run_shard},
     media::{
         importer::Importer,
         search_cache::SearchCache,

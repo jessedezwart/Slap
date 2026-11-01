@@ -9,21 +9,20 @@ use std::{
 use songbird::tracks::{PlayMode, ReadyState, TrackState};
 use twilight_model::{
     channel::message::{
-        Component, EmojiReactionType,
+        Component,
         component::{
-            ActionRow, Button, ButtonStyle, Container, Section, Separator, SeparatorSpacingSize,
-            TextDisplay, Thumbnail, UnfurledMediaItem,
+            ActionRow, Container, Section, Separator, SeparatorSpacingSize, TextDisplay, Thumbnail,
+            UnfurledMediaItem,
         },
     },
     id::{Id, marker::ChannelMarker},
 };
 
-use super::{BUTTONS, PlayerButton};
+use super::{
+    buttons::{Action, button},
+    text::{code_line, format_duration, link},
+};
 use crate::{
-    discord::{
-        commands::Action,
-        text::{code_line, format_duration, link},
-    },
     media::PLAYLIST_LIMIT,
     session::{Control, Origin, QueueEntry},
 };
@@ -267,30 +266,6 @@ fn buttons(empty: bool, paused: bool) -> Component {
             button(Action::Control(Control::Stop), false),
             button(Action::OpenForm, false),
         ],
-    })
-}
-
-fn button(action: Action, disabled: bool) -> Component {
-    let PlayerButton {
-        custom_id,
-        label,
-        emoji,
-        ..
-    } = BUTTONS
-        .iter()
-        .find(|button| button.action == action)
-        .expect("every drawn action has a button");
-    Component::Button(Button {
-        id: None,
-        custom_id: Some((*custom_id).into()),
-        label: Some((*label).into()),
-        style: ButtonStyle::Secondary,
-        disabled,
-        emoji: Some(EmojiReactionType::Unicode {
-            name: (*emoji).into(),
-        }),
-        url: None,
-        sku_id: None,
     })
 }
 

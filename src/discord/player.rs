@@ -1,6 +1,8 @@
 //! The player message: its buttons, and the task that keeps it current.
 
+mod buttons;
 mod task;
+mod text;
 mod view;
 
 use std::sync::Arc;
@@ -11,61 +13,9 @@ use twilight_model::{
     id::{Id, marker::GuildMarker},
 };
 
+pub use self::buttons::{Action, button_action};
 use self::task::{PlayerTask, delete_player};
-use super::commands::Action;
-use crate::{bot::BotContext, session::Control};
-
-/// A button the player can show.
-struct PlayerButton {
-    action: Action,
-    custom_id: &'static str,
-    label: &'static str,
-    emoji: &'static str,
-}
-
-/// Every player button. Drawing the buttons and reading presses back both use
-/// this table, so the two cannot drift apart.
-const BUTTONS: [PlayerButton; 5] = [
-    PlayerButton {
-        action: Action::Control(Control::Pause),
-        custom_id: "player:pause",
-        label: "Pause",
-        emoji: "⏸️",
-    },
-    PlayerButton {
-        action: Action::Control(Control::Resume),
-        custom_id: "player:resume",
-        label: "Resume",
-        emoji: "▶️",
-    },
-    PlayerButton {
-        action: Action::Control(Control::Skip),
-        custom_id: "player:skip",
-        label: "Skip",
-        emoji: "⏭️",
-    },
-    PlayerButton {
-        action: Action::Control(Control::Stop),
-        custom_id: "player:stop",
-        label: "Stop",
-        emoji: "⏹️",
-    },
-    // A link does not fit on a button, so this one opens the play form.
-    PlayerButton {
-        action: Action::OpenForm,
-        custom_id: "player:add",
-        label: "Add",
-        emoji: "➕",
-    },
-];
-
-/// What a press on the button with `custom_id` asks for.
-pub fn button_action(custom_id: &str) -> Option<Action> {
-    BUTTONS
-        .iter()
-        .find(|button| button.custom_id == custom_id)
-        .map(|button| button.action)
-}
+use crate::bot::BotContext;
 
 pub async fn start(
     state: Arc<BotContext>,
@@ -87,7 +37,3 @@ pub async fn start(
     let task = PlayerTask::new(Arc::clone(&state), guild_id, &message, session);
     state.player_tasks.spawn(task.run());
 }
-
-#[cfg(test)]
-#[path = "../../tests/discord/player.rs"]
-mod tests;

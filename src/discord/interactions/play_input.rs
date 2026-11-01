@@ -130,7 +130,7 @@ fn play_modal() -> InteractionResponse {
     }
 }
 
-/// What the user typed into the modal.
+/// What the user asked to play, through the `/play` option or the modal.
 #[derive(Debug)]
 pub(super) struct PlayInput {
     /// A link, or text to search for.
@@ -138,7 +138,8 @@ pub(super) struct PlayInput {
     pub mode: QueueMode,
 }
 
-pub(super) fn play_input(data: &ModalInteractionData) -> PlayInput {
+/// What the user typed into the modal.
+pub(super) fn modal_input(data: &ModalInteractionData) -> PlayInput {
     let mut input = PlayInput {
         query: String::new(),
         mode: QueueMode::Append,
@@ -182,5 +183,5 @@ pub(super) async fn open_modal(
 }
 
 #[cfg(test)]
-#[path = "../../../tests/discord/commands/play_modal.rs"]
+#[path = "../../../tests/discord/interactions/play_input.rs"]
 mod tests;

@@ -1,4 +1,4 @@
-//! Text helpers shared by command replies and the player.
+//! Text helpers for the player message.
 
 use std::time::Duration;
 
@@ -59,5 +59,5 @@ pub(super) fn link(label: &str, url: Option<&Url>) -> String {
 }
 
 #[cfg(test)]
-#[path = "../../tests/discord/text.rs"]
+#[path = "../../../tests/discord/player/text.rs"]
 mod tests;

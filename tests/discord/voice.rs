@@ -1,5 +1,6 @@
 use super::*;
 use twilight_cache_inmemory::ResourceType;
+use twilight_gateway::Event;
 
 fn update(cache: &DefaultInMemoryCache, user: u64, channel: Option<u64>) {
     let payload = serde_json::json!({

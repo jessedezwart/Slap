@@ -1,5 +1,5 @@
-pub mod commands;
 pub mod connection;
-pub mod events;
+pub mod gateway;
+pub mod interactions;
 pub mod player;
-mod text;
+pub mod voice;

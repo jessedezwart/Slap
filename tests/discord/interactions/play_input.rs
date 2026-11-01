@@ -41,7 +41,7 @@ fn modal_submissions_default_to_appending() {
 
     // An untouched select submits no value, which must leave the import at
     // the back of the queue.
-    let input = play_input(&data(vec![url("https://example.com/a")]));
+    let input = modal_input(&data(vec![url("https://example.com/a")]));
     assert_eq!(input.query, "https://example.com/a");
     assert_eq!(input.mode, QueueMode::Append);
     for (value, expected) in [
@@ -50,7 +50,7 @@ fn modal_submissions_default_to_appending() {
         ("replace", QueueMode::Replace),
         ("nonsense", QueueMode::Append),
     ] {
-        let input = play_input(&data(vec![
+        let input = modal_input(&data(vec![
             url("https://example.com/a"),
             mode(vec![value.into()]),
         ]));

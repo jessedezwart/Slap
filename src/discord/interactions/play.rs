@@ -9,6 +9,7 @@ use super::{CommandError, Reply, caller_channel};
 use crate::{
     audio::source::TrackSource,
     bot::BotContext,
+    discord::voice::reconcile_voice,
     media::{Input, PLAYLIST_LIMIT},
     session::{Origin, QueueEntry, QueueMode, SessionError},
 };
@@ -43,7 +44,7 @@ pub(super) async fn play(
     let cancel = state.sessions.join(guild_id, channel_id).await?;
 
     // Cover a caller leaving during the join handshake.
-    crate::discord::events::reconcile_voice(Arc::clone(state), guild_id);
+    reconcile_voice(Arc::clone(state), guild_id);
 
     let mut import = tokio::select! {
         () = cancel.cancelled() => return Err(SessionError::Ended.into()),

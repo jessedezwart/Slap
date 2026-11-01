@@ -11,7 +11,7 @@ use twilight_model::{
     },
 };
 
-use crate::{BoxError, discord::commands};
+use crate::{BoxError, discord::interactions};
 
 const INTENTS: Intents = Intents::GUILDS.union(Intents::GUILD_VOICE_STATES);
 
@@ -42,7 +42,7 @@ impl Discord {
 
         // Register play command
         twilight_client.interaction(bot_application_id)
-            .set_global_commands(&[commands::play_command()])
+            .set_global_commands(&[interactions::play_command()])
             .await?;
 
         let gateway_config = GatewayConfig::new(token, INTENTS);

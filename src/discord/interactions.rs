@@ -3,7 +3,7 @@
 mod controls;
 mod error;
 mod play;
-mod play_modal;
+mod play_input;
 
 use std::sync::Arc;
 
@@ -19,18 +19,15 @@ use twilight_model::{
     },
 };
 
-pub use self::play_modal::play_command;
+pub use self::play_input::play_command;
 use self::{
     error::CommandError,
-    play_modal::{PLAY_MODAL, PlayInput, command_input, open_modal, play_input},
+    play_input::{PLAY_MODAL, PlayInput, command_input, modal_input, open_modal},
 };
-use crate::{bot::BotContext, discord::player, session::Control};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Action {
-    OpenForm,
-    Control(Control),
-}
+use crate::{
+    bot::BotContext,
+    discord::player::{self, Action},
+};
 
 #[derive(Debug)]
 enum Request {
@@ -48,7 +45,7 @@ impl Request {
             }
             // Play modal submitted
             InteractionData::ModalSubmit(data) if data.custom_id == PLAY_MODAL => {
-                Some(Self::Play(play_input(data)))
+                Some(Self::Play(modal_input(data)))
             }
             // Button clicked
             InteractionData::MessageComponent(data) => {
