@@ -6,6 +6,8 @@ Highly performant Discord music bot that plays music **without transcode** using
 
 ## Architecture
 
+See [docs/architecture.md](docs/architecture.md).
+
 ### Key Libraries
 
 | Library | Role |
