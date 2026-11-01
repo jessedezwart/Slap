@@ -7,7 +7,6 @@ use super::{
     ytdlp::YtDlpClient,
 };
 
-/// Hands each link to the source that understands it, and searches to yt-dlp.
 pub struct Importer {
     spotify: SpotifyService,
     ytdlp: YtDlpClient,

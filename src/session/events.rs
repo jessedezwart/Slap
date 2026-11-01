@@ -3,7 +3,8 @@
 use std::sync::{Arc, Weak};
 
 use songbird::{
-    events::{Event, EventContext, EventHandler},
+    Call,
+    events::{CoreEvent, Event, EventContext, EventHandler, TrackEvent},
     tracks::PlayMode,
 };
 use tokio::sync::Notify;
@@ -12,6 +13,43 @@ use tracing::warn;
 use twilight_model::id::{Id, marker::GuildMarker};
 
 use super::{QueueEntry, SessionManager};
+
+/// Replace the call's global events with this session's handlers.
+pub fn attach(
+    call: &mut Call,
+    guild_id: Id<GuildMarker>,
+    sessions: Weak<SessionManager>,
+    cancel: &CancellationToken,
+    redraw: &Arc<Notify>,
+) {
+    // Events are set explicitly
+    call.remove_all_global_events();
+    // Handle disconnect
+    call.add_global_event(
+        CoreEvent::DriverDisconnect.into(),
+        DisconnectHandler {
+            guild_id,
+            sessions,
+            cancel: cancel.clone(),
+        },
+    );
+    // Handle track events
+    for event in [
+        TrackEvent::Play,
+        TrackEvent::Pause,
+        TrackEvent::End,
+        TrackEvent::Error,
+        TrackEvent::Playable,
+    ] {
+        call.add_global_event(
+            event.into(),
+            TrackEventHandler {
+                guild_id,
+                redraw: Arc::clone(redraw),
+            },
+        );
+    }
+}
 
 /// Turns any voice disconnect into a full teardown of the guild's pipeline.
 pub struct DisconnectHandler {

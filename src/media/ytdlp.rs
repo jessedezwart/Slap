@@ -9,7 +9,7 @@ use thiserror::Error;
 pub use client::YtDlpClient;
 pub use resolver::YtDlpResolver;
 
-/// Messages are written for the person who typed the command.
+/// Messages for the person who typed the command.
 #[derive(Debug, Error)]
 pub enum YtDlpError {
     #[error("I could not run `{program}` ({source}). Is yt-dlp installed?")]
@@ -22,7 +22,6 @@ pub enum YtDlpError {
     #[error("yt-dlp did not answer within {0:?}. Try again.")]
     Timeout(Duration),
 
-    /// The details are logged where it happens; users only need to know it failed.
     #[error("Something went wrong getting the media. Try again later.")]
     Failed,
 
