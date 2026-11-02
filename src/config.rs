@@ -57,7 +57,7 @@ impl SpotifyConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct YtDlpConfig {
     /// Binary to spawn. Always invoked as argv, never through a shell.
     pub program: String,

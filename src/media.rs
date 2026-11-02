@@ -1,11 +1,3 @@
-//! Finding what to play: the importer turns links into [`ImportedTrack`]s, the resolver
-//! turns a track into a [`StreamInfo`]. Nothing here touches audio bytes;
-//! that is [`crate::audio`]'s job.
-//!
-//! The types below describe media independent of where it came from. yt-dlp
-//! and Spotify both produce them; they know nothing about either source, or
-//! about the queue.
-
 pub mod importer;
 pub mod search_cache;
 pub mod spotify;
@@ -27,7 +19,7 @@ pub const PLAYLIST_LIMIT: usize = 1000;
 const EXPIRY_MARGIN: Duration = Duration::from_secs(120);
 
 /// Everything needed to open the audio stream, plus what we show the user.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StreamInfo {
     pub media_url: String,
     pub headers: HeaderMap,
@@ -50,7 +42,7 @@ impl StreamInfo {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct Metadata {
     pub title: Option<String>,
     pub duration: Option<Duration>,
@@ -69,7 +61,6 @@ impl Metadata {
 }
 
 /// One entry of an import.
-#[derive(Debug)]
 pub struct ImportedTrack {
     /// How to find the audio, now or again later.
     pub target: Target,
@@ -80,7 +71,7 @@ pub struct ImportedTrack {
 }
 
 /// The result of importing a link: one track, or the entries of a playlist.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Import {
     pub tracks: Vec<ImportedTrack>,
     /// Entries that were local files, podcasts, or otherwise unplayable.
@@ -92,7 +83,6 @@ pub struct Import {
 }
 
 /// Searches are kept lazy, just like direct video URLs.
-#[derive(Debug)]
 pub enum Target {
     Url(Url),
     Search(SearchQuery),
@@ -105,7 +95,7 @@ impl From<Url> for Target {
 }
 
 /// A recording described by a catalog, to be found on an audio host.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SearchQuery {
     /// Stable identity of the recording in its catalog (e.g. Spotify track ID)
     pub key: String,

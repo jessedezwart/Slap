@@ -179,7 +179,8 @@ async fn actionable_errors_and_empty_playlist() {
         disabled
             .playlist_by_id("unused")
             .await
-            .unwrap_err()
+            .err()
+            .unwrap()
             .to_string()
             .contains("SPOTIFY_CLIENT_ID")
     );
@@ -197,7 +198,8 @@ async fn actionable_errors_and_empty_playlist() {
             service(&base, Some("refresh"))
                 .playlist_by_id("playlist")
                 .await
-                .unwrap_err()
+                .err()
+                .unwrap()
                 .to_string()
                 .contains(expected),
             "HTTP {status}"

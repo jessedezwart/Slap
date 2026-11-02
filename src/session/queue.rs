@@ -21,14 +21,12 @@ use crate::media::Metadata;
 const PRELOAD_LEAD: Duration = Duration::from_secs(10);
 
 /// A track
-#[derive(Debug)]
 pub struct QueueEntry {
     pub metadata: Metadata,
     pub origin: Arc<Origin>,
 }
 
 /// Details about the track import request
-#[derive(Debug)]
 pub struct Origin {
     pub requester: Id<UserMarker>,
     pub requester_name: String,
