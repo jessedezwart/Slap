@@ -27,16 +27,20 @@ impl SpotifyService {
     }
 
     pub async fn import(&self, url: &Url) -> Result<Import, SpotifyError> {
+        let link = link(url)?;
         let import = async {
-            match link(url)? {
+            match link {
                 Link::Playlist(id) => self.playlist_by_id(id).await,
                 Link::Album(id) => self.album_by_id(id).await,
                 Link::Track(id) => self.track_by_id(id).await,
             }
         };
-        tokio::time::timeout(IMPORT_TIMEOUT, import)
+        let import = tokio::time::timeout(IMPORT_TIMEOUT, import)
             .await
-            .map_err(|_| SpotifyError::Timeout)?
+            .map_err(|_| SpotifyError::Timeout)??;
+        info!(?link, name = import.playlist_name.as_deref(), tracks = import.tracks.len(),
+            skipped = import.skipped, truncated = import.truncated, "Spotify import finished");
+        Ok(import)
     }
 
     pub(super) async fn track_by_id(&self, id: &str) -> Result<Import, SpotifyError> {

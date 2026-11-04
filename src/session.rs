@@ -17,7 +17,7 @@ use dashmap::DashMap;
 use songbird::{Call, Songbird, error::JoinError};
 use tokio::sync::{Mutex, Notify, OwnedMutexGuard};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use twilight_model::id::{
     Id,
     marker::{ChannelMarker, GuildMarker, MessageMarker},
@@ -25,7 +25,7 @@ use twilight_model::id::{
 
 pub use self::{
     ownership::Control,
-    queue::{Origin, QueueEntry, QueueHead, QueueMode},
+    queue::{Origin, Prefetch, QueueEntry, QueueHead, QueueMode},
 };
 
 #[derive(Clone)]
@@ -123,6 +123,7 @@ impl SessionManager {
             }
             // Already in a channel, return the existing session token
             if !current.cancel.is_cancelled() && self.songbird.get(guild_id).is_some() {
+                debug!(%guild_id, %channel_id, "reusing session");
                 return Ok(current.cancel.clone());
             }
         }
@@ -162,7 +163,7 @@ impl SessionManager {
             return Err(error.into());
         }
 
-        debug!(%guild_id, %channel_id, "joined voice channel");
+        info!(%guild_id, %channel_id, "session created");
 
         tokio::spawn(Self::leave_when_idle(
             Arc::downgrade(self),
@@ -216,7 +217,7 @@ impl SessionManager {
             warn!(%guild_id, %error, "failed to remove voice connection");
         }
 
-        debug!(%guild_id, reason, "tore down voice pipeline");
+        info!(%guild_id, reason, "session ended");
     }
 
     pub fn is_known_guild(&self, guild_id: Id<GuildMarker>) -> bool {

@@ -6,6 +6,7 @@ use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
+use tracing::{debug, info};
 
 use super::SpotifyError;
 use crate::config::SpotifyConfig;
@@ -67,6 +68,11 @@ impl SpotifyClient {
             Some(token) => vec![("grant_type", "refresh_token"), ("refresh_token", token)],
             None => vec![("grant_type", "client_credentials")],
         };
+        let grant = if auth.refresh_token.is_some() {
+            "refresh_token"
+        } else {
+            "client_credentials"
+        };
         let response = self
             .http
             .post(&self.token_url)
@@ -95,6 +101,7 @@ impl SpotifyClient {
             auth.refresh_token = Some(rotated);
         }
         let lifetime = Duration::from_secs(token.expires_in.unwrap_or(3600));
+        info!(grant, lifetime_secs = lifetime.as_secs(), "Spotify access token fetched");
         auth.access = Some((
             token.access_token.clone(),
             Instant::now() + lifetime.saturating_sub(ACCESS_TOKEN_EXPIRY_MARGIN),
@@ -117,6 +124,7 @@ impl SpotifyClient {
             token = self.access_token(true).await?;
             response = request(&token).send().await?;
         }
+        debug!(path, status = response.status().as_u16(), "Spotify API request");
         let response = check_response(response)?;
 
         serde_json::from_slice(&response.bytes().await?)

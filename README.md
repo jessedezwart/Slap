@@ -125,13 +125,13 @@ Configure `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` in `.env`, then restar
 1. Go to [Discord Developer Portal](https://discord.com/developers/home>)
 2. Create an application
 3. Go to **Overview** > **Bot**
-4. Get the token (might need to click **Reset Token**)
+4. Click **Reset Token** to generate a new token
 5. Set in .env
 
 #### Create invite link
 
 Replace the Client ID in this url with the application's client ID (can be found in **Overview** > **General Information**).
-`https://discord.com/oauth2/authorize?client_id={client_id}&scope=bot%20applications.commands&permissions=3148800)`
+`https://discord.com/oauth2/authorize?client_id={client_id}&scope=bot%20applications.commands&permissions=3148800`
 
 ##### Permissions
 

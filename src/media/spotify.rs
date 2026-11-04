@@ -31,14 +31,18 @@ pub enum SpotifyError {
     /// Private playlists and Spotify's own editorial playlists are reported
     /// as missing too.
     #[error(
-        "playlist not found — it may be private or one of Spotify's own playlists, which the bot cannot read"
+        "playlist not found — it may be private or one of Spotify's own playlists, which the bot cannot read. \
+         To play it anyway, copy it to YouTube Music with a tool like \
+         <https://www.tunemymusic.com/transfer/spotify-to-youtube-music> and play that link instead"
     )]
     PlaylistNotFound,
 
     /// Spotify only shows a Development Mode app the tracks of playlists its
     /// own account owns or collaborates on.
     #[error(
-        "Spotify only lets the bot read playlists made by the bot owner's account; albums and single tracks work for any link"
+        "Spotify only lets the bot read playlists made by the bot owner's account; albums and single tracks work for any link. \
+         To play it anyway, copy it to YouTube Music with a tool like \
+         <https://www.tunemymusic.com/transfer/spotify-to-youtube-music> and play that link instead"
     )]
     PlaylistNotOwned,
 

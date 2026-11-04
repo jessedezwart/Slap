@@ -3,7 +3,7 @@ use std::{sync::Arc, time::UNIX_EPOCH};
 use twilight_model::channel::message::component::{Button, ButtonStyle};
 
 use super::*;
-use crate::{discord::player::button_action, media::Metadata};
+use crate::{discord::player::button_action, media::Metadata, session::Prefetch};
 
 /// A queue entry for `metadata`, queued by user 30 (Ada) outside any playlist.
 fn entry(metadata: Metadata) -> QueueEntry {
@@ -17,6 +17,7 @@ fn entry(metadata: Metadata) -> QueueEntry {
             skipped: 0,
             truncated: false,
         }),
+        prefetch: Prefetch::default(),
     }
 }
 

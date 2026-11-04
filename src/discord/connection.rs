@@ -41,9 +41,12 @@ impl Discord {
         info!(%bot_application_id, %bot_user_id, "authenticated");
 
         // Register play command
+        let commands = [interactions::play_command()];
         twilight_client.interaction(bot_application_id)
-            .set_global_commands(&[interactions::play_command()])
+            .set_global_commands(&commands)
             .await?;
+        let names: Vec<_> = commands.iter().map(|command| command.name.as_str()).collect();
+        info!(commands = ?names, "registered commands");
 
         let gateway_config = GatewayConfig::new(token, INTENTS);
         let shards: Vec<_> =
@@ -53,7 +56,7 @@ impl Discord {
             .await?
             .collect();
 
-        info!(shards = shards.len(), "starting shards");
+        info!(shards = shards.len(), "created shards");
 
         Ok(Self {
             twilight_client,

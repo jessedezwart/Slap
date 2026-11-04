@@ -147,7 +147,7 @@ impl RangedDownload {
         }
 
         if received == 0 {
-            warn!(offset = self.offset, expected_bytes = ?self.file.content_length,
+            warn!(offset = self.offset, expected_bytes = self.file.content_length,
                 "audio response made no progress");
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -166,7 +166,7 @@ impl RangedDownload {
                 Ok(None)
             }
             Err(error) => {
-                warn!(offset = self.offset, expected_bytes = ?self.file.content_length, %error,
+                warn!(offset = self.offset, expected_bytes = self.file.content_length, %error,
                     "audio download interrupted");
                 Err(io::Error::other(error))
             }
@@ -181,13 +181,13 @@ async fn request_window(
     cancel: &CancellationToken,
 ) -> Result<Response, AudioError> {
     // Clamp the window to the end of the file when it's known.
-    let range = window_range(offset, file.content_length);
+    let range_header = window_range(offset, file.content_length);
 
     let request = file
         .http
         .get(&file.url)
         .headers(file.headers.clone())
-        .header(RANGE, range);
+        .header(RANGE, &range_header);
 
     let response = tokio::select! {
         // If the cancellation token is triggered, stop.
@@ -200,6 +200,7 @@ async fn request_window(
     if !status.is_success() {
         return Err(AudioError::HttpStatus(status));
     }
+    debug!(range = %range_header, status = status.as_u16(), "window received");
 
     Ok(response)
 }

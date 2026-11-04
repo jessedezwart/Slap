@@ -1,2 +1,3 @@
-No build checks unless asked.
-Don't stage changes.
+- No builds or tests, only `cargo check` and `cargo clippy`.
+- Don't stage changes.
+- Prefer the edit-tool over CLI for editing.

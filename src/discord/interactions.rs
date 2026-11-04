@@ -8,7 +8,7 @@ mod play_input;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
-use tracing::{Span, debug, info, warn};
+use tracing::{Instrument, info, info_span, warn};
 use twilight_model::{
     application::interaction::{Interaction, InteractionData},
     channel::message::{AllowedMentions, MessageFlags},
@@ -62,17 +62,26 @@ enum ReplyMode {
     Silent,
 }
 
-#[tracing::instrument(skip_all, fields(
-    guild_id = interaction.guild_id.map(|id| id.get()), user_id = interaction.author_id().map(|id| id.get()),
-    interaction_id = %interaction.id, command = tracing::field::Empty,
-))]
 pub async fn handle_interaction(state: Arc<BotContext>, interaction: Interaction) {
-    let Some(request) = Request::read(&interaction) else {
+    let span = info_span!(
+        "interaction",
+        guild = %guild_name(&state, &interaction),
+        user = %interaction.author().map_or("unknown", |user| user.name.as_str()),
+    );
+    handle(&state, &interaction).instrument(span).await;
+}
+
+async fn handle(state: &Arc<BotContext>, interaction: &Interaction) {
+    let Some(request) = Request::read(interaction) else {
         warn!(%interaction.id, "unhandled interaction");
         return;
     };
-    Span::current().record("command", tracing::field::debug(&request));
-    let (state, interaction) = (&state, &interaction);
+    match &request {
+        Request::Play(input) => {
+            info!(command = "play", query = %input.query, mode = ?input.mode, "received");
+        }
+        Request::Button(action) => info!(command = "button", ?action, "received"),
+    }
     match request {
         Request::Play(input) => {
             let work = play::play(state, interaction, &input.query, input.mode);
@@ -100,15 +109,14 @@ async fn run(
     mode: ReplyMode,
     work: impl Future<Output = Result<Reply, CommandError>>,
 ) {
-    debug!("interaction received");
     if let Err(error) = defer(state, interaction, mode).await {
         warn!(%error, "failed to acknowledge interaction");
         return;
     }
     let result = work.await;
     match &result {
-        Ok(_) => info!("interaction completed"),
-        Err(error) => warn!(%error, "interaction rejected or failed"),
+        Ok(_) => info!("completed"),
+        Err(error) => warn!(%error, "failed"),
     }
     if let Err(error) = respond(state, interaction, mode, result).await {
         warn!(%error, "failed to send interaction response");
@@ -169,6 +177,17 @@ impl Reply {
             message: message.into(),
             player: None,
         }
+    }
+}
+
+/// Name of the guild the interaction came from, for logs.
+fn guild_name(state: &BotContext, interaction: &Interaction) -> String {
+    match interaction.guild_id {
+        Some(id) => state
+            .discord_cache
+            .guild(id)
+            .map_or_else(|| id.to_string(), |guild| guild.name().to_owned()),
+        None => "DM".to_owned(),
     }
 }
 

@@ -3,7 +3,7 @@
 use std::{sync::Arc, time::Duration};
 
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use twilight_gateway::{CloseFrame, Event, EventTypeFlags, Shard, StreamExt as _};
 
 use crate::{
@@ -78,6 +78,11 @@ fn handle_event(state: &Arc<BotContext>, event: Event) {
             };
             reconcile_voice(Arc::clone(state), guild_id);
         }
+        Event::Ready(ready) => {
+            info!(shard = ready.shard.map(|shard| shard.number()), guilds = ready.guilds.len(),
+                "shard ready");
+        }
+        Event::Resumed => info!("shard resumed"),
         Event::GatewayClose(frame) => {
             warn!(?frame, "gateway connection closed");
         }

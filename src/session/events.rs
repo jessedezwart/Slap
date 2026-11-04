@@ -5,14 +5,14 @@ use std::sync::{Arc, Weak};
 use songbird::{
     Call,
     events::{CoreEvent, Event, EventContext, EventHandler, TrackEvent},
-    tracks::PlayMode,
+    tracks::{PlayMode, TrackQueue},
 };
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use twilight_model::id::{Id, marker::GuildMarker};
 
-use super::{QueueEntry, SessionManager};
+use super::{QueueEntry, SessionManager, queue::prefetch_next};
 
 /// Replace the call's global events with this session's handlers.
 pub fn attach(
@@ -49,6 +49,9 @@ pub fn attach(
             },
         );
     }
+    // Look up the next track whenever one starts playing
+    let queue = call.queue().clone();
+    call.add_global_event(TrackEvent::Play.into(), PrefetchNext { queue });
 }
 
 /// Turns any voice disconnect into a full teardown of the guild's pipeline.
@@ -109,6 +112,19 @@ impl EventHandler for TrackEventHandler {
                 }
             }
         }
+        None
+    }
+}
+
+/// Starts looking up the next track as soon as the one before it plays.
+pub struct PrefetchNext {
+    pub queue: TrackQueue,
+}
+
+#[async_trait::async_trait]
+impl EventHandler for PrefetchNext {
+    async fn act(&self, _ctx: &EventContext<'_>) -> Option<Event> {
+        prefetch_next(&self.queue);
         None
     }
 }

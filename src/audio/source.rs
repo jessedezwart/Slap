@@ -5,14 +5,19 @@ use std::{sync::Arc, time::Duration};
 use reqwest::Client;
 use songbird::input::{AsyncAdapterStream, AudioStream, AudioStreamError, Compose, Input};
 use symphonia_core::io::MediaSource;
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+use tracing::{Instrument, Span, debug};
 
 use super::{
     AudioError,
     download::RemoteFile,
     stream::{HttpStream, budget_bytes},
 };
-use crate::media::{StreamInfo, Target, ytdlp::YtDlpResolver};
+use crate::{
+    media::{StreamInfo, Target, ytdlp::YtDlpResolver},
+    session::Prefetch,
+};
 
 /// Bot-wide clients and settings.
 pub struct AudioContext {
@@ -25,11 +30,23 @@ pub struct AudioContext {
 }
 
 pub struct TrackSource {
-    target: Target,
-    stream: Option<StreamInfo>,
+    lookup: Arc<Lookup>,
+}
+
+/// What a track resolves to, shared by songbird's source and the queue's
+/// prefetch so that only one of them runs yt-dlp.
+struct Lookup {
+    state: Mutex<LookupState>,
     audio: Arc<AudioContext>,
     /// Cancellation token, used for the complete guild.
     cancel: CancellationToken,
+    /// The span it was queued in, so songbird loading it still logs who asked.
+    span: Span,
+}
+
+struct LookupState {
+    target: Target,
+    stream: Option<StreamInfo>,
 }
 
 impl TrackSource {
@@ -39,17 +56,53 @@ impl TrackSource {
         audio: Arc<AudioContext>,
         cancel: CancellationToken,
     ) -> Self {
-        Self {
+        let state = LookupState {
             target: target.into(),
             stream,
-            audio,
-            cancel,
+        };
+        Self {
+            lookup: Arc::new(Lookup {
+                state: Mutex::new(state),
+                audio,
+                cancel,
+                span: Span::current(),
+            }),
         }
     }
 
-    async fn resolve(&mut self) -> Result<StreamInfo, AudioError> {
+    /// Looks up the media URL in the background, ahead of the track's turn.
+    pub fn prefetch(&self) -> Prefetch {
+        let lookup = Arc::downgrade(&self.lookup);
+        Prefetch::new(move || {
+            // The track has left the queue.
+            let Some(lookup) = lookup.upgrade() else {
+                return;
+            };
+            let span = lookup.span.clone();
+            tokio::spawn(
+                async move {
+                    if let Err(error) = lookup.resolve().await {
+                        debug!(%error, "prefetch failed; retrying when the track plays");
+                    }
+                }
+                .instrument(span),
+            );
+        })
+    }
+
+    #[cfg(test)]
+    async fn resolve(&self) -> Result<StreamInfo, AudioError> {
+        self.lookup.resolve().await
+    }
+}
+
+impl Lookup {
+    async fn resolve(&self) -> Result<StreamInfo, AudioError> {
+        // Held across yt-dlp, so a lookup already in flight is waited for, not repeated.
+        let mut state = self.state.lock().await;
+
         // songbird reopens the source on a seek; reuse what still works.
-        if let Some(stream) = self.stream.as_ref().filter(|stream| stream.is_fresh()) {
+        if let Some(stream) = state.stream.as_ref().filter(|stream| stream.is_fresh()) {
             return Ok(stream.clone());
         }
 
@@ -61,17 +114,17 @@ impl TrackSource {
         let resolved = tokio::select! {
             biased;
             () = self.cancel.cancelled() => return Err(AudioError::Cancelled),
-            result = self.audio.url_resolver.resolve(&self.target) => result?,
+            result = self.audio.url_resolver.resolve(&state.target) => result?,
         };
 
         // If the target was a search query, and we got a resolved URL, update the target to be that URL.
-        if let Target::Search(_) = self.target
+        if let Target::Search(_) = state.target
             && let Some(url) = resolved.metadata.webpage_url.clone()
         {
-            self.target = url.into();
+            state.target = url.into();
         }
 
-        self.stream = Some(resolved.clone());
+        state.stream = Some(resolved.clone());
         Ok(resolved)
     }
 }
@@ -87,20 +140,25 @@ impl Compose for TrackSource {
     async fn create_async(
         &mut self,
     ) -> Result<AudioStream<Box<dyn MediaSource>>, AudioStreamError> {
-        let resolved = self.resolve().await.map_err(fail)?;
+        let lookup = &self.lookup;
+        async {
+            let resolved = lookup.resolve().await.map_err(fail)?;
 
-        let file = RemoteFile::new(self.audio.http.clone(), &resolved);
-        let budget_bytes = budget_bytes(self.audio.buffer, resolved.bitrate_bps);
+            let file = RemoteFile::new(lookup.audio.http.clone(), &resolved);
+            let budget_bytes = budget_bytes(lookup.audio.buffer, resolved.bitrate_bps);
 
-        // Prefill buffer
-        let stream = HttpStream::open(file, budget_bytes, &self.cancel, 0)
-            .await
-            .map_err(fail)?;
+            // Prefill buffer
+            let stream = HttpStream::open(file, budget_bytes, &lookup.cancel, 0)
+                .await
+                .map_err(fail)?;
 
-        Ok(AudioStream {
-            input: Box::new(AsyncAdapterStream::new(Box::new(stream), budget_bytes))
-                as Box<dyn MediaSource>,
-        })
+            Ok(AudioStream {
+                input: Box::new(AsyncAdapterStream::new(Box::new(stream), budget_bytes))
+                    as Box<dyn MediaSource>,
+            })
+        }
+        .instrument(lookup.span.clone())
+        .await
     }
 
     fn should_create_async(&self) -> bool {

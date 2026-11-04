@@ -16,6 +16,7 @@ use songbird::input::{AsyncMediaSource, AudioStreamError};
 use sync_wrapper::SyncWrapper;
 use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 use tokio_util::{io::StreamReader, sync::CancellationToken};
+use tracing::info;
 
 use super::{
     AudioError,
@@ -38,6 +39,11 @@ pub fn budget_bytes(buffer: Duration, bitrate_bps: Option<u32>) -> usize {
     usize::try_from(bytes)
         .unwrap_or(MAX_BUFFER_BYTES)
         .clamp(MIN_BUFFER_BYTES, MAX_BUFFER_BYTES)
+}
+
+/// Byte count in megabytes, for logs.
+fn mb(bytes: u64) -> String {
+    format!("{:.2} MB", bytes as f64 / 1_000_000.0)
 }
 
 pub struct HttpStream {
@@ -79,6 +85,8 @@ impl HttpStream {
             buffered += bytes.len() as u64;
             prefilled.push(Ok(bytes));
         }
+        info!(offset, buffered = %mb(buffered), total = %file.content_length.map_or_else(|| "unknown".to_owned(), mb),
+            "buffer prefilled");
 
         // Turn byte vector into a stream, chain it with the rest of the download.
         let bytes = stream::iter(prefilled)

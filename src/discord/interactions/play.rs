@@ -85,6 +85,7 @@ pub(super) async fn play(
             let entry = QueueEntry {
                 metadata: track.metadata,
                 origin: Arc::clone(&origin),
+                prefetch: source.prefetch(),
             };
             (source.into(), entry)
         })

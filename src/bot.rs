@@ -59,6 +59,7 @@ impl Bot {
             bot_user_id,
             shards,
         } = Discord::connect(config.token).await?;
+        info!("connected to Discord");
 
         let senders: HashMap<_, _> = shards
             .iter()
@@ -71,6 +72,7 @@ impl Bot {
             bot_user_id,
             SongbirdConfig::default().preallocated_tracks(2),
         ));
+        info!("created songbird instance");
 
         // Create the session manager
         let sessions = SessionManager::new(Arc::clone(&songbird), config.idle_timeout);
@@ -80,11 +82,16 @@ impl Bot {
             .search_cache_path
             .as_deref()
             .and_then(SearchCache::open_or_skip);
+        info!(enabled = search_cache.is_some(), "created search cache");
 
         // Create the media clients
         let ytdlp = YtDlpClient::new(config.ytdlp);
         let resolver = YtDlpResolver::new(ytdlp.clone(), search_cache);
-        let importer = Importer::new(SpotifyService::new(config.spotify)?, ytdlp);
+        info!("created YouTube client");
+        let spotify_configured = config.spotify.is_some();
+        let spotify = SpotifyService::new(config.spotify)?;
+        info!(configured = spotify_configured, "created Spotify client");
+        let importer = Importer::new(spotify, ytdlp);
 
         // Create the bot state
         let state = Arc::new(BotContext {
@@ -92,7 +99,7 @@ impl Bot {
             http: Arc::clone(&twilight_client),
             discord_cache: Arc::new(
                 DefaultInMemoryCache::builder()
-                    .resource_types(ResourceType::VOICE_STATE)
+                    .resource_types(ResourceType::GUILD | ResourceType::VOICE_STATE)
                     .build(),
             ),
             songbird,

@@ -5,7 +5,7 @@ use std::{collections::VecDeque, sync::Arc, time::Duration};
 use songbird::{
     Call,
     input::Input,
-    tracks::{Track, TrackHandle},
+    tracks::{Track, TrackHandle, TrackQueue},
 };
 use tokio_util::sync::CancellationToken;
 use twilight_model::id::{
@@ -24,6 +24,31 @@ const PRELOAD_LEAD: Duration = Duration::from_secs(10);
 pub struct QueueEntry {
     pub metadata: Metadata,
     pub origin: Arc<Origin>,
+    pub prefetch: Prefetch,
+}
+
+/// Starts looking up a queued track's media URL ahead of its turn.
+#[derive(Clone, Default)]
+pub struct Prefetch(Option<Arc<dyn Fn() + Send + Sync>>);
+
+impl Prefetch {
+    pub fn new(start: impl Fn() + Send + Sync + 'static) -> Self {
+        Self(Some(Arc::new(start)))
+    }
+
+    fn start(&self) {
+        if let Some(start) = &self.0 {
+            start();
+        }
+    }
+}
+
+/// Look up the track after the playing one, so it is ready when its turn comes.
+pub(super) fn prefetch_next(queue: &TrackQueue) {
+    let next = queue.modify_queue(|queue| queue.get(1).map(|track| track.handle()));
+    if let Some(next) = next {
+        next.data::<QueueEntry>().prefetch.start();
+    }
 }
 
 /// Details about the track import request
@@ -91,6 +116,7 @@ impl SessionManager {
         if mode == QueueMode::Next && was_playing {
             call.queue().modify_queue(|queue| play_next(queue, count));
         }
+        prefetch_next(call.queue());
 
         // Trigger player component redraw
         session.redraw.notify_one();

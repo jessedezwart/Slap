@@ -3,7 +3,7 @@
 use std::process::Stdio;
 
 use tokio::{process::Command, time};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use url::Url;
 
 use super::{YtDlpError, parse, resolver::SearchSource};
@@ -141,6 +141,7 @@ impl YtDlpClient {
             warn!(%code, %stderr, input, "yt-dlp failed");
             return Err(YtDlpError::Failed);
         }
+        info!(input, "yt-dlp lookup finished");
 
         Ok(output.stdout)
     }

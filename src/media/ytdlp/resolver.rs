@@ -1,12 +1,10 @@
 //! Turning a track into something playable: a media URL plus the headers
 //! needed to fetch it.
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Duration};
 
-use tracing::{debug, warn};
+use dashmap::DashMap;
+use tracing::{debug, info, warn};
 use url::Url;
 
 use super::{YtDlpClient, parse};
@@ -19,12 +17,18 @@ pub struct YtDlpResolver {
     client: YtDlpClient,
     /// Skips the search for tracks resolved on an earlier run.
     cache: Option<Arc<SearchCache>>,
+    /// Media URLs resolved this run, keyed by yt-dlp input. Reused until they expire.
+    streams: Arc<DashMap<String, StreamInfo>>,
 }
 
 impl YtDlpResolver {
     /// `client` is usually a clone of the one importing links.
     pub fn new(client: YtDlpClient, cache: Option<Arc<SearchCache>>) -> Self {
-        Self { client, cache }
+        Self {
+            client,
+            cache,
+            streams: Arc::default(),
+        }
     }
 
     /// Resolve a link, or find and resolve the recording a search asks for.
@@ -42,7 +46,7 @@ impl YtDlpResolver {
     /// requested track.
     async fn resolve_search(&self, query: &SearchQuery) -> Result<StreamInfo, MediaError> {
         if let Some(url) = self.cache.as_ref().and_then(|c| c.get(&query.key)) {
-            debug!(key = query.key, "reusing previously resolved upload");
+            info!(key = query.key, %url, "search cache hit");
             match self.resolve_input(&url).await {
                 Ok(resolved) => return Ok(resolved),
                 Err(error) if error.is_fatal() => return Err(error),
@@ -70,8 +74,7 @@ impl YtDlpResolver {
                 self.remember(query, &resolved).await;
                 return Ok(resolved);
             }
-            debug!(source = source.name(), title = ?resolved.metadata.title,
-                duration_secs = resolved.metadata.duration.map(|d| d.as_secs()),
+            debug!(source = source.name(), title = resolved.metadata.title.as_deref(),
                 "search result has the wrong duration");
         }
         warn!(query = ?text, "no search result matched");
@@ -93,11 +96,18 @@ impl YtDlpResolver {
 
     /// Run `yt-dlp -j` and turn its JSON into a [`StreamInfo`].
     async fn resolve_input(&self, input: &str) -> Result<StreamInfo, MediaError> {
-        let started = Instant::now();
+        if let Some(stream) = self.streams.get(input).filter(|stream| stream.is_fresh()) {
+            info!(input, "stream cache hit");
+            return Ok(stream.clone());
+        }
         let output = self.client.video_json(input).await?;
         let resolved = parse::parse_stream(&output)?;
-        debug!(title = ?resolved.metadata.title, duration_secs = resolved.metadata.duration.map(|d| d.as_secs()),
-            elapsed_ms = started.elapsed().as_millis(), "audio source resolved");
+        info!(title = resolved.metadata.title.as_deref(), "audio source resolved");
+        // Without an expiry there is no telling when the URL stops working.
+        if resolved.expires_at.is_some() {
+            self.streams.retain(|_, stream| stream.is_fresh());
+            self.streams.insert(input.to_owned(), resolved.clone());
+        }
         Ok(resolved)
     }
 }

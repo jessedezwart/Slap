@@ -8,6 +8,10 @@ lto = "fat"
 codegen-units = 1
 strip = true
 
+[profile.dev.package.serenity-voice-model]
+debug-assertions = false
+
+
 [dependencies]
 songbird = { version = "0.6", default-features = false, features = [
     "driver",

@@ -47,7 +47,7 @@ async fn youtube_audio_parses_as_opus() {
     });
 
     let cancel = CancellationToken::new();
-    let mut source = TrackSource::new(url, None, audio(resolver), cancel.clone());
+    let source = TrackSource::new(url, None, audio(resolver), cancel.clone());
 
     let metadata = source
         .resolve()
@@ -112,7 +112,7 @@ fn listed_stream(expires_at: Option<std::time::SystemTime>) -> StreamInfo {
 
 #[tokio::test]
 async fn a_listed_stream_plays_without_the_resolver() {
-    let mut source = source_without_ytdlp(Some(listed_stream(None)));
+    let source = source_without_ytdlp(Some(listed_stream(None)));
 
     let stream = source.resolve().await.expect("the listed stream is used");
     assert_eq!(stream.media_url, "https://cdn/song");
@@ -125,7 +125,7 @@ async fn a_listed_stream_plays_without_the_resolver() {
 #[tokio::test]
 async fn an_expired_listed_stream_is_resolved_again() {
     let expired = std::time::SystemTime::now() - Duration::from_secs(60);
-    let mut source = source_without_ytdlp(Some(listed_stream(Some(expired))));
+    let source = source_without_ytdlp(Some(listed_stream(Some(expired))));
 
     // The resolver was asked, and it cannot run here.
     assert!(source.resolve().await.is_err());
