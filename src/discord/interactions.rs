@@ -4,6 +4,7 @@ mod controls;
 mod error;
 mod play;
 mod play_input;
+mod stats;
 
 use std::sync::Arc;
 
@@ -97,6 +98,11 @@ async fn handle(state: &Arc<BotContext>, interaction: &Interaction) {
         Request::Button(Action::OpenForm) => {
             if let Err(error) = open_modal(state, interaction).await {
                 warn!(%error, "failed to open the play modal");
+            }
+        }
+        Request::Button(Action::Stats) => {
+            if let Err(error) = stats::show(state, interaction).await {
+                warn!(%error, "failed to show stats");
             }
         }
     }

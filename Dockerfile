@@ -73,6 +73,7 @@ COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint
 
 RUN install -d -o bot -g bot /app/data /app/secrets
 ENV CACHE_PATH=/app/data/cache.redb
+ENV STATS_PATH=/app/data/stats.redb
 
 # No USER: the entrypoint drops from root to the owner of secrets/ (or bot).
 WORKDIR /app

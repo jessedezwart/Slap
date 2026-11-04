@@ -26,6 +26,9 @@ flowchart TB
     media -.-> ytdlp(["yt-dlp process"])
     media -.-> spotify(["Spotify API"])
     media -.-> redb(["redb file"])
+    session --> history["history<br/>all-time play stats"]
+    discord --> history
+    history -.-> statsdb(["redb file"])
     audio -.-> host(["Audio host"])
 ```
 
@@ -131,6 +134,7 @@ flowchart LR
     read -->|"/play with input<br/>modal submit"| play["play"]
     read -->|"/play without input<br/>Add button"| modal["open_modal"]
     read -->|"Pause, Resume,<br/>Skip, Stop"| control["SessionManager::control"]
+    read -->|"Stats button"| stats["PlayHistory::summary"]
     reconcile --> teardownif["teardown_if"]
 
     driver(["songbird driver"]) -->|DriverDisconnect| disconnect["DisconnectHandler"]

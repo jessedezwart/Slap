@@ -24,11 +24,14 @@ use twilight_model::id::{
     marker::{ChannelMarker, GuildMarker, MessageMarker},
 };
 
+#[cfg(test)]
+pub use self::stats::StartedWith;
 pub use self::{
     ownership::Control,
     queue::{Origin, Prefetch, QueueEntry, QueueHead, QueueMode},
-    stats::{PlayStats, PlayTally},
+    stats::{PlayStats, PlayTally, Played},
 };
+use crate::history::PlayHistory;
 
 /// How long teardown waits for the current track's play time.
 const PLAY_TIME_TIMEOUT: Duration = Duration::from_secs(1);
@@ -84,15 +87,22 @@ pub struct SessionManager {
     idle_timeout: Duration,
     /// Set at shutdown, after which no session can start.
     closed: AtomicBool,
+    /// Where each session's stats are added once it ends, if anywhere.
+    history: Option<Arc<PlayHistory>>,
 }
 
 impl SessionManager {
-    pub fn new(songbird: Arc<Songbird>, idle_timeout: Duration) -> Arc<Self> {
+    pub fn new(
+        songbird: Arc<Songbird>,
+        idle_timeout: Duration,
+        history: Option<Arc<PlayHistory>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             songbird,
             guilds: DashMap::new(),
             idle_timeout,
             closed: AtomicBool::new(false),
+            history,
         })
     }
 
@@ -228,12 +238,25 @@ impl SessionManager {
         };
         let playing = match current {
             Some(track) => match tokio::time::timeout(PLAY_TIME_TIMEOUT, track.get_info()).await {
-                Ok(Ok(info)) => Some(info.play_time),
+                Ok(Ok(info)) => Some((info.play_time, track.data::<QueueEntry>())),
                 _ => None,
             },
             None => None,
         };
-        session.played.finish(playing);
+        session.played.finish(
+            playing
+                .as_ref()
+                .map(|(play_time, entry)| (*play_time, &**entry)),
+        );
+
+        if let Some(history) = &self.history {
+            let history = Arc::clone(history);
+            let stats = session.played.stats();
+            let write = tokio::task::spawn_blocking(move || history.record(guild_id, &stats));
+            if let Err(error) = write.await {
+                warn!(%guild_id, %error, "failed to save play history");
+            }
+        }
 
         session.cancel.cancel();
 

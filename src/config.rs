@@ -29,6 +29,8 @@ pub struct Config {
     pub progress_interval: Duration,
     /// Where the search cache lives. `CACHE_PATH=` disables it.
     pub search_cache_path: Option<PathBuf>,
+    /// Where all-time play stats live. `STATS_PATH=` disables them.
+    pub stats_path: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -104,12 +106,8 @@ impl Config {
         Ok(Self {
             token,
             spotify: SpotifyConfig::from_env()?,
-            // Unlike the other settings, set-but-empty means "off" here.
-            search_cache_path: match env::var("CACHE_PATH") {
-                Ok(path) if path.trim().is_empty() => None,
-                Ok(path) => Some(PathBuf::from(path.trim())),
-                Err(_) => Some(PathBuf::from("cache.redb")),
-            },
+            search_cache_path: optional_path("CACHE_PATH", "cache.redb"),
+            stats_path: optional_path("STATS_PATH", "stats.redb"),
             ytdlp: YtDlpConfig {
                 program: env_string("YTDLP_PATH").unwrap_or_else(|| "yt-dlp".to_owned()),
                 timeout: Duration::from_millis(parse_env("YTDLP_TIMEOUT_MS", 15_000)?),
@@ -128,6 +126,16 @@ fn env_string(name: &str) -> Option<String> {
     let value = env::var(name).ok()?;
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_owned())
+}
+
+/// A path that defaults to `default` when unset. Unlike the other settings,
+/// set-but-empty means "off" here.
+fn optional_path(name: &str, default: &str) -> Option<PathBuf> {
+    match env::var(name) {
+        Ok(path) if path.trim().is_empty() => None,
+        Ok(path) => Some(PathBuf::from(path.trim())),
+        Err(_) => Some(PathBuf::from(default)),
+    }
 }
 
 fn parse_env<T>(name: &'static str, default: T) -> Result<T, ConfigError>

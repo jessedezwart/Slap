@@ -133,8 +133,9 @@ pub struct TallyPlayed {
 impl EventHandler for TallyPlayed {
     async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
         if let EventContext::Track(states) = ctx {
-            for (state, _) in *states {
-                self.played.record(state.play_time);
+            for (state, handle) in *states {
+                self.played
+                    .record(state.play_time, &handle.data::<QueueEntry>());
             }
         }
         None

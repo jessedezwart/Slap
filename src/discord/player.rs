@@ -9,13 +9,21 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 use twilight_model::{
-    channel::Message,
+    channel::{Message, message::Component},
     id::{Id, marker::GuildMarker},
 };
 
 pub use self::buttons::{Action, button_action};
-use self::task::{PlayerTask, delete_player};
-use crate::bot::BotContext;
+use self::{
+    task::{PlayerTask, delete_player},
+    view::View,
+};
+use crate::{bot::BotContext, history::GuildSummary};
+
+/// The message the Stats button answers with.
+pub fn stats_message(summary: &GuildSummary) -> Vec<Component> {
+    View::stats(summary).components
+}
 
 pub async fn start(
     state: Arc<BotContext>,

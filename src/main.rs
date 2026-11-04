@@ -2,6 +2,7 @@ mod audio;
 mod bot;
 mod config;
 mod discord;
+mod history;
 mod media;
 mod session;
 

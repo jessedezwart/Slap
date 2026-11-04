@@ -19,6 +19,7 @@ use super::{
     text::{code_line, format_duration, link},
 };
 use crate::{
+    history::{GuildSummary, Ranked},
     media::PLAYLIST_LIMIT,
     session::{Control, Origin, PlayStats, QueueEntry},
 };
@@ -170,8 +171,65 @@ impl View {
                 text("### Playback stopped".into()),
                 separator(),
                 text(summary),
+                Component::ActionRow(ActionRow {
+                    id: None,
+                    components: vec![button(Action::Stats, false)],
+                }),
             ],
         )
+    }
+
+    /// What the guild has played over all sessions.
+    pub fn stats(summary: &GuildSummary) -> Self {
+        let mut components = vec![text("### Server stats".into()), separator()];
+        if summary.sessions == 0 && summary.tracks == 0 {
+            components.push(text("Nothing has been played in this server yet.".into()));
+            return Self::container(ACCENT_PLAYING, components);
+        }
+        let tracks = match summary.tracks {
+            1 => "`1` track".to_owned(),
+            tracks => format!("`{tracks}` tracks"),
+        };
+        let sessions = match summary.sessions {
+            1 => "`1` session".to_owned(),
+            sessions => format!("`{sessions}` sessions"),
+        };
+        components.push(text(format!(
+            "Played {tracks} for `{}` across {sessions}.",
+            format_duration(summary.duration)
+        )));
+
+        let ranked = |heading: &str, entries: &[Ranked]| {
+            let mut content = format!("**{heading}**");
+            for (position, entry) in (1..).zip(entries) {
+                let _ = write!(
+                    content,
+                    "\n{position}. {} · `{}×`",
+                    link(&entry.label, entry.url.as_ref()),
+                    entry.count
+                );
+            }
+            content
+        };
+        let mut sections = Vec::new();
+        if !summary.top_tracks.is_empty() {
+            sections.push(ranked("Most played tracks", &summary.top_tracks));
+        }
+        if !summary.top_playlists.is_empty() {
+            sections.push(ranked("Most played playlists", &summary.top_playlists));
+        }
+        if !summary.top_starters.is_empty() {
+            let mut content = "**Most sessions started**".to_owned();
+            for (position, (user, count)) in (1..).zip(&summary.top_starters) {
+                let _ = write!(content, "\n{position}. <@{user}> · `{count}×`");
+            }
+            sections.push(content);
+        }
+        if !sections.is_empty() {
+            components.push(separator());
+            components.push(text(sections.join("\n\n")));
+        }
+        Self::container(ACCENT_PLAYING, components)
     }
 
     fn container(accent: u32, components: Vec<Component>) -> Self {
@@ -276,6 +334,7 @@ fn buttons(empty: bool, paused: bool) -> Component {
             button(Action::Control(Control::Skip), empty),
             button(Action::Control(Control::Stop), false),
             button(Action::OpenForm, false),
+            button(Action::Stats, false),
         ],
     })
 }

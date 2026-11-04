@@ -11,6 +11,7 @@ use crate::session::Control;
 pub enum Action {
     OpenForm,
     Control(Control),
+    Stats,
 }
 
 /// A button the player can show.
@@ -23,7 +24,7 @@ struct PlayerButton {
 
 /// Every player button. Drawing the buttons and reading presses back both use
 /// this table, so the two cannot drift apart.
-const BUTTONS: [PlayerButton; 5] = [
+const BUTTONS: [PlayerButton; 6] = [
     PlayerButton {
         action: Action::Control(Control::Pause),
         custom_id: "player:pause",
@@ -54,6 +55,12 @@ const BUTTONS: [PlayerButton; 5] = [
         custom_id: "player:add",
         label: "Add",
         emoji: "➕",
+    },
+    PlayerButton {
+        action: Action::Stats,
+        custom_id: "player:stats",
+        label: "Stats",
+        emoji: "📊",
     },
 ];
 

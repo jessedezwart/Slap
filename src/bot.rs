@@ -16,6 +16,7 @@ use crate::{
     audio::source::AudioContext,
     config::Config,
     discord::{connection::Discord, gateway::run_shard},
+    history::PlayHistory,
     media::{
         importer::Importer,
         search_cache::SearchCache,
@@ -38,6 +39,8 @@ pub struct BotContext {
     pub audio: Arc<AudioContext>,
     /// The least time between redraws for the progress bar alone.
     pub progress_interval: Duration,
+    /// All-time play stats per guild, if enabled.
+    pub history: Option<Arc<PlayHistory>>,
     pub application_id: Id<ApplicationMarker>,
     pub user_id: Id<UserMarker>,
 }
@@ -76,8 +79,16 @@ impl Bot {
         ));
         info!("created songbird instance");
 
+        // Create the play history
+        let history = config
+            .stats_path
+            .as_deref()
+            .and_then(PlayHistory::open_or_skip);
+        info!(enabled = history.is_some(), "created play history");
+
         // Create the session manager
-        let sessions = SessionManager::new(Arc::clone(&songbird), config.idle_timeout);
+        let sessions =
+            SessionManager::new(Arc::clone(&songbird), config.idle_timeout, history.clone());
 
         // Create the search cache
         let search_cache = config
@@ -113,6 +124,7 @@ impl Bot {
                 buffer: config.buffer,
             }),
             progress_interval: config.progress_interval,
+            history,
             application_id: bot_application_id,
             user_id: bot_user_id,
         });
