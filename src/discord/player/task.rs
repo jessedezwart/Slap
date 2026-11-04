@@ -34,7 +34,7 @@ pub(super) struct PlayerTask {
 
 /// Why the task stopped updating the message.
 enum Stop {
-    /// The session ended: delete the message.
+    /// The session ended: leave the message summing up what played.
     Ended,
     /// The message is gone or out of reach: nothing is left to update.
     Gone,
@@ -58,7 +58,7 @@ impl PlayerTask {
 
     pub async fn run(self) {
         match self.follow().await {
-            Stop::Ended => delete_player(&self.state, self.channel_id, self.message_id).await,
+            Stop::Ended => self.stopped().await,
             // Releasing if gone is necessary because the session is still active, but the message is not.
             Stop::Gone => {
                 self.state
@@ -158,6 +158,16 @@ impl PlayerTask {
             total.saturating_sub(1),
             self.session.channel_id,
         )))
+    }
+
+    async fn stopped(&self) {
+        let view = View::stopped(self.session.played.stats());
+        // If the summary can't be shown, delete the message.
+        if let Err(EditError::Failed) =
+            edit(&self.state, self.channel_id, self.message_id, &view).await
+        {
+            delete_player(&self.state, self.channel_id, self.message_id).await;
+        }
     }
 }
 

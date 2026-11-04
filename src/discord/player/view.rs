@@ -20,7 +20,7 @@ use super::{
 };
 use crate::{
     media::PLAYLIST_LIMIT,
-    session::{Control, Origin, QueueEntry},
+    session::{Control, Origin, PlayStats, QueueEntry},
 };
 
 /// Upcoming tracks the player lists.
@@ -138,6 +138,28 @@ impl View {
                 .and_then(|duration| next_step(info.position, duration)),
             ..Self::container(status.accent(), components)
         }
+    }
+
+    pub fn stopped(stats: PlayStats) -> Self {
+        let summary = match stats.tracks {
+            0 => "Nothing was played.".into(),
+            1 => format!(
+                "Played `1` track for `{}`.",
+                format_duration(stats.duration)
+            ),
+            tracks => format!(
+                "Played `{tracks}` tracks for `{}`.",
+                format_duration(stats.duration)
+            ),
+        };
+        Self::container(
+            ACCENT_IDLE,
+            vec![
+                text("### Playback stopped".into()),
+                separator(),
+                text(summary),
+            ],
+        )
     }
 
     fn container(accent: u32, components: Vec<Component>) -> Self {

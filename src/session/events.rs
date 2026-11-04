@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use twilight_model::id::{Id, marker::GuildMarker};
 
-use super::{QueueEntry, SessionManager, queue::prefetch_next};
+use super::{PlayTally, QueueEntry, SessionManager, queue::prefetch_next};
 
 /// Replace the call's global events with this session's handlers.
 pub fn attach(
@@ -21,6 +21,7 @@ pub fn attach(
     sessions: Weak<SessionManager>,
     cancel: &CancellationToken,
     redraw: &Arc<Notify>,
+    played: &Arc<PlayTally>,
 ) {
     // Events are set explicitly
     call.remove_all_global_events();
@@ -49,6 +50,13 @@ pub fn attach(
             },
         );
     }
+    // Tally every track as it ends; errored tracks fire End too
+    call.add_global_event(
+        TrackEvent::End.into(),
+        TallyPlayed {
+            played: Arc::clone(played),
+        },
+    );
     // Look up the next track whenever one starts playing
     let queue = call.queue().clone();
     call.add_global_event(TrackEvent::Play.into(), PrefetchNext { queue });
@@ -110,6 +118,23 @@ impl EventHandler for TrackEventHandler {
                     let title = entry.metadata.display_title();
                     warn!(guild_id = %self.guild_id, title, %error, "track failed; queue will advance");
                 }
+            }
+        }
+        None
+    }
+}
+
+/// Adds each ended track to the session's tally.
+pub struct TallyPlayed {
+    pub played: Arc<PlayTally>,
+}
+
+#[async_trait::async_trait]
+impl EventHandler for TallyPlayed {
+    async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
+        if let EventContext::Track(states) = ctx {
+            for (state, _) in *states {
+                self.played.record(state.play_time);
             }
         }
         None

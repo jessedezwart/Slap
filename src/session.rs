@@ -4,6 +4,7 @@ mod events;
 mod idle;
 mod ownership;
 mod queue;
+mod stats;
 
 use std::{
     sync::{
@@ -26,7 +27,11 @@ use twilight_model::id::{
 pub use self::{
     ownership::Control,
     queue::{Origin, Prefetch, QueueEntry, QueueHead, QueueMode},
+    stats::{PlayStats, PlayTally},
 };
+
+/// How long teardown waits for the current track's play time.
+const PLAY_TIME_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Clone)]
 pub struct GuildSession {
@@ -34,6 +39,8 @@ pub struct GuildSession {
     pub cancel: CancellationToken,
     /// Wakes the player task to redraw.
     pub redraw: Arc<Notify>,
+    /// What this session has played, complete once `cancel` fires.
+    pub played: Arc<PlayTally>,
     /// The message showing this session's player, once one has claimed it.
     pub player_component_id: Option<Id<MessageMarker>>,
 }
@@ -136,6 +143,7 @@ impl SessionManager {
         let cancel = CancellationToken::new();
         // Create notification for a render of the player component
         let redraw = Arc::new(Notify::new());
+        let played = Arc::new(PlayTally::default());
 
         // Create the call
         let call = self.songbird.get_or_insert(guild_id);
@@ -146,7 +154,14 @@ impl SessionManager {
 
             // Set to deafen for privacy and bitrate
             call.deafen(true).await?;
-            events::attach(&mut call, guild_id, Arc::downgrade(self), &cancel, &redraw);
+            events::attach(
+                &mut call,
+                guild_id,
+                Arc::downgrade(self),
+                &cancel,
+                &redraw,
+                &played,
+            );
             // Lock goes out of scope and is dropped
         }
 
@@ -154,6 +169,7 @@ impl SessionManager {
             channel_id,
             cancel: cancel.clone(),
             redraw,
+            played,
             player_component_id: None,
         });
 
@@ -204,9 +220,24 @@ impl SessionManager {
             return;
         };
 
+        let call = self.songbird.get(guild_id);
+        // Count the track being cut off before the player task, woken by the cancel, reads the tally.
+        let current = match &call {
+            Some(call) => call.lock().await.queue().current(),
+            None => None,
+        };
+        let playing = match current {
+            Some(track) => match tokio::time::timeout(PLAY_TIME_TIMEOUT, track.get_info()).await {
+                Ok(Ok(info)) => Some(info.play_time),
+                _ => None,
+            },
+            None => None,
+        };
+        session.played.finish(playing);
+
         session.cancel.cancel();
 
-        if let Some(call) = self.songbird.get(guild_id) {
+        if let Some(call) = call {
             let mut call = call.lock().await;
 
             call.queue().stop();

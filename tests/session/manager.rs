@@ -24,6 +24,7 @@ async fn insert(
         channel_id: channel,
         cancel: cancel.clone(),
         redraw: Arc::new(Notify::new()),
+        played: Arc::default(),
         player_component_id: message,
     });
     cancel
