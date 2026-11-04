@@ -51,6 +51,9 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             asset: slap-linux-x86_64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            asset: slap-linux-aarch64
           - os: macos-latest
             target: aarch64-apple-darwin
             asset: slap-macos-aarch64
@@ -74,8 +77,9 @@ jobs:
           sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
           # Otherwise C deps (Opus via CMake) build and link against glibc,
           # pulling glibc's libm.a into the musl binary.
-          echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc" >> "$GITHUB_ENV"
+          target=$(echo "${{ matrix.target }}" | tr - _)
+          echo "CC_${target}=musl-gcc" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_${target^^}_LINKER=musl-gcc" >> "$GITHUB_ENV"
 
       # Windows links the static CRT via .cargo/config.toml.
       - name: Build
