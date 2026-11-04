@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use songbird::{Config as SongbirdConfig, Songbird, shards::TwilightMap};
 use tokio::task::JoinHandle;
@@ -36,6 +36,8 @@ pub struct BotContext {
     pub importer: Importer,
     /// What every queued track needs to fetch its audio.
     pub audio: Arc<AudioContext>,
+    /// The least time between redraws for the progress bar alone.
+    pub progress_interval: Duration,
     pub application_id: Id<ApplicationMarker>,
     pub user_id: Id<UserMarker>,
 }
@@ -110,6 +112,7 @@ impl Bot {
                 url_resolver: resolver,
                 buffer: config.buffer,
             }),
+            progress_interval: config.progress_interval,
             application_id: bot_application_id,
             user_id: bot_user_id,
         });
@@ -150,7 +153,7 @@ impl Bot {
         state.player_tasks.close();
         // Wait till player tasks are finished or timeout.
         let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(12),
+            Duration::from_secs(12),
             state.player_tasks.wait(),
         )
         .await;

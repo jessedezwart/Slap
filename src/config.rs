@@ -25,6 +25,8 @@ pub struct Config {
     pub buffer: Duration,
     /// Leave the voice channel after nothing has played for this long.
     pub idle_timeout: Duration,
+    /// The least time between redraws for the progress bar alone.
+    pub progress_interval: Duration,
     /// Where the search cache lives. `CACHE_PATH=` disables it.
     pub search_cache_path: Option<PathBuf>,
 }
@@ -105,6 +107,7 @@ impl Config {
             },
             buffer: Duration::from_millis(parse_env("BUFFER_MS", 2_000)?),
             idle_timeout: Duration::from_secs(parse_env("IDLE_TIMEOUT_SECS", 300)?),
+            progress_interval: Duration::from_secs(parse_env("PROGRESS_MIN_INTERVAL_SECS", 5)?),
         })
     }
 }

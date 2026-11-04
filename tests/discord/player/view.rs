@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::UNIX_EPOCH};
+use std::sync::Arc;
 
 use twilight_model::channel::message::component::{Button, ButtonStyle};
 
@@ -51,41 +51,41 @@ fn buttons_of(view: &View) -> Vec<&Button> {
 }
 
 #[test]
-fn static_position_handles_unknown_zero_and_overrun() {
-    assert_eq!(
-        static_duration(Duration::from_secs(10), Some(Duration::from_secs(300))),
-        "`0:10 / 5:00`"
-    );
-    assert_eq!(
-        static_duration(Duration::from_secs(90), Some(Duration::from_secs(60))),
-        "`1:00 / 1:00`"
-    );
+fn progress_bar_handles_unknown_zero_and_overrun() {
+    let progress_of = |position, duration: u64| {
+        progress(
+            Duration::from_secs(position),
+            Some(Duration::from_secs(duration)),
+        )
+    };
+    assert_eq!(progress_of(0, 60), bar(0, "1:00"));
+    assert_eq!(progress_of(30, 60), bar(20, "1:00"));
+    assert_eq!(progress_of(90, 60), bar(39, "1:00"));
     for duration in [None, Some(Duration::ZERO)] {
-        assert_eq!(static_duration(Duration::from_secs(30), duration), "`0:30`");
+        assert_eq!(progress(Duration::from_secs(30), duration), "`Live`");
     }
 }
 
+/// A 40-cell bar with the knob on cell `knob`.
+fn bar(knob: usize, length: &str) -> String {
+    format!("`{}●{} {length}`", "━".repeat(knob), "─".repeat(39 - knob))
+}
+
 #[test]
-fn playing_tracks_count_down_on_their_own() {
-    let now = UNIX_EPOCH + Duration::from_secs(1_000);
-    let playing = |duration| progress(Status::Playing, Duration::from_secs(30), duration, now);
+fn progress_steps_once_per_cell() {
+    let minute = Duration::from_secs(60);
+    // 40 cells over a minute is a cell every 1.5s.
     assert_eq!(
-        playing(Some(Duration::from_secs(60))),
-        "`1:00` · ends <t:1030:R>"
+        next_step(Duration::ZERO, minute),
+        Some(Duration::from_millis(1_500))
     );
-    for duration in [None, Some(Duration::ZERO)] {
-        assert_eq!(playing(duration), "Started <t:970:R>");
-    }
-    // A paused track is not going anywhere, so it shows the plain position.
     assert_eq!(
-        progress(
-            Status::Paused,
-            Duration::from_secs(30),
-            Some(Duration::from_secs(60)),
-            now
-        ),
-        "`0:30 / 1:00`"
+        next_step(Duration::from_secs(2), minute),
+        Some(Duration::from_secs(1))
     );
+    // On the last cell the bar has nowhere left to go.
+    assert_eq!(next_step(Duration::from_millis(58_500), minute), None);
+    assert_eq!(next_step(minute * 2, minute), None);
 }
 
 #[test]
@@ -112,38 +112,27 @@ fn paused_views_are_stable_and_titles_are_bounded() {
         ready: ReadyState::Playable,
         ..Default::default()
     };
-    let view = View::playing(&metadata, &info, &[], 500, channel, UNIX_EPOCH);
+    let view = View::playing(&metadata, &info, &[], 500, channel);
     let content = texts(&view.components);
     assert!(content.starts_with("### Paused"));
     assert!(!content.contains("@everyone"));
     assert!(content.contains("From **[Late Night](<https://www.youtube.com/playlist?list=PL1>)**"));
     assert!(content.contains("Added by <@30>"));
     assert!(content.contains("<#20>"));
-    assert!(content.contains("`0:30 / 1:00`\n"));
+    assert!(content.contains(&format!("{}\n", bar(20, "1:00"))));
+    // A paused track is not going anywhere, so it needs no redraws.
+    assert_eq!(view.next_step, None);
     // No upcoming tracks were fetched, so there is nothing to list.
     assert!(content.contains("**Up next**\n"));
     // The track's own import notice, not the player's.
     assert!(content.contains("-# Skipped 2 unavailable entries.\n"));
     assert!(content.chars().count() < 1000);
-    assert_eq!(
-        view,
-        View::playing(&metadata, &info, &[], 500, channel, UNIX_EPOCH)
-    );
+    assert_eq!(view, View::playing(&metadata, &info, &[], 500, channel));
     let buttons = buttons_of(&view);
     assert_eq!(buttons[0].custom_id.as_deref(), Some("player:resume"));
     assert!(
-        texts(
-            &View::playing(
-                &metadata,
-                &TrackState::default(),
-                &[],
-                0,
-                channel,
-                UNIX_EPOCH
-            )
-            .components
-        )
-        .starts_with("### Loading…")
+        texts(&View::playing(&metadata, &TrackState::default(), &[], 0, channel,).components)
+            .starts_with("### Loading…")
     );
 }
 
@@ -189,7 +178,6 @@ fn thumbnails_and_links_only_accept_https() {
         &[],
         0,
         Id::new(1),
-        UNIX_EPOCH,
     );
     let Component::Container(container) = &view.components[0] else {
         panic!()
@@ -206,14 +194,7 @@ fn thumbnails_and_links_only_accept_https() {
         webpage_url: Some("http://example.com".parse().unwrap()),
         ..metadata
     };
-    let view = View::playing(
-        &entry(metadata),
-        &TrackState::default(),
-        &[],
-        0,
-        Id::new(1),
-        UNIX_EPOCH,
-    );
+    let view = View::playing(&entry(metadata), &TrackState::default(), &[], 0, Id::new(1));
     let Component::Container(container) = &view.components[0] else {
         panic!()
     };

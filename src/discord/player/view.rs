@@ -1,10 +1,6 @@
 //! What the player message looks like.
 
-use std::{
-    fmt::Write as _,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{fmt::Write as _, sync::Arc, time::Duration};
 
 use songbird::tracks::{PlayMode, ReadyState, TrackState};
 use twilight_model::{
@@ -31,6 +27,8 @@ use crate::{
 pub(super) const UP_NEXT_LEN: usize = 5;
 /// Characters kept of each "Up next" line.
 const UP_NEXT_LINE_LEN: usize = 80;
+/// Cells in the progress bar, the knob included.
+const PROGRESS_BAR_LEN: u32 = 40;
 
 const ACCENT_PLAYING: u32 = 0x8B5CF6;
 const ACCENT_PAUSED: u32 = 0xF0B232;
@@ -39,6 +37,8 @@ const ACCENT_IDLE: u32 = 0x80848E;
 #[derive(Debug, PartialEq)]
 pub(super) struct View {
     pub components: Vec<Component>,
+    /// How long until the progress bar's knob moves on its own, if it does.
+    pub next_step: Option<Duration>,
 }
 
 /// The headline of a playing view.
@@ -87,7 +87,6 @@ impl View {
         next: &[Arc<QueueEntry>],
         upcoming: usize,
         voice_channel: Id<ChannelMarker>,
-        now: SystemTime,
     ) -> Self {
         let metadata = &entry.metadata;
         let status = Status::of(info);
@@ -124,7 +123,7 @@ impl View {
             text(format!("### {}", status.label())),
             separator(),
             details,
-            text(progress(status, info.position, metadata.duration, now)),
+            text(progress(info.position, metadata.duration)),
             separator(),
             text(up_next(next, upcoming)),
         ];
@@ -133,7 +132,12 @@ impl View {
             components.push(text(format!("-# {notice}")));
         }
         components.push(buttons(false, status == Status::Paused));
-        Self::container(status.accent(), components)
+        Self {
+            next_step: known_length(metadata.duration)
+                .filter(|_| status == Status::Playing)
+                .and_then(|duration| next_step(info.position, duration)),
+            ..Self::container(status.accent(), components)
+        }
     }
 
     pub fn empty() -> Self {
@@ -168,6 +172,7 @@ impl View {
                 spoiler: None,
                 components,
             })],
+            next_step: None,
         }
     }
 }
@@ -215,41 +220,35 @@ fn import_notice(origin: &Origin) -> Option<String> {
     (!notice.is_empty()).then(|| notice.join(" "))
 }
 
-fn progress(
-    status: Status,
-    position: Duration,
-    duration: Option<Duration>,
-    now: SystemTime,
-) -> String {
-    if status != Status::Playing {
-        return static_duration(position, duration);
-    }
-    let now = now.duration_since(UNIX_EPOCH).unwrap_or_default();
-    match duration.filter(|duration| !duration.is_zero()) {
-        Some(duration) => {
-            // Calculate end time based on current position and total duration
-            let end = now + duration.saturating_sub(position);
-            format!(
-                "`{}` · ends <t:{}:R>",
-                format_duration(duration),
-                end.as_secs()
-            )
-        }
-        // Live streams have no end to count down to.
-        None => format!("Started <t:{}:R>", now.saturating_sub(position).as_secs()),
-    }
-}
-
-/// A position that is not moving, against the length when it is known.
-fn static_duration(position: Duration, duration: Option<Duration>) -> String {
-    let Some(duration) = duration.filter(|duration| !duration.is_zero()) else {
-        return format!("`{}`", format_duration(position));
+/// The position on a bar against the length. The position is not written out, as it is only as fresh as the last redraw.
+fn progress(position: Duration, duration: Option<Duration>) -> String {
+    // Live streams have no end to measure against.
+    let Some(duration) = known_length(duration) else {
+        return "`Live`".into();
     };
+    let knob = knob(position, duration);
     format!(
-        "`{} / {}`",
-        format_duration(position.min(duration)),
+        "`{}●{} {}`",
+        "━".repeat(knob as usize),
+        "─".repeat((PROGRESS_BAR_LEN - 1 - knob) as usize),
         format_duration(duration)
     )
+}
+
+/// The cell the knob sits on. Each cell stands for an equal share of the track.
+fn knob(position: Duration, duration: Duration) -> u32 {
+    let cell = position.as_millis() * u128::from(PROGRESS_BAR_LEN) / duration.as_millis();
+    cell.min(u128::from(PROGRESS_BAR_LEN - 1)) as u32
+}
+
+/// How long until the knob moves to the next cell, or `None` once it is on the last.
+fn next_step(position: Duration, duration: Duration) -> Option<Duration> {
+    let next = knob(position, duration) + 1;
+    (next < PROGRESS_BAR_LEN).then(|| (duration * next / PROGRESS_BAR_LEN).saturating_sub(position))
+}
+
+fn known_length(duration: Option<Duration>) -> Option<Duration> {
+    duration.filter(|duration| !duration.is_zero())
 }
 
 fn buttons(empty: bool, paused: bool) -> Component {

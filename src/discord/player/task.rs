@@ -1,9 +1,6 @@
 //! The task that keeps a player message current until its session ends.
 
-use std::{
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{sync::Arc, time::Duration};
 
 use tokio::time;
 use tracing::warn;
@@ -25,7 +22,8 @@ use crate::{
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the driver gets to report a track's state.
 const INFO_TIMEOUT: Duration = Duration::from_secs(1);
-
+/// Slack past the moment the progress bar's knob is due to move.
+const STEP_MARGIN: Duration = Duration::from_millis(250);
 pub(super) struct PlayerTask {
     state: Arc<BotContext>,
     guild_id: Id<GuildMarker>,
@@ -71,23 +69,35 @@ impl PlayerTask {
         }
     }
 
-    /// Redraw on every change until the session ends or the message is gone.
+    /// Redraw on every change, and whenever the progress bar moves, until the session ends or the message is gone.
     async fn follow(&self) -> Stop {
         loop {
-            if let Err(stop) = self.redraw().await {
-                return stop;
-            }
+            let next_step = match self.redraw().await {
+                Ok(next_step) => next_step,
+                Err(stop) => return stop,
+            };
+            let tick = async {
+                match next_step {
+                    // Land just past the step, so the knob has moved by the time of the redraw.
+                    Some(step) => {
+                        time::sleep((step + STEP_MARGIN).max(self.state.progress_interval)).await;
+                    }
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 biased;
                 () = self.session.cancel.cancelled() => return Stop::Ended,
                 () = self.session.redraw.notified() => {},
+                () = tick => {},
             }
         }
     }
 
-    async fn redraw(&self) -> Result<(), Stop> {
+    /// How long until the drawn progress bar moves on its own, if it does.
+    async fn redraw(&self) -> Result<Option<Duration>, Stop> {
         let Some(view) = self.render().await? else {
-            return Ok(());
+            return Ok(None);
         };
         if self.session.cancel.is_cancelled() {
             return Err(Stop::Ended);
@@ -95,7 +105,7 @@ impl PlayerTask {
         match edit(&self.state, self.channel_id, self.message_id, &view).await {
             Err(EditError::Gone) => Err(Stop::Gone),
             // A failed edit is not fatal.
-            Ok(()) | Err(EditError::Failed) => Ok(()),
+            Ok(()) | Err(EditError::Failed) => Ok(view.next_step),
         }
     }
 
@@ -138,7 +148,6 @@ impl PlayerTask {
             &next,
             total.saturating_sub(1),
             self.session.channel_id,
-            SystemTime::now(),
         )))
     }
 
