@@ -151,13 +151,11 @@ fn up_next_lists_requesters_and_bounded_titles() {
         "**Up next** · `12` queued\n```\nAda: Song 1\nAda: Song 2\n```"
     );
     assert_eq!(up_next(&[], 0), "**Up next**\n-# Nothing else is queued.");
-    let next = vec![
-        Arc::new(entry(Metadata {
-            title: Some("```\n".repeat(100)),
-            ..Metadata::default()
-        }));
-        5
-    ];
+    let fence = Arc::new(entry(Metadata {
+        title: Some("```\n".repeat(100)),
+        ..Metadata::default()
+    }));
+    let next = vec![fence; 5];
     // Titles can neither add lines nor close the block early.
     let content = up_next(&next, 5);
     assert_eq!(content.lines().count(), 8);
