@@ -1,0 +1,10 @@
+#!/bin/sh
+# Enable with: git config core.hooksPath .githooks
+set -e
+
+if ! cargo fmt --check > /dev/null; then
+  echo "pre-commit: code is not formatted, run 'cargo fmt'" >&2
+  exit 1
+fi
+
+cargo clippy --all-targets --locked -- -D warnings

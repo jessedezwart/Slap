@@ -87,6 +87,12 @@ git clone https://github.com/jessedezwart/Slap
 cargo run --release
 ```
 
+To check formatting and clippy before each commit:
+
+```powershell
+git config core.hooksPath .githooks
+```
+
 ## Configuration
 
 All configuration settings are documented in `.env.example`. Copy that file to `.env`.

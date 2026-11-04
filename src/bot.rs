@@ -152,10 +152,6 @@ impl Bot {
 
         state.player_tasks.close();
         // Wait till player tasks are finished or timeout.
-        let _ = tokio::time::timeout(
-            Duration::from_secs(12),
-            state.player_tasks.wait(),
-        )
-        .await;
+        let _ = tokio::time::timeout(Duration::from_secs(12), state.player_tasks.wait()).await;
     }
 }
