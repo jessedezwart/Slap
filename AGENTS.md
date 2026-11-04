@@ -1,3 +1,3 @@
-- No builds or tests, only `cargo check` and `cargo clippy`.
+- No builds or tests, only `cargo check`, `cargo clippy` and `cargo fmt`.
 - Don't stage changes.
 - Prefer the edit-tool over CLI for editing.

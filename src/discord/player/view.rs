@@ -140,29 +140,6 @@ impl View {
         }
     }
 
-    pub fn empty() -> Self {
-        Self::container(
-            ACCENT_IDLE,
-            vec![
-                text("### Queue finished".into()),
-                separator(),
-                text("Press Add to queue more music, or Stop to disconnect.".into()),
-                buttons(true, false),
-            ],
-        )
-    }
-
-    pub fn stopped() -> Self {
-        Self::container(
-            ACCENT_IDLE,
-            vec![
-                text("### Playback stopped".into()),
-                separator(),
-                text("The queue is cleared and I left the voice channel.".into()),
-            ],
-        )
-    }
-
     fn container(accent: u32, components: Vec<Component>) -> Self {
         Self {
             components: vec![Component::Container(Container {

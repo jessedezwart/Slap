@@ -54,6 +54,23 @@ impl SessionManager {
         }
     }
 
+    /// Tear the session down if its queue has run out.
+    pub async fn leave_if_finished(&self, guild_id: Id<GuildMarker>, cancel: &CancellationToken) {
+        // Checked under the session lock, so a concurrent /play cannot be torn down.
+        let mut session = self.lock(guild_id).await;
+        if still_current(&session, cancel).is_none() {
+            return;
+        }
+        let finished = match self.songbird.get(guild_id) {
+            Some(call) => call.lock().await.queue().is_empty(),
+            None => true,
+        };
+        if finished {
+            self.teardown_locked(guild_id, &mut session, "queue finished")
+                .await;
+        }
+    }
+
     /// Nothing queued, or the current track is paused.
     async fn is_idle(&self, guild_id: Id<GuildMarker>) -> bool {
         let Some(call) = self.songbird.get(guild_id) else {

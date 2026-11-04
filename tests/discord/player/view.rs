@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use twilight_model::channel::message::component::{Button, ButtonStyle};
+use twilight_model::channel::message::component::Button;
 
 use super::*;
-use crate::{discord::player::button_action, media::Metadata, session::Prefetch};
+use crate::{media::Metadata, session::Prefetch};
 
 /// A queue entry for `metadata`, queued by user 30 (Ada) outside any playlist.
 fn entry(metadata: Metadata) -> QueueEntry {
@@ -203,18 +203,4 @@ fn thumbnails_and_links_only_accept_https() {
             .any(|component| matches!(component, Component::Section(_)))
     );
     assert!(texts(&view.components).contains("**Song**"));
-}
-
-#[test]
-fn controls_disable_for_empty_queues() {
-    let view = View::empty();
-    for (button, disabled) in buttons_of(&view)
-        .into_iter()
-        .zip([true, true, false, false])
-    {
-        assert_eq!(button.disabled, disabled);
-        assert_eq!(button.style, ButtonStyle::Secondary);
-        assert!(button.emoji.is_some());
-        assert!(button_action(button.custom_id.as_deref().unwrap()).is_some());
-    }
 }

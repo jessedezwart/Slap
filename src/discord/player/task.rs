@@ -34,7 +34,7 @@ pub(super) struct PlayerTask {
 
 /// Why the task stopped updating the message.
 enum Stop {
-    /// The session ended: leave the message saying so.
+    /// The session ended: delete the message.
     Ended,
     /// The message is gone or out of reach: nothing is left to update.
     Gone,
@@ -58,7 +58,7 @@ impl PlayerTask {
 
     pub async fn run(self) {
         match self.follow().await {
-            Stop::Ended => self.stopped().await,
+            Stop::Ended => delete_player(&self.state, self.channel_id, self.message_id).await,
             // Releasing if gone is necessary because the session is still active, but the message is not.
             Stop::Gone => {
                 self.state
@@ -119,7 +119,16 @@ impl PlayerTask {
         let QueueHead { tracks, total } = head.ok_or(Stop::Ended)?;
         let mut tracks = tracks.into_iter();
         let Some(track) = tracks.next() else {
-            return Ok(Some(View::empty()));
+            self.state
+                .sessions
+                .leave_if_finished(self.guild_id, cancel)
+                .await;
+            // A concurrent /play may have refilled the queue; it gets drawn on the next redraw.
+            return if cancel.is_cancelled() {
+                Err(Stop::Ended)
+            } else {
+                Ok(None)
+            };
         };
 
         let info = tokio::select! {
@@ -149,21 +158,6 @@ impl PlayerTask {
             total.saturating_sub(1),
             self.session.channel_id,
         )))
-    }
-
-    async fn stopped(&self) {
-        // Try to edit the player to say the session ended.
-        let result = edit(
-            &self.state,
-            self.channel_id,
-            self.message_id,
-            &View::stopped(),
-        )
-        .await;
-        // If can't edit, delete the message.
-        if let Err(EditError::Failed) = result {
-            delete_player(&self.state, self.channel_id, self.message_id).await;
-        }
     }
 }
 
