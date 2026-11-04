@@ -38,8 +38,14 @@ impl SpotifyService {
         let import = tokio::time::timeout(IMPORT_TIMEOUT, import)
             .await
             .map_err(|_| SpotifyError::Timeout)??;
-        info!(?link, name = import.playlist_name.as_deref(), tracks = import.tracks.len(),
-            skipped = import.skipped, truncated = import.truncated, "Spotify import finished");
+        info!(
+            ?link,
+            name = import.playlist_name.as_deref(),
+            tracks = import.tracks.len(),
+            skipped = import.skipped,
+            truncated = import.truncated,
+            "Spotify import finished"
+        );
         Ok(import)
     }
 

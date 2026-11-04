@@ -74,8 +74,11 @@ impl YtDlpResolver {
                 self.remember(query, &resolved).await;
                 return Ok(resolved);
             }
-            debug!(source = source.name(), title = resolved.metadata.title.as_deref(),
-                "search result has the wrong duration");
+            debug!(
+                source = source.name(),
+                title = resolved.metadata.title.as_deref(),
+                "search result has the wrong duration"
+            );
         }
         warn!(query = ?text, "no search result matched");
         Err(MediaError::NoMatch(text))
@@ -102,7 +105,10 @@ impl YtDlpResolver {
         }
         let output = self.client.video_json(input).await?;
         let resolved = parse::parse_stream(&output)?;
-        info!(title = resolved.metadata.title.as_deref(), "audio source resolved");
+        info!(
+            title = resolved.metadata.title.as_deref(),
+            "audio source resolved"
+        );
         // Without an expiry there is no telling when the URL stops working.
         if resolved.expires_at.is_some() {
             self.streams.retain(|_, stream| stream.is_fresh());

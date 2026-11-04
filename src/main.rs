@@ -9,11 +9,7 @@ use std::process::ExitCode;
 
 use tokio::signal;
 use tracing::{error, info, warn};
-use tracing_subscriber::{
-    EnvFilter,
-    field::MakeExt,
-    fmt::format::debug_fn,
-};
+use tracing_subscriber::{EnvFilter, field::MakeExt, fmt::format::debug_fn};
 
 use crate::{bot::Bot, config::Config};
 
@@ -66,7 +62,10 @@ fn main() -> ExitCode {
         .build()
     {
         Ok(runtime) => {
-            info!(workers = runtime.metrics().num_workers(), "started tokio runtime");
+            info!(
+                workers = runtime.metrics().num_workers(),
+                "started tokio runtime"
+            );
             runtime
         }
         Err(error) => {

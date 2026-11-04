@@ -147,8 +147,11 @@ impl RangedDownload {
         }
 
         if received == 0 {
-            warn!(offset = self.offset, expected_bytes = self.file.content_length,
-                "audio response made no progress");
+            warn!(
+                offset = self.offset,
+                expected_bytes = self.file.content_length,
+                "audio response made no progress"
+            );
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "empty partial audio response before end of file",

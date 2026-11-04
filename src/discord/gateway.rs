@@ -79,8 +79,11 @@ fn handle_event(state: &Arc<BotContext>, event: Event) {
             reconcile_voice(Arc::clone(state), guild_id);
         }
         Event::Ready(ready) => {
-            info!(shard = ready.shard.map(|shard| shard.number()), guilds = ready.guilds.len(),
-                "shard ready");
+            info!(
+                shard = ready.shard.map(|shard| shard.number()),
+                guilds = ready.guilds.len(),
+                "shard ready"
+            );
         }
         Event::Resumed => info!("shard resumed"),
         Event::GatewayClose(frame) => {

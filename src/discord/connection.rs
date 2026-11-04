@@ -35,17 +35,26 @@ impl Discord {
                 .build(),
         );
 
-        let bot_application_id = twilight_client.current_user_application().await?.model().await?.id;
+        let bot_application_id = twilight_client
+            .current_user_application()
+            .await?
+            .model()
+            .await?
+            .id;
         let bot_user_id = twilight_client.current_user().await?.model().await?.id;
 
         info!(%bot_application_id, %bot_user_id, "authenticated");
 
         // Register play command
         let commands = [interactions::play_command()];
-        twilight_client.interaction(bot_application_id)
+        twilight_client
+            .interaction(bot_application_id)
             .set_global_commands(&commands)
             .await?;
-        let names: Vec<_> = commands.iter().map(|command| command.name.as_str()).collect();
+        let names: Vec<_> = commands
+            .iter()
+            .map(|command| command.name.as_str())
+            .collect();
         info!(commands = ?names, "registered commands");
 
         let gateway_config = GatewayConfig::new(token, INTENTS);
