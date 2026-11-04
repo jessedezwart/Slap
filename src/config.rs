@@ -47,12 +47,23 @@ impl SpotifyConfig {
             env_string("SPOTIFY_CLIENT_ID"),
             env_string("SPOTIFY_CLIENT_SECRET"),
         ) {
-            (None, None) if refresh_token.is_none() => Ok(None),
-            (Some(client_id), Some(client_secret)) => Ok(Some(Self {
-                client_id,
-                client_secret,
-                refresh_token,
-            })),
+            (None, None) if refresh_token.is_none() => {
+                warn!("no Spotify credentials configured; Spotify links will be rejected");
+                Ok(None)
+            }
+            (Some(client_id), Some(client_secret)) => {
+                if refresh_token.is_none() {
+                    warn!(
+                        "no SPOTIFY_REFRESH_TOKEN configured; \
+                         playlists will be cut off after 100 tracks or may be unreadable"
+                    );
+                }
+                Ok(Some(Self {
+                    client_id,
+                    client_secret,
+                    refresh_token,
+                }))
+            }
             (None, _) => Err(ConfigError::Missing("SPOTIFY_CLIENT_ID")),
             (_, None) => Err(ConfigError::Missing("SPOTIFY_CLIENT_SECRET")),
         }
