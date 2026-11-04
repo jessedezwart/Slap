@@ -55,6 +55,8 @@ pub(super) fn prefetch_next(queue: &TrackQueue) {
 pub struct Origin {
     pub requester: Id<UserMarker>,
     pub requester_name: String,
+    /// What was passed to /play.
+    pub query: String,
     /// The link imported, or `None` for a search.
     pub url: Option<Url>,
     pub playlist_name: Option<String>,
@@ -104,6 +106,9 @@ impl SessionManager {
         // Queue the tracks
         let count = tracks.len();
         let was_playing = !call.queue().is_empty();
+        if let Some((_, first)) = tracks.first() {
+            session.played.start(first);
+        }
 
         for (input, entry) in tracks {
             let preload = entry

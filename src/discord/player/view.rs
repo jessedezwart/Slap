@@ -27,6 +27,8 @@ use crate::{
 pub(super) const UP_NEXT_LEN: usize = 5;
 /// Characters kept of each "Up next" line.
 const UP_NEXT_LINE_LEN: usize = 80;
+/// Characters kept of the query that started the session.
+const STARTED_QUERY_LEN: usize = 200;
 /// Cells in the progress bar, the knob included.
 const PROGRESS_BAR_LEN: u32 = 40;
 
@@ -81,11 +83,13 @@ impl Status {
 
 impl View {
     /// `next` is the front of the `upcoming` tracks, at most [`UP_NEXT_LEN`].
+    /// `ended` is how many tracks this session has finished, so `entry` is number `ended + 1`.
     pub fn playing(
         entry: &QueueEntry,
         info: &TrackState,
         next: &[Arc<QueueEntry>],
         upcoming: usize,
+        ended: usize,
         voice_channel: Id<ChannelMarker>,
     ) -> Self {
         let metadata = &entry.metadata;
@@ -125,7 +129,7 @@ impl View {
             details,
             text(progress(info.position, metadata.duration)),
             separator(),
-            text(up_next(next, upcoming)),
+            text(up_next(next, upcoming, ended + 2)),
         ];
         // Add notice if exists
         if let Some(notice) = import_notice(origin) {
@@ -140,8 +144,8 @@ impl View {
         }
     }
 
-    pub fn stopped(stats: PlayStats) -> Self {
-        let summary = match stats.tracks {
+    pub fn stopped(stats: &PlayStats) -> Self {
+        let mut summary = match stats.tracks {
             0 => "Nothing was played.".into(),
             1 => format!(
                 "Played `1` track for `{}`.",
@@ -152,6 +156,14 @@ impl View {
                 format_duration(stats.duration)
             ),
         };
+        if let Some(started) = &stats.started_with {
+            let _ = write!(
+                summary,
+                "\nPlayback was started with {}.\n-# Use `/play query:{}` to play again.",
+                link(&started.label, started.url.as_ref()),
+                code_line(&started.query, Some(STARTED_QUERY_LEN))
+            );
+        }
         Self::container(
             ACCENT_IDLE,
             vec![
@@ -188,14 +200,15 @@ fn separator() -> Component {
     })
 }
 
-fn up_next(next: &[Arc<QueueEntry>], upcoming: usize) -> String {
+/// `first` is the session-wide position of the first track in `next`.
+fn up_next(next: &[Arc<QueueEntry>], upcoming: usize, first: usize) -> String {
     if upcoming == 0 || next.is_empty() {
         return "**Up next**\n-# Nothing else is queued.".into();
     }
     let mut content = format!("**Up next** · `{upcoming}` queued\n```");
-    for entry in next {
+    for (position, entry) in (first..).zip(next) {
         let line = format!(
-            "{}: {}",
+            "{position}. {}: {}",
             entry.origin.requester_name,
             entry.metadata.display_title()
         );

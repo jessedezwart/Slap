@@ -12,6 +12,7 @@ fn entry(metadata: Metadata) -> QueueEntry {
         origin: Arc::new(Origin {
             requester: Id::new(30),
             requester_name: "Ada".into(),
+            query: String::new(),
             url: Some("https://youtu.be/x".parse().unwrap()),
             playlist_name: None,
             skipped: 0,
@@ -95,6 +96,7 @@ fn paused_views_are_stable_and_titles_are_bounded() {
         origin: Arc::new(Origin {
             requester: Id::new(30),
             requester_name: "Ada".into(),
+            query: String::new(),
             url: Some("https://www.youtube.com/playlist?list=PL1".parse().unwrap()),
             playlist_name: Some("Late Night".into()),
             skipped: 2,
@@ -112,7 +114,7 @@ fn paused_views_are_stable_and_titles_are_bounded() {
         ready: ReadyState::Playable,
         ..Default::default()
     };
-    let view = View::playing(&metadata, &info, &[], 500, channel);
+    let view = View::playing(&metadata, &info, &[], 500, 0, channel);
     let content = texts(&view.components);
     assert!(content.starts_with("### Paused"));
     assert!(!content.contains("@everyone"));
@@ -127,11 +129,11 @@ fn paused_views_are_stable_and_titles_are_bounded() {
     // The track's own import notice, not the player's.
     assert!(content.contains("-# Skipped 2 unavailable entries.\n"));
     assert!(content.chars().count() < 1000);
-    assert_eq!(view, View::playing(&metadata, &info, &[], 500, channel));
+    assert_eq!(view, View::playing(&metadata, &info, &[], 500, 0, channel));
     let buttons = buttons_of(&view);
     assert_eq!(buttons[0].custom_id.as_deref(), Some("player:resume"));
     assert!(
-        texts(&View::playing(&metadata, &TrackState::default(), &[], 0, channel,).components)
+        texts(&View::playing(&metadata, &TrackState::default(), &[], 0, 0, channel,).components)
             .starts_with("### Loading…")
     );
 }
@@ -147,17 +149,20 @@ fn up_next_lists_requesters_and_bounded_titles() {
         })
         .collect();
     assert_eq!(
-        up_next(&next, 12),
-        "**Up next** · `12` queued\n```\nAda: Song 1\nAda: Song 2\n```"
+        up_next(&next, 12, 6),
+        "**Up next** · `12` queued\n```\n6. Ada: Song 1\n7. Ada: Song 2\n```"
     );
-    assert_eq!(up_next(&[], 0), "**Up next**\n-# Nothing else is queued.");
+    assert_eq!(
+        up_next(&[], 0, 2),
+        "**Up next**\n-# Nothing else is queued."
+    );
     let fence = Arc::new(entry(Metadata {
         title: Some("```\n".repeat(100)),
         ..Metadata::default()
     }));
     let next = vec![fence; 5];
     // Titles can neither add lines nor close the block early.
-    let content = up_next(&next, 5);
+    let content = up_next(&next, 5, 2);
     assert_eq!(content.lines().count(), 8);
     assert_eq!(content.matches("```").count(), 2);
 }
@@ -174,6 +179,7 @@ fn thumbnails_and_links_only_accept_https() {
         &entry(metadata.clone()),
         &TrackState::default(),
         &[],
+        0,
         0,
         Id::new(1),
     );
@@ -192,7 +198,14 @@ fn thumbnails_and_links_only_accept_https() {
         webpage_url: Some("http://example.com".parse().unwrap()),
         ..metadata
     };
-    let view = View::playing(&entry(metadata), &TrackState::default(), &[], 0, Id::new(1));
+    let view = View::playing(
+        &entry(metadata),
+        &TrackState::default(),
+        &[],
+        0,
+        0,
+        Id::new(1),
+    );
     let Component::Container(container) = &view.components[0] else {
         panic!()
     };

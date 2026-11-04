@@ -63,6 +63,7 @@ pub(super) async fn play(
     let origin = Arc::new(Origin {
         requester: user_id,
         requester_name: user_name,
+        query: query.to_owned(),
         url: match input {
             Input::Link(url) => Some(url),
             Input::Search(_) => None,

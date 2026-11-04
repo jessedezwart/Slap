@@ -156,12 +156,13 @@ impl PlayerTask {
             &info,
             &next,
             total.saturating_sub(1),
+            self.session.played.ended(),
             self.session.channel_id,
         )))
     }
 
     async fn stopped(&self) {
-        let view = View::stopped(self.session.played.stats());
+        let view = View::stopped(&self.session.played.stats());
         // If the summary can't be shown, delete the message.
         if let Err(EditError::Failed) =
             edit(&self.state, self.channel_id, self.message_id, &view).await
